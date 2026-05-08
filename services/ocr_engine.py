@@ -2,37 +2,37 @@ import os
 from PIL import Image
 from typing import List, Dict, Any
 from core.logger import logger
-from surya.ocr import run_ocr
-from surya.model.detection.model import load_model as load_det_model, load_processor as load_det_processor
-from surya.model.recognition.model import load_model as load_rec_model
-from surya.model.recognition.processor import load_processor as load_rec_processor
+from surya.foundation import FoundationPredictor
+from surya.recognition import RecognitionPredictor
+from surya.detection import DetectionPredictor
 
 # Global variables to cache the loaded models
-_det_model = None
-_det_processor = None
-_rec_model = None
-_rec_processor = None
+_foundation_predictor = None
+_detection_predictor = None
+_recognition_predictor = None
 
 def load_models_if_needed():
-    global _det_model, _det_processor, _rec_model, _rec_processor
-    if _det_model is None:
-        logger.info("Lazy loading Surya OCR detection models...")
-        _det_processor = load_det_processor()
-        _det_model = load_det_model()
-        logger.info("Detection models loaded.")
+    global _foundation_predictor, _detection_predictor, _recognition_predictor
+    if _foundation_predictor is None:
+        logger.info("Lazy loading Surya Foundation Predictor...")
+        _foundation_predictor = FoundationPredictor()
+        logger.info("Foundation Predictor loaded.")
+        
+    if _detection_predictor is None:
+        logger.info("Lazy loading Surya Detection Predictor...")
+        _detection_predictor = DetectionPredictor()
+        logger.info("Detection Predictor loaded.")
     
-    if _rec_model is None:
-        logger.info("Lazy loading Surya OCR recognition models...")
-        _rec_processor = load_rec_processor()
-        _rec_model = load_rec_model()
-        logger.info("Recognition models loaded.")
+    if _recognition_predictor is None:
+        logger.info("Lazy loading Surya Recognition Predictor...")
+        _recognition_predictor = RecognitionPredictor(_foundation_predictor)
+        logger.info("Recognition Predictor loaded.")
 
 def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, Any]:
     load_models_if_needed()
-    logger.info(f"Running Surya OCR with languages: {langs}")
+    logger.info("Running Surya OCR (v0.17.1)")
     
-    # run_ocr expects lists of images and lists of langs
-    predictions = run_ocr([image], [langs], _det_model, _det_processor, _rec_model, _rec_processor)
+    predictions = _recognition_predictor([image], det_predictor=_detection_predictor)
     
     if not predictions:
         return {"text": "", "blocks": []}
@@ -44,7 +44,7 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     blocks = [
         {
             "text": line.text,
-            "bbox": line.bbox,
+            "polygon": line.polygon,
             "confidence": getattr(line, "confidence", None)
         }
         for line in result.text_lines
