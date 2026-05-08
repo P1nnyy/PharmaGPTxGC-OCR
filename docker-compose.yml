@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  ocr-api:
+    build: .
+    image: pharmagpt-ocr-api:latest
+    container_name: ocr_api_container
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./datasets:/workspace/datasets
+      - .:/workspace  # Optional: to allow hot-reloading if you run uvicorn with --reload
+    environment:
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
