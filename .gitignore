@@ -5,6 +5,17 @@ __pycache__/
 .env
 datasets/
 
+# Verification workspace generated artifacts (keep scripts/ README)
+verification/debug_outputs/
+verification/visualizations/
+verification/benchmark_reports/
+verification/temp/
+verification/comparisons/
+*.png
+*.jpg
+*.jpeg
+*.json
+
 # Export scripts
 # scripts/export_codebase.py
 # scripts/export_codebase.sh
