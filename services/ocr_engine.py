@@ -1,5 +1,6 @@
 import os
-from PIL import Image
+from PIL import Image, ImageOps
+import numpy as np
 from typing import List, Dict, Any
 from core.logger import logger
 from surya.foundation import FoundationPredictor
@@ -30,8 +31,57 @@ def load_models_if_needed():
 
 def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, Any]:
     load_models_if_needed()
+    
+    # 1. Orientation Normalization
+    try:
+        original_size = image.size
+        image = ImageOps.exif_transpose(image)
+        if image.size != original_size:
+            logger.info("Detected coarse orientation from EXIF.")
+            logger.info("Applying orientation normalization (rotated).")
+        else:
+            # If we wanted to add OpenCV/contour rotation fallback here, we would.
+            # For now, EXIF handles the vast majority of mobile captures.
+            pass
+    except Exception as e:
+        logger.error(f"Error during orientation normalization: {e}")
+        
     logger.info("Running Surya OCR (v0.17.1)")
     
+    # 2. Adaptive Resolution Upscaling
+    # Run coarse detection first to measure token height
+    upscaled = False
+    det_results = _detection_predictor([image])
+    
+    if det_results:
+        # Check what detection outputs. It typically has 'bboxes' or 'polygons'
+        boxes = getattr(det_results[0], 'bboxes', None)
+        polys = getattr(det_results[0], 'polygons', None)
+        
+        heights = []
+        if boxes:
+            for bbox in boxes:
+                # bbox is usually [x0, y0, x1, y1]
+                heights.append(bbox[3] - bbox[1])
+        elif polys:
+            for poly in polys:
+                ys = [pt[1] for pt in poly]
+                heights.append(max(ys) - min(ys))
+                
+        if heights:
+            median_height = np.median(heights)
+            logger.info(f"Median text height: {median_height:.1f}px")
+            
+            if median_height < 15.0:
+                logger.info(f"Applying adaptive upscale factor: 2x (Dense Table detected)")
+                new_size = (image.width * 2, image.height * 2)
+                image = image.resize(new_size, Image.LANCZOS)
+                upscaled = True
+                # Re-run detection on the new high-res image
+                det_results = _detection_predictor([image])
+
+    # 3. Run Recognition
+    # If we upscaled, we pass the upscaled image and the new detection boxes
     predictions = _recognition_predictor([image], det_predictor=_detection_predictor)
     
     if not predictions:
@@ -41,14 +91,20 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     
     full_text = "\n".join([line.text for line in result.text_lines])
     
-    blocks = [
-        {
+    blocks = []
+    for line in result.text_lines:
+        poly = line.polygon
+        
+        # If we upscaled the image, we must downscale the coordinates back to the original geometry scale
+        # so that downstream processes (and bounding box drawing) align with the original input image.
+        if upscaled:
+            poly = [[pt[0] / 2.0, pt[1] / 2.0] for pt in poly]
+            
+        blocks.append({
             "text": line.text,
-            "polygon": line.polygon,
+            "polygon": poly,
             "confidence": getattr(line, "confidence", None)
-        }
-        for line in result.text_lines
-    ]
+        })
     
     return {
         "text": full_text,

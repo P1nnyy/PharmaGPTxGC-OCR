@@ -21,6 +21,7 @@ class GeometryBox(BaseModel):
 
 class OCRBlock(BaseModel):
     id: Optional[str] = None
+    raw_text: str = ""
     text: str = ""
     polygon: List[Tuple[float, float]] = Field(default_factory=list)
     original_geometry: Optional[GeometryBox] = None

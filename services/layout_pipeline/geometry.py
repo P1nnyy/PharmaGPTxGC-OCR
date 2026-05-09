@@ -1,13 +1,19 @@
+import re
 from typing import Dict, Any, List
 from models.layout_models import OCRBlock, GeometryBox
 
 def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
     """
     Computes initial bounding box geometry from an OCR polygon and returns a typed OCRBlock.
+    Also sanitizes OCR text of HTML/markup.
     """
     polygon = block_data.get("polygon", [])
-    text = block_data.get("text", "")
+    raw_text = block_data.get("text", "")
     block_id = block_data.get("id")
+    
+    # Text Sanitization
+    clean_text = re.sub(r"<[^>]+>", "", raw_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
     
     if not polygon or len(polygon) < 3:
         geom = GeometryBox(
@@ -17,7 +23,8 @@ def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
         )
         return OCRBlock(
             id=block_id,
-            text=text,
+            raw_text=raw_text,
+            text=clean_text,
             polygon=polygon,
             original_geometry=geom,
             normalized_geometry=geom.model_copy()
@@ -40,7 +47,8 @@ def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
     
     return OCRBlock(
         id=block_id,
-        text=text,
+        raw_text=raw_text,
+        text=clean_text,
         polygon=polygon,
         original_geometry=geom,
         normalized_geometry=geom.model_copy()

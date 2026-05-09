@@ -47,6 +47,10 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
                 
             if block.normalized_geometry:
                 geom = block.normalized_geometry
+                assert geom.max_x >= geom.min_x, f"Invalid block X ordering: {geom.min_x} to {geom.max_x}"
+                assert geom.max_y >= geom.min_y, f"Invalid block Y ordering: {geom.min_y} to {geom.max_y}"
+                assert np.isfinite([geom.min_x, geom.max_x, geom.min_y, geom.max_y]).all(), "NaN/Inf in block geometry"
+                
                 pt1 = (int(geom.min_x), int(geom.min_y))
                 pt2 = (int(geom.max_x), int(geom.max_y))
                 cv2.rectangle(canvas, pt1, pt2, COLOR_NORMALIZED_BBOX, 1)
@@ -64,6 +68,10 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
         for region in regions:
             if region.geometry:
                 rg = region.geometry
+                assert rg.max_x >= rg.min_x, f"Invalid region X ordering: {rg.min_x} to {rg.max_x}"
+                assert rg.max_y >= rg.min_y, f"Invalid region Y ordering: {rg.min_y} to {rg.max_y}"
+                assert np.isfinite([rg.min_x, rg.max_x, rg.min_y, rg.max_y]).all(), "NaN/Inf in region geometry"
+                
                 pt1 = (int(rg.min_x), int(rg.min_y))
                 pt2 = (int(rg.max_x), int(rg.max_y))
                 cv2.rectangle(canvas, pt1, pt2, COLOR_TABLE, 3)

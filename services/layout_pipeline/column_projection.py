@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Tuple
 from models.layout_models import OCRBlock
+from core.logger import logger
 
 def get_anchor_x(block: OCRBlock) -> float:
     """
@@ -22,13 +23,14 @@ def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float
     if not blocks:
         return []
         
-    heights = []
+    char_widths = []
     for b in blocks:
-        if b.normalized_geometry:
-            heights.append(b.normalized_geometry.max_y - b.normalized_geometry.min_y)
+        if b.normalized_geometry and len(b.text) > 0:
+            char_width = (b.normalized_geometry.max_x - b.normalized_geometry.min_x) / len(b.text)
+            char_widths.append(char_width)
             
-    median_height = float(np.median(heights)) if heights else 0.0
-    gap_threshold = 1.5 * median_height if median_height > 0 else 50.0
+    median_char_width = float(np.median(char_widths)) if char_widths else 10.0
+    MAX_COLUMN_GAP_PX = median_char_width * 1.5
 
     anchors = [get_anchor_x(b) for b in blocks if get_anchor_x(b) > 0]
     anchors.sort()
@@ -36,15 +38,18 @@ def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float
     if not anchors:
         return []
         
-    # Find gaps > gap_threshold to define sparse column clusters
+    # Find gaps > MAX_COLUMN_GAP_PX to define sparse column clusters
     clusters = []
     current_cluster = [anchors[0]]
     for x in anchors[1:]:
-        if x - current_cluster[-1] > gap_threshold:
+        gap_x = x - current_cluster[-1]
+        if gap_x > MAX_COLUMN_GAP_PX:
+            logger.info(f"Forced sparse split at gap_x={gap_x:.1f}px (threshold: {MAX_COLUMN_GAP_PX:.1f}px)")
             clusters.append(current_cluster)
             current_cluster = [x]
         else:
             current_cluster.append(x)
+            
     if current_cluster:
         clusters.append(current_cluster)
         
