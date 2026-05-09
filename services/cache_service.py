@@ -1,13 +1,14 @@
 import hashlib
 import json
 import os
+from typing import Optional
 from core.config import settings
 from core.logger import logger
 
 def compute_md5(file_bytes: bytes) -> str:
     return hashlib.md5(file_bytes).hexdigest()
 
-def get_cached_result(invoice_id: str) -> dict | None:
+def get_cached_result(invoice_id: str) -> Optional[dict]:
     if not settings.ENABLE_CACHE:
         return None
         
