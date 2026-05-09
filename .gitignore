@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .env
 datasets/
+
+# Export scripts
+# scripts/export_codebase.py
+# scripts/export_codebase.sh
