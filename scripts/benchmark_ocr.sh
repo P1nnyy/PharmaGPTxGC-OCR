@@ -5,7 +5,7 @@
 
 IMAGE_DIR="./test_images"
 RESULTS_DIR="./results"
-API_URL="http://localhost:8000/upload-invoice"
+API_URL="http://localhost:8000/upload-invoice?reconstruct=true"
 
 # Ensure results directory exists
 mkdir -p "$RESULTS_DIR"
