@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from core.logger import logger
 from models.schemas import HealthResponse, OCRResponse
-from services import cache_service, ocr_engine
+from services import cache_service, ocr_engine, spatial_reconstruction
 from PIL import Image
 import io
 import torch
@@ -21,7 +21,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...)):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
         
@@ -33,11 +33,17 @@ async def upload_invoice(file: UploadFile = File(...)):
         
         cached_result = cache_service.get_cached_result(invoice_id)
         if cached_result:
+            blocks = cached_result.get("blocks", [])
+            metadata = {"blocks": blocks}
+            if reconstruct:
+                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True)
+                metadata.update(reconstruction_data)
+                
             return OCRResponse(
                 invoice_id=invoice_id,
                 cached=True,
                 text=cached_result.get("text", ""),
-                metadata={"blocks": cached_result.get("blocks", [])}
+                metadata=metadata
             )
             
         image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
@@ -45,11 +51,17 @@ async def upload_invoice(file: UploadFile = File(...)):
         
         cache_service.save_result(invoice_id, ocr_result)
         
+        blocks = ocr_result.get("blocks", [])
+        metadata = {"blocks": blocks}
+        if reconstruct:
+            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True)
+            metadata.update(reconstruction_data)
+        
         return OCRResponse(
             invoice_id=invoice_id,
             cached=False,
-            text=ocr_result["text"],
-            metadata={"blocks": ocr_result["blocks"]}
+            text=ocr_result.get("text", ""),
+            metadata=metadata
         )
         
     except Exception as e:
