@@ -54,19 +54,18 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     det_results = _detection_predictor([image])
     
     if det_results:
-        # Check what detection outputs. It typically has 'bboxes' or 'polygons'
         boxes = getattr(det_results[0], 'bboxes', None)
-        polys = getattr(det_results[0], 'polygons', None)
-        
         heights = []
         if boxes:
-            for bbox in boxes:
-                # bbox is usually [x0, y0, x1, y1]
-                heights.append(bbox[3] - bbox[1])
-        elif polys:
-            for poly in polys:
-                ys = [pt[1] for pt in poly]
-                heights.append(max(ys) - min(ys))
+            for box in boxes:
+                # Use dot notation to access the polygon list from the PolygonBox object
+                polygon = getattr(box, 'polygon', None)
+                if polygon:
+                    min_y = min(p[1] for p in polygon)
+                    max_y = max(p[1] for p in polygon)
+                    heights.append(max_y - min_y)
+                elif isinstance(box, (list, tuple)) and len(box) >= 4:
+                    heights.append(box[3] - box[1])
                 
         if heights:
             median_height = np.median(heights)
