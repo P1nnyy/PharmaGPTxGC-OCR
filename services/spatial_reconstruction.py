@@ -18,7 +18,7 @@ def get_engine(mode: str):
     else:
         return HeuristicTSREngine()
 
-def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "heuristic") -> Dict[str, Any]:
+def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
     Orchestrates OCR geometry preservation, TSR grid detection, and Cell Mapping.
@@ -42,17 +42,21 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     if reconstruct_mode == "compare":
         logger.info("Running in compare mode. Executing multiple engines.")
         heuristic_engine = HeuristicTSREngine()
-        tatr_engine = TATR_TSREngine()
+        pp_engine = PPStructure_TSREngine()
         
         heuristic_regions = heuristic_engine.detect_tables(ocr_blocks)
-        tatr_regions = tatr_engine.detect_tables(ocr_blocks)
+        pp_regions = pp_engine.detect_tables(ocr_blocks, image=image)
         
         logger.info(f"[COMPARE] Heuristic detected {len(heuristic_regions)} tables.")
-        logger.info(f"[COMPARE] TATR detected {len(tatr_regions)} tables.")
-        table_regions = heuristic_regions # Default to heuristic for rest of pipeline
+        logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
+        table_regions = pp_regions # Default to ppstructure for rest of pipeline
     else:
         engine = get_engine(reconstruct_mode)
-        table_regions = engine.detect_tables(ocr_blocks)
+        # Handle heuristic engines that don't need image
+        if reconstruct_mode == "heuristic":
+            table_regions = engine.detect_tables(ocr_blocks)
+        else:
+            table_regions = engine.detect_tables(ocr_blocks, image=image)
     
     # Step 4: Cell Mapping (IoA)
     map_tokens_to_cells(ocr_blocks, table_regions)
@@ -63,18 +67,23 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     total_cols = sum(len(r.columns) for r in table_regions)
     
     mapped_tokens = set()
+    empty_cells = 0
     for r in table_regions:
         for c in r.cells:
             mapped_tokens.update(c.mapped_block_ids)
+            if not c.mapped_block_ids:
+                empty_cells += 1
             
     orphan_tokens = len(ocr_blocks) - len(mapped_tokens)
     ioa_success_rate = (len(mapped_tokens) / len(ocr_blocks) * 100) if ocr_blocks else 100.0
+    empty_cell_ratio = (empty_cells / total_cells * 100) if total_cells else 0.0
     
     logger.info(f"[Metrics] Detected Table Regions: {len(table_regions)}")
     logger.info(f"[Metrics] Total Rows: {total_rows}")
     logger.info(f"[Metrics] Total Columns: {total_cols}")
     logger.info(f"[Metrics] Total Cells: {total_cells}")
     logger.info(f"[Metrics] Orphan Tokens: {orphan_tokens}")
+    logger.info(f"[Metrics] Empty Cell Ratio: {empty_cell_ratio:.1f}%")
     logger.info(f"[Metrics] IoA Success Rate: {ioa_success_rate:.1f}%")
     
     # --- Debug Visualization ---
@@ -121,5 +130,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "reconstructed_rows": legacy_reconstructed_rows,
         "detected_table_rows": legacy_table_rows,
         "columns_extracted": True,
-        "structured_tables": structured_tables
+        "structured_tables": structured_tables,
+        "metrics": {
+            "table_count": len(table_regions),
+            "row_count": total_rows,
+            "col_count": total_cols,
+            "orphan_token_count": orphan_tokens,
+            "ioa_success_rate": ioa_success_rate,
+            "empty_cell_ratio": empty_cell_ratio
+        }
     }

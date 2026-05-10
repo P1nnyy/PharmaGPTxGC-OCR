@@ -90,6 +90,11 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
                     cg = cell.geometry
                     cv2.rectangle(canvas, (int(cg.min_x), int(cg.min_y)), (int(cg.max_x), int(cg.max_y)), COLOR_CELL, 1)
                     
+                    # Annotate cell ID
+                    text_label = f"{cell.row_id},{cell.col_id}"
+                    cv2.putText(canvas, text_label, (int(cg.min_x) + 2, int(cg.min_y) + 12), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, COLOR_CELL, 1)
+                    
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         # 5. Check cv2.imwrite success

@@ -43,12 +43,20 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> N
             if best_cell and best_ioa > 0.3: # Threshold for assignment
                 best_cell.mapped_block_ids.append(block.id)
                 
-        # Populate text for each cell based on mapped blocks (sorted by x-coordinate)
+        # Populate text for each cell based on mapped blocks (sorted by approximate reading order)
         for cell in region.cells:
             if not cell.mapped_block_ids:
                 continue
             
             cell_blocks = [b for b in blocks if b.id in cell.mapped_block_ids]
-            cell_blocks.sort(key=lambda b: b.normalized_geometry.min_x if b.normalized_geometry else 0)
+            
+            # Sort by approximate line (y_coord grouped by ~10 pixels), then by x_coord
+            # This ensures left-to-right, top-to-bottom reading order for multi-line cells.
+            def _sort_key(b):
+                if not b.normalized_geometry:
+                    return (0, 0)
+                return (round(b.normalized_geometry.min_y / 10), b.normalized_geometry.min_x)
+                
+            cell_blocks.sort(key=_sort_key)
             
             cell.text = " ".join([b.text for b in cell_blocks])

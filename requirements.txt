@@ -7,3 +7,5 @@ surya-ocr==0.17.1
 Pillow==10.3.0
 transformers==4.57.3
 opencv-python-headless==4.11.0.86
+paddlepaddle-gpu==2.6.1
+paddleocr==2.7.3

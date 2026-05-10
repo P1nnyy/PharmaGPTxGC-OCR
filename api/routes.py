@@ -21,7 +21,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "heuristic"):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure"):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
         
@@ -36,7 +36,8 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
             blocks = cached_result.get("blocks", [])
             metadata = {"blocks": blocks}
             if reconstruct:
-                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode)
+                image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode, image=image)
                 logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
                 metadata.update(reconstruction_data)
                 
@@ -55,7 +56,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         blocks = ocr_result.get("blocks", [])
         metadata = {"blocks": blocks}
         if reconstruct:
-            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode)
+            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode, image=image)
             logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
             metadata.update(reconstruction_data)
         
