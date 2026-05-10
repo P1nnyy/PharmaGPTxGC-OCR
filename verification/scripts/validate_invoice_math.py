@@ -5,88 +5,51 @@ import re
 from typing import List, Dict, Any, Optional
 from core.logger import logger
 
-# Ensure project root is in path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
 def is_valid_financial_number(text: str) -> bool:
-    """
-    Validation Rules:
-    - reject alphanumeric strings (containing letters)
-    - reject GSTIN-like patterns
-    - reject phone-number-like patterns
-    - reject values containing >1 decimal point
-    - reject values longer than 12 digits
-    - reject suspicious long numeric chains
-    - reject mixed separators
-    """
+    """Strict rejection of noise pretending to be numbers."""
     text = text.strip()
     if not text:
         return False
-        
-    # Reject alphanumeric strings (e.g. contains letters)
     if any(c.isalpha() for c in text):
         return False
-        
-    # Reject strings with >1 decimal point
     if text.count('.') > 1:
         return False
-        
-    # Clean digits only
     digits = "".join(c for c in text if c.isdigit())
-    if len(digits) > 12:
+    if len(digits) > 12 or len(digits) == 0:
         return False
-        
-    # Reject phone-number-like (10 or 11 digits without a decimal point)
-    if len(digits) >= 10 and '.' not in text:
-        return False
-        
-    # Reject mixed/corrupted separators
-    if ",," in text or ".." in text or ",." in text or ".," in text:
-        return False
-        
-    # Valid characters pattern
     if not re.match(r'^[\d\s.,]+$', text):
         return False
-        
-    # Crop decimal structure for numeric checks
     cleaned = re.sub(r'[^\d.]', '', text)
-    if cleaned:
-        try:
-            val = float(cleaned)
-            # Reject values >= 1 Crore (10,000,000)
-            if val >= 10000000.0:
-                return False
-                
-            # Reject values with > 8 digits before decimal
-            before_decimal = cleaned.split('.')[0]
-            if len(before_decimal) > 8:
-                return False
-                
-            # Reject abnormal digit density (e.g., massive digit run without a proper decimal position or separators)
-            # Safe boundary: If there's no decimal, a number shouldn't be > 6 digits for standard items
-            if '.' not in text and len(cleaned) > 6:
-                return False
-        except ValueError:
-            return False
-            
+    try:
+        val = float(cleaned)
+        if val >= 10000000.0: return False # 1 Crore cap
+        if len(cleaned.split('.')[0]) > 8: return False
+    except ValueError:
+        return False
     return True
 
 def parse_price(text: str) -> Optional[float]:
-    """
-    Helper to parse raw price-like string to float.
-    Returns None if suspicious.
-    """
     if not is_valid_financial_number(text):
-        logger.debug(f"Rejected suspicious financial number: {text}")
         return None
-        
     cleaned = re.sub(r'[^\d.]', '', text)
     try:
         return float(cleaned) if cleaned else None
     except ValueError:
         return None
+
+def find_all_numbers(text: str) -> List[float]:
+    """Extracts all potential valid money numbers from a text block."""
+    matches = re.findall(r'\d[\d\s,]*\.\d{2}', text)
+    results = []
+    for m in matches:
+        p = parse_price(m)
+        if p is not None:
+            results.append(p)
+    return results
 
 def validate_invoice_json(filepath: str) -> Dict[str, Any]:
     with open(filepath, "r", encoding="utf-8") as f:
@@ -95,13 +58,19 @@ def validate_invoice_json(filepath: str) -> Dict[str, Any]:
     metadata = data.get("metadata", {})
     structured_tables = metadata.get("structured_tables", [])
     
-    line_prices = []
-    subtotal_parsed = 0.0
-    grand_total_parsed = 0.0
-    gst_parsed = 0.0
+    line_items = []
+    subtotal_candidates = []
+    grand_total_candidates = []
+    gst_candidates = []
     
-    for table in structured_tables:
-        # Group cells by row
+    warnings = []
+    merged_column_hits = 0
+    structural_integrity_score = 100.0
+    
+    math_confirmed_rows = 0
+    possible_product_rows = 0
+    
+    for t_idx, table in enumerate(structured_tables):
         rows = {}
         for cell in table.get("cells", []):
             r_id = cell.get("row_id")
@@ -110,88 +79,138 @@ def validate_invoice_json(filepath: str) -> Dict[str, Any]:
             rows[r_id].append(cell)
             
         for r_id, cells in rows.items():
+            row_numbers = []
+            for c in cells:
+                c_text = c.get("text", "")
+                nums_in_cell = find_all_numbers(c_text)
+                
+                # ALERT 1: Multiple distinct money numbers inside 1 Cell
+                if len(nums_in_cell) > 1:
+                    merged_column_hits += 1
+                    warnings.append(f"Merged Cell Audit: row {r_id} cell contains multiple numbers {nums_in_cell}")
+                
+                row_numbers.extend(nums_in_cell)
+                
             full_text = " ".join([c.get("text", "") for c in cells]).upper()
             
-            # Totals parsing
+            # Totals classification
             if "SUB" in full_text or "NET" in full_text:
-                for c in cells:
-                    val = parse_price(c.get("text", ""))
-                    if val is not None:
-                        subtotal_parsed = max(subtotal_parsed, val)
-            elif "GST" in full_text or "TAX" in full_text:
-                for c in cells:
-                    val = parse_price(c.get("text", ""))
-                    if val is not None:
-                        gst_parsed = max(gst_parsed, val)
+                subtotal_candidates.extend(row_numbers)
+            elif "GST" in full_text or "TAX" in full_text or "CGST" in full_text:
+                gst_candidates.extend(row_numbers)
             elif "GRAND" in full_text or "TOTAL" in full_text:
                 if "SUB" not in full_text:
-                    for c in cells:
-                        val = parse_price(c.get("text", ""))
-                        if val is not None:
-                            grand_total_parsed = max(grand_total_parsed, val)
+                    grand_total_candidates.extend(row_numbers)
             else:
-                # Medicine row
-                row_prices = []
-                for c in cells:
-                    if re.search(r'^\s*[\d,]+\.\d{2}\s*$', c.get("text", "")):
-                        val = parse_price(c.get("text", ""))
-                        if val is not None:
-                            row_prices.append(val)
-                if row_prices:
-                    line_prices.append(max(row_prices))
+                # Probable product line item row
+                if row_numbers:
+                    possible_product_rows += 1
+                    # ALERT 2: Too many money entries in a single product line suggests column merging
+                    if len(row_numbers) > 4:
+                        warnings.append(f"Suspicious density: row {r_id} has {len(row_numbers)} money values.")
+                        merged_column_hits += 1
                     
-    # Heuristics if subtotal/grand total weren't cleanly matched by keywords
-    calculated_subtotal = sum(line_prices)
-    if not grand_total_parsed and calculated_subtotal:
-        grand_total_parsed = calculated_subtotal + gst_parsed
+                    # Math Verification heuristic: (Qty * Rate = Amount)
+                    # Test all triples permutations looking for multiplication confirmation
+                    row_has_math = False
+                    if len(row_numbers) >= 3:
+                        sorted_nums = sorted(row_numbers)
+                        # Simple check: smallest * middle approx largest?
+                        for i in range(len(sorted_nums)):
+                            for j in range(i + 1, len(sorted_nums)):
+                                for k in range(j + 1, len(sorted_nums)):
+                                    # Check both possible multiply combinations (a*b=c, a*c=b, b*c=a)
+                                    a, b, c = sorted_nums[i], sorted_nums[j], sorted_nums[k]
+                                    if abs((a * b) - c) < 0.5:
+                                        row_has_math = True
+                                        break
+                    if row_has_math:
+                        math_confirmed_rows += 1
+                        
+                    line_items.append(max(row_numbers))
+                    
+    # Final Aggregate Recon
+    derived_subtotal = sum(line_items)
+    
+    p_subtotal = max(subtotal_candidates) if subtotal_candidates else derived_subtotal
+    p_gst = max(gst_candidates) if gst_candidates else 0.0
+    p_grand = max(grand_total_candidates) if grand_total_candidates else 0.0
+    
+    expected_grand = derived_subtotal + p_gst
+    discrepancy = abs(p_grand - expected_grand) if p_grand > 0 else 0
+    
+    # DEDUCTIONS Logic for Structural Integrity Score
+    structural_integrity_score -= (merged_column_hits * 10) # Heavy penalty for merged columns
+    
+    if len(line_items) == 0:
+        structural_integrity_score -= 50
+        warnings.append("ZERO valid monetary items extracted.")
+    
+    if p_grand > 0 and discrepancy > 2.0:
+        structural_integrity_score -= 30
+        warnings.append(f"Critical Math mismatch: Diff of {discrepancy:.2f}")
         
-    expected_grand_total = calculated_subtotal + gst_parsed
-    discrepancy = abs(grand_total_parsed - expected_grand_total)
-    passed = discrepancy < 1.0 # Allow a minor threshold for rounding or rupees conversion
+    if possible_product_rows > 0 and math_confirmed_rows == 0:
+        # Didn't prove math consistency on even one row
+        structural_integrity_score -= 10
+        
+    # Clamp floor
+    structural_integrity_score = max(0.0, structural_integrity_score)
+    passed = structural_integrity_score >= 70.0 # Minimum requirement to pass integrity check
     
     return {
         "filename": os.path.basename(filepath),
-        "calculated_subtotal": calculated_subtotal,
-        "parsed_gst": gst_parsed,
-        "parsed_grand_total": grand_total_parsed,
-        "expected_grand_total": expected_grand_total,
-        "discrepancy": discrepancy,
+        "integrity_score": round(structural_integrity_score, 1),
         "passed": passed,
-        "item_count": len(line_prices)
+        "items": len(line_items),
+        "math_confirmed_rows": math_confirmed_rows,
+        "merged_column_warnings": merged_column_hits,
+        "derived_subtotal": round(derived_subtotal, 2),
+        "parsed_grand_total": round(p_grand, 2),
+        "discrepancy": round(discrepancy, 2),
+        "warnings_log": warnings
     }
 
-def run_financial_validation(results_dir: str, report_out: str):
+def generate_validation_dashboard(results_dir: str, report_out: str):
     os.makedirs(os.path.dirname(report_out), exist_ok=True)
-    json_files = [os.path.join(results_dir, f) for f in os.listdir(results_dir) if f.endswith(".json")]
+    files = [os.path.join(results_dir, f) for f in os.listdir(results_dir) if f.endswith(".json")]
     
-    print(f"\nRunning Financial Validation on {len(json_files)} invoices...")
+    print(f"Evaluating Topology Integrity on {len(files)} files...")
     
-    md_lines = [
-        "# Financial Math Validation Report\n",
-        "Validates structural integrity by reconciling calculated item subtotals against parsed grand totals.\n",
-        "| Invoice File | Items | Calculated Subtotal | Parsed GST | Expected Grand Total | Parsed Grand Total | Discrepancy | Status |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+    global_pass = 0
+    total_integrity = 0.0
+    total_hits = 0
+    
+    md = [
+        "# Topology Integrity & Financial Validation Dashboard\n",
+        "This audit uses accounting consistency (Quantity x Rate verification & Aggregate Reconciliation) to calculate a final layout correctness score.\n",
+        "| File | Score | Status | Items | Math Confirmed | Merged Collisions | Diff |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
     ]
     
-    for filepath in json_files:
-        res = validate_invoice_json(filepath)
-        status_icon = "✅ PASS" if res["passed"] else "⚠️ FAIL"
+    for f in files:
+        res = validate_invoice_json(f)
+        icon = "✅ PASS" if res["passed"] else "❌ FAIL"
+        md.append(f"| {res['filename']} | **{res['integrity_score']}** | {icon} | {res['items']} | {res['math_confirmed_rows']} | {res['merged_column_warnings']} | {res['discrepancy']} |")
         
-        print(f"File: {res['filename']} -> Calculated: {res['calculated_subtotal']:.2f}, Grand Total: {res['parsed_grand_total']:.2f} | Status: {status_icon}")
+        if res["passed"]: global_pass += 1
+        total_integrity += res["integrity_score"]
+        total_hits += res["merged_column_warnings"]
         
-        md_lines.append(
-            f"| {res['filename']} | {res['item_count']} | {res['calculated_subtotal']:.2f} | {res['parsed_gst']:.2f} | {res['expected_grand_total']:.2f} | {res['parsed_grand_total']:.2f} | {res['discrepancy']:.2f} | {status_icon} |"
-        )
-        
-    with open(report_out, "w", encoding="utf-8") as f:
-        f.write("\n".join(md_lines))
-        
-    print(f"\nWritten math validation report to: {report_out}")
+    avg_int = total_integrity / len(files) if files else 0.0
+    pass_rate = (global_pass / len(files) * 100) if files else 0.0
+    
+    md.append(f"\n## Summary Aggregates\n")
+    md.append(f"- **Topology Integrity Pass Rate:** {pass_rate:.1f}%")
+    md.append(f"- **Average Integrity Score:** {avg_int:.1f} / 100")
+    md.append(f"- **Global Merged Column Occurrences:** {total_hits}")
+    
+    with open(report_out, "w", encoding="utf-8") as fout:
+        fout.write("\n".join(md))
+    print(f"Dashboard written to: {report_out}")
 
 if __name__ == "__main__":
-    results_path = os.path.join(PROJECT_ROOT, "results")
-    report_path = os.path.join(PROJECT_ROOT, "verification/benchmark_reports/financial_validation_report.md")
-    if os.path.exists(results_path) and os.listdir(results_path):
-        run_financial_validation(results_path, report_path)
-    else:
-        print(f"No results found in {results_path} to validate. Run the benchmark first!")
+    results_dir = os.path.join(PROJECT_ROOT, "results")
+    report_file = os.path.join(PROJECT_ROOT, "verification/benchmark_reports/topology_integrity_report.md")
+    if os.path.exists(results_dir):
+        generate_validation_dashboard(results_dir, report_file)

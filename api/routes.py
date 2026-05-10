@@ -22,7 +22,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "heuristic", extract: bool = False):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure", extract: bool = False):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
         

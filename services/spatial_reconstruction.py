@@ -5,6 +5,9 @@ from utils.debug_visualizer import draw_debug_visualization
 from services.layout_pipeline.geometry import process_blocks
 from services.layout_pipeline.skew import apply_skew_normalization
 from services.layout_pipeline.ioa_mapping import map_tokens_to_cells
+from services.layout_pipeline.semantic_column_classifier import SemanticColumnClassifier
+from services.layout_pipeline.stability_engine import TopologyStabilityEngine
+from services.topology.column_stabilizer import ColumnStabilizer
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_tatr import TATR_TSREngine
@@ -18,7 +21,7 @@ def get_engine(mode: str):
     else:
         return HeuristicTSREngine()
 
-def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "heuristic", image: Any = None) -> Dict[str, Any]:
+def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
     Orchestrates OCR geometry preservation, TSR grid detection, and Cell Mapping.
@@ -98,8 +101,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         else:
             table_regions, tsr_metadata = engine.detect_tables(ocr_blocks, image=image)
     
-    # Step 4: Cell Mapping (IoA)
+    # Step 4: PRE-ASSIGNMENT Geometry Stabilization (geometry-only, no text dependency)
+    stabilizer = ColumnStabilizer()
+    repair_metrics_total = {"phantom_column_count": 0, "repaired_columns": 0, "semantic_column_drift": 0}
+    for tr in table_regions:
+        rep = stabilizer.stabilize_region(tr)
+        for k, v in rep.items():
+            repair_metrics_total[k] += v
+    
+    # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions)
+    
+    # Step 6: Semantic & Mathematical Stability Audits (ACTIVE SIGNAL GENERATION)
+    semantic_results = {}
+    classifier = SemanticColumnClassifier()
+    for tr in table_regions:
+        semantic_results[tr.table_id] = classifier.enrich_region_metadata(tr)
+        
+    stability_engine = TopologyStabilityEngine()
+    stability_metrics = stability_engine.compute_stability(table_regions)
+    
+    logger.info(f"Topology Confidence Check: Score={stability_metrics['stability_score']}, State={stability_metrics['state']}")
     
     # --- Metrics Logging ---
     total_cells = sum(len(r.cells) for r in table_regions)
@@ -125,6 +147,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     logger.info(f"[Metrics] Orphan Tokens: {orphan_tokens}")
     logger.info(f"[Metrics] Empty Cell Ratio: {empty_cell_ratio:.1f}%")
     logger.info(f"[Metrics] IoA Success Rate: {ioa_success_rate:.1f}%")
+    
+    # --- PPStructure Validation Warnings ---
+    for i, tr in enumerate(table_regions):
+        t_id = tr.table_id or f"table_{i}"
+        if not tr.columns:
+            logger.warning(f"[VALIDATION ALERT] Table '{t_id}' detected with ZERO columns!")
+        
+        seen_rows = set()
+        for r in tr.rows:
+            if r.row_id in seen_rows:
+                logger.warning(f"[VALIDATION ALERT] Duplicate Row ID detected in table '{t_id}': {r.row_id}")
+            seen_rows.add(r.row_id)
+            
+        seen_cols = set()
+        for c in tr.columns:
+            if c.col_id in seen_cols:
+                logger.warning(f"[VALIDATION ALERT] Duplicate Column ID detected in table '{t_id}': {c.col_id}")
+            seen_cols.add(c.col_id)
+            
+    if empty_cell_ratio > 60.0:
+        logger.warning(f"[VALIDATION ALERT] High sparsity threshold triggered: {empty_cell_ratio:.1f}% empty cells!")
     
     # --- Debug Visualization ---
     if debug and ocr_blocks:
@@ -205,6 +248,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "orphan_token_count": orphan_tokens,
             "ioa_success_rate": ioa_success_rate,
             "empty_cell_ratio": empty_cell_ratio,
+            "topology_stability": stability_metrics,
+            "column_semantic_cache": semantic_results,
+            "topology_repairs": repair_metrics_total,
             **tsr_metadata
         }
     }

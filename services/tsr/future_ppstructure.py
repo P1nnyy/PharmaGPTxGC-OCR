@@ -7,6 +7,58 @@ from typing import List, Tuple, Dict, Any
 from models.layout_models import OCRBlock, TableRegion, RowRegion, ColumnRegion, TableCell, GeometryBox, RegionType
 from services.tsr.base_tsr import BaseTSREngine
 from core.logger import logger
+from services.topology.topology_cleanup import TopologyCleaner
+
+def compute_stable_bands(intervals: List[Tuple[float, float]], overlap_thresh: float = 0.35) -> List[Tuple[float, float]]:
+    """
+    Derives non-overlapping unified 1D bands by merging highly overlapping coordinate intervals.
+    Prevents multi-line cells from generating duplicate cluster ids.
+    """
+    if not intervals:
+        return []
+    # Sort intervals by their center location to group adjacently
+    sorted_intervals = sorted(intervals, key=lambda x: (x[0] + x[1]) / 2.0)
+    
+    bands = []
+    curr_band = sorted_intervals[0]
+    
+    for nxt in sorted_intervals[1:]:
+        # Calculate Intersection over Min-Length ratio
+        ov_min = max(curr_band[0], nxt[0])
+        ov_max = min(curr_band[1], nxt[1])
+        intersect = max(0.0, float(ov_max - ov_min))
+        min_len = min(curr_band[1] - curr_band[0], nxt[1] - nxt[0])
+        
+        if min_len > 0 and (intersect / min_len) > overlap_thresh:
+            # Form a unified envelope
+            curr_band = (min(curr_band[0], nxt[0]), max(curr_band[1], nxt[1]))
+        else:
+            bands.append(curr_band)
+            curr_band = nxt
+            
+    bands.append(curr_band)
+    return sorted(bands, key=lambda x: x[0])
+
+def get_best_matching_band(val_min: float, val_max: float, bands: List[Tuple[float, float]]) -> int:
+    """Matches a target span to the band offering maximum length overlap."""
+    best_idx = 0
+    max_intersect = -1.0
+    
+    for i, band in enumerate(bands):
+        ov_min = max(val_min, band[0])
+        ov_max = min(val_max, band[1])
+        intersect = max(0.0, float(ov_max - ov_min))
+        
+        if intersect > max_intersect:
+            max_intersect = intersect
+            best_idx = i
+            
+    # Fallback to strict distance metric if the box lives completely outside predicted bands
+    if max_intersect <= 0.0:
+        target_c = (val_min + val_max) / 2.0
+        best_idx = min(range(len(bands)), key=lambda i: abs(((bands[i][0] + bands[i][1]) / 2.0) - target_c))
+        
+    return best_idx
 
 def transform_point(pt: Tuple[float, float], matrix: np.ndarray) -> Tuple[float, float]:
     px = (matrix[0, 0] * pt[0] + matrix[0, 1] * pt[1] + matrix[0, 2])
@@ -187,6 +239,17 @@ class PPStructure_TSREngine(BaseTSREngine):
         except:
             M_inv = np.eye(3)
             
+        # --- NEW Diagnostic Artifact Persistence ---
+        import json
+        def numpy_sanitizer(obj):
+            if isinstance(obj, (np.ndarray, np.generic)):
+                return obj.tolist()
+            return str(obj)
+            
+        # 1. Dump original AI model output before coordinate realignment
+        with open(os.path.join(debug_dir, "raw_ppstructure_response.json"), "w", encoding="utf-8") as f:
+            json.dump(winner['results'], f, default=numpy_sanitizer, indent=2)
+            
         # Overlay visual diagnostic copy
         overlay_img = winner['image'].copy()
         
@@ -201,7 +264,13 @@ class PPStructure_TSREngine(BaseTSREngine):
                 
                 if bbox:
                     cv2.rectangle(overlay_img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 3)
-                for cb in cell_bboxes:
+                
+                # --- TOPOLOGY CLEANUP STAGE INJECTED ---
+                # Refines noise, merges phantom fragments BEFORE canonical banding.
+                cleaner = TopologyCleaner()
+                final_cell_bboxes = cleaner.clean_cell_boxes(cell_bboxes)
+                
+                for cb in final_cell_bboxes:
                     cv2.rectangle(overlay_img, (int(cb[0]), int(cb[1])), (int(cb[2]), int(cb[3])), (255, 0, 0), 1)
                 
                 t_geom_orig = build_geom_from_bbox(bbox, M_inv)
@@ -216,57 +285,94 @@ class PPStructure_TSREngine(BaseTSREngine):
                     source_engine="ppstructure"
                 )
                 
-                if not cell_bboxes:
+                if not final_cell_bboxes:
                     final_regions.append(region)
                     table_counter += 1
                     continue
                     
-                y_c = [(b[1] + b[3]) / 2 for b in cell_bboxes]
-                y_s = sorted(list(set(y_c)))
-                row_clusters = []
-                for y in y_s:
-                    if not row_clusters or y - row_clusters[-1][-1] > 10:
-                        row_clusters.append([y])
-                    else:
-                        row_clusters[-1].append(y)
-                row_y = [sum(c)/len(c) for c in row_clusters]
+                # 1. Generate Interval Domains directly from source bounding box extents
+                y_intervals = [(b[1], b[3]) for b in final_cell_bboxes]
+                x_intervals = [(b[0], b[2]) for b in final_cell_bboxes]
                 
-                x_c = [(b[0] + b[2]) / 2 for b in cell_bboxes]
-                x_s = sorted(list(set(x_c)))
-                col_clusters = []
-                for x in x_s:
-                    if not col_clusters or x - col_clusters[-1][-1] > 10:
-                        col_clusters.append([x])
-                    else:
-                        col_clusters[-1].append(x)
-                col_x = [sum(c)/len(c) for c in col_clusters]
+                # 2. Derive Canonical Row and Column bands (Merging overlaps > 35%)
+                row_bands = compute_stable_bands(y_intervals, overlap_thresh=0.35)
+                col_bands = compute_stable_bands(x_intervals, overlap_thresh=0.35)
                 
-                for i in range(len(row_y)):
-                    region.rows.append(RowRegion(row_id=f"row_{i}"))
-                for j in range(len(col_x)):
-                    region.columns.append(ColumnRegion(col_id=f"col_{j}"))
+                logger.info(f"Topology Inference [Table {table_counter}]: Derived {len(row_bands)} Row Bands, {len(col_bands)} Col Bands.")
+                
+                # 3. Perform Slot-Occupancy Assignment ensuring unique cell placement
+                slot_occupants = {} 
+                collision_count = 0
+                
+                # Track logical usage explicitly to support pure Sparse-Occupancy modeling
+                utilized_rows = set()
+                utilized_cols = set()
+                
+                for cb in final_cell_bboxes:
+                    row_idx = get_best_matching_band(cb[1], cb[3], row_bands)
+                    col_idx = get_best_matching_band(cb[0], cb[2], col_bands)
+                    slot_key = (row_idx, col_idx)
                     
-                for cb in cell_bboxes:
-                    cy = (cb[1] + cb[3]) / 2
-                    cx = (cb[0] + cb[2]) / 2
-                    row_idx = min(range(len(row_y)), key=lambda i: abs(row_y[i] - cy))
-                    col_idx = min(range(len(col_x)), key=lambda j: abs(col_x[j] - cx))
+                    # Calculate joint matching weight to break duplicate ties
+                    y_ov = max(0.0, min(cb[3], row_bands[row_idx][1]) - max(cb[1], row_bands[row_idx][0]))
+                    x_ov = max(0.0, min(cb[2], col_bands[col_idx][1]) - max(cb[0], col_bands[col_idx][0]))
+                    fit_score = y_ov * x_ov # Area intersection weight
                     
                     c_geom_orig = build_geom_from_bbox(cb, M_inv)
                     c_geom_norm = build_geom_from_bbox(cb, None)
                     
-                    region.cells.append(TableCell(
+                    cell_obj = TableCell(
                         row_id=f"row_{row_idx}",
                         col_id=f"col_{col_idx}",
                         geometry=c_geom_orig,
                         original_geometry=c_geom_orig,
                         normalized_geometry=c_geom_norm
-                    ))
+                    )
+                    
+                    if slot_key in slot_occupants:
+                        collision_count += 1
+                        existing_score = slot_occupants[slot_key][0]
+                        if fit_score > existing_score:
+                            slot_occupants[slot_key] = (fit_score, cell_obj)
+                    else:
+                        slot_occupants[slot_key] = (fit_score, cell_obj)
+                        
+                    utilized_rows.add(row_idx)
+                    utilized_cols.add(col_idx)
+                
+                # 4. Materialize Active Sparse Domains ONLY
+                # Never generate phantom placeholder entities for empty regions
+                for rid in sorted(list(utilized_rows)):
+                    region.rows.append(RowRegion(row_id=f"row_{rid}"))
+                for cid in sorted(list(utilized_cols)):
+                    region.columns.append(ColumnRegion(col_id=f"col_{cid}"))
+                    
+                if collision_count > 0:
+                    logger.warning(f"[VALIDATION ALERT] Dropped {collision_count} overlapping cell box collisions inside Table {table_counter}")
+                    
+                # Commit distinct, filtered cell set
+                for _, final_cell in slot_occupants.values():
+                    region.cells.append(final_cell)
                     
                 final_regions.append(region)
                 table_counter += 1
                 
         cv2.imwrite(os.path.join(debug_dir, "tsr_ppstructure_overlay.png"), overlay_img)
+        
+        # 2. Dump structured geometry grid audit
+        cell_grid_audit = []
+        for tr in final_regions:
+            t_data = {"table_id": tr.table_id, "cells": []}
+            for cl in tr.cells:
+                t_data["cells"].append({
+                    "row": cl.row_id, "col": cl.col_id,
+                    "normalized_bbox": [cl.normalized_geometry.min_x, cl.normalized_geometry.min_y, 
+                                       cl.normalized_geometry.max_x, cl.normalized_geometry.max_y] if cl.normalized_geometry else []
+                })
+            cell_grid_audit.append(t_data)
+            
+        with open(os.path.join(debug_dir, "normalized_cell_grid.json"), "w", encoding="utf-8") as f:
+            json.dump(cell_grid_audit, f, indent=2)
         
         meta = {
             "selected_orientation": f"rotate_{winner['angle']}",
