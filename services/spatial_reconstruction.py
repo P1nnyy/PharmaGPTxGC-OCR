@@ -33,6 +33,45 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 1: Compute geometry
     ocr_blocks = process_blocks(blocks)
     
+    # --- Diagnostic: Raw OCR & Coordinate Ordering Dumps ---
+    import os
+    import json
+    import re
+    debug_dir = "datasets/debug"
+    os.makedirs(debug_dir, exist_ok=True)
+    
+    if debug:
+        # 1. Dump absolutely raw API blocks
+        with open(os.path.join(debug_dir, "raw_ocr.json"), "w", encoding="utf-8") as f:
+            json.dump(blocks, f, indent=2)
+            
+        # 2. Dump plain reading order sorted text without layout heuristics
+        def _coord_sort_key(b):
+            geom = b.original_geometry or b.normalized_geometry
+            if not geom:
+                return (0, 0)
+            # Discretize Y threshold (10px) to approximate human visual baseline
+            return (round(geom.min_y / 10), geom.min_x)
+            
+        sorted_blocks = sorted(ocr_blocks, key=_coord_sort_key)
+        coord_lines = []
+        current_baseline = None
+        line_tokens = []
+        
+        for b in sorted_blocks:
+            geom = b.original_geometry or b.normalized_geometry
+            baseline = round(geom.min_y / 10) if geom else 0
+            if current_baseline is not None and abs(baseline - current_baseline) > 1:
+                coord_lines.append(" ".join(line_tokens))
+                line_tokens = []
+            current_baseline = baseline
+            line_tokens.append(b.text)
+        if line_tokens:
+            coord_lines.append(" ".join(line_tokens))
+            
+        with open(os.path.join(debug_dir, "raw_coordinate_order.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(coord_lines))
+    
     # Step 2: Skew Normalization
     ocr_blocks = apply_skew_normalization(ocr_blocks)
     
@@ -131,6 +170,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     from services.semantic_serializer import serialize_to_markdown
     semantic_markdown = serialize_to_markdown(legacy_reconstructed_rows)
     
+    # --- Reconstruction Comparison Artifact & Auditing ---
+    numeric_merge_suspicions = 0
+    if semantic_markdown:
+        # Heuristic: Detect multiple decimal points attached directly with no space (e.g., 12.3456.78)
+        words = semantic_markdown.split()
+        for w in words:
+            # Check if word contains consecutive numbers glued by multiple decimal symbols
+            if w.count('.') >= 2 and re.search(r'\d+\.\d+\.\d+', w):
+                numeric_merge_suspicions += 1
+                
+        if debug:
+            with open(os.path.join(debug_dir, "reconstructed_output.md"), "w", encoding="utf-8") as f:
+                f.write(semantic_markdown)
+                
+    raw_token_count = len(ocr_blocks)
+    recon_line_count = len(legacy_reconstructed_rows)
+    avg_tok = (raw_token_count / recon_line_count) if recon_line_count > 0 else 0.0
+    
     return {
         "reconstructed_rows": legacy_reconstructed_rows,
         "detected_table_rows": legacy_table_rows,
@@ -138,6 +195,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "structured_tables": structured_tables,
         "semantic_markdown": semantic_markdown,
         "metrics": {
+            "raw_token_count": raw_token_count,
+            "reconstructed_line_count": recon_line_count,
+            "numeric_merge_suspicions": int(numeric_merge_suspicions),
+            "avg_tokens_per_line": float(round(avg_tok, 2)),
             "table_count": len(table_regions),
             "row_count": total_rows,
             "col_count": total_cols,
