@@ -1,8 +1,9 @@
-from typing import List, Dict, Tuple
+from services.tsr.base_tsr import BaseTSREngine
+from PIL import Image
+from typing import List, Dict, Tuple, Any
 from models.layout_models import (
     OCRBlock, TableRegion, RowRegion, ColumnRegion, TableCell, GeometryBox, RegionType
 )
-from services.tsr.base_tsr import BaseTSREngine
 
 # Import internal layout primitives
 from services.layout_pipeline.row_clustering import cluster_into_rows
@@ -11,13 +12,13 @@ from services.layout_pipeline.column_projection import project_column_boundaries
 from services.layout_pipeline.multiline_merging import merge_multiline_rows
 
 class HeuristicTSREngine(BaseTSREngine):
-    def detect_tables(self, blocks: List[OCRBlock]) -> List[TableRegion]:
+    def detect_tables(self, blocks: List[OCRBlock], image: Image.Image = None) -> Tuple[List[TableRegion], Dict[str, Any]]:
         """
         Uses deterministic geometry heuristics to infer structural topology.
         Segments the document into multiple TableRegions with local column projection.
         """
         if not blocks:
-            return []
+            return [], {}
             
         # 1. Compose Base Primitives
         reconstructed_rows = cluster_into_rows(blocks)
@@ -149,4 +150,4 @@ class HeuristicTSREngine(BaseTSREngine):
             )
             table_regions.append(region)
             
-        return table_regions
+        return table_regions, {}

@@ -54,17 +54,23 @@ class ReconstructedRow(BaseModel):
 class RowRegion(BaseModel):
     row_id: str
     geometry: Optional[GeometryBox] = None
+    original_geometry: Optional[GeometryBox] = None
+    normalized_geometry: Optional[GeometryBox] = None
     confidence: float = 1.0
 
 class ColumnRegion(BaseModel):
     col_id: str
     geometry: Optional[GeometryBox] = None
+    original_geometry: Optional[GeometryBox] = None
+    normalized_geometry: Optional[GeometryBox] = None
     confidence: float = 1.0
 
 class TableCell(BaseModel):
     row_id: str
     col_id: str
     geometry: Optional[GeometryBox] = None
+    original_geometry: Optional[GeometryBox] = None
+    normalized_geometry: Optional[GeometryBox] = None
     rowspan: int = 1
     colspan: int = 1
     confidence: float = 1.0
@@ -75,6 +81,8 @@ class TableRegion(BaseModel):
     table_id: str
     region_type: RegionType = RegionType.UNKNOWN
     geometry: Optional[GeometryBox] = None
+    original_geometry: Optional[GeometryBox] = None
+    normalized_geometry: Optional[GeometryBox] = None
     rows: List[RowRegion] = Field(default_factory=list)
     columns: List[ColumnRegion] = Field(default_factory=list)
     cells: List[TableCell] = Field(default_factory=list)

@@ -38,14 +38,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     
     # Step 3: TSR Table Region Detection
     table_regions = []
+    tsr_metadata = {}
     
     if reconstruct_mode == "compare":
         logger.info("Running in compare mode. Executing multiple engines.")
         heuristic_engine = HeuristicTSREngine()
         pp_engine = PPStructure_TSREngine()
         
-        heuristic_regions = heuristic_engine.detect_tables(ocr_blocks)
-        pp_regions = pp_engine.detect_tables(ocr_blocks, image=image)
+        heuristic_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
+        pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
         
         logger.info(f"[COMPARE] Heuristic detected {len(heuristic_regions)} tables.")
         logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
@@ -54,9 +55,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         engine = get_engine(reconstruct_mode)
         # Handle heuristic engines that don't need image
         if reconstruct_mode == "heuristic":
-            table_regions = engine.detect_tables(ocr_blocks)
+            table_regions, tsr_metadata = engine.detect_tables(ocr_blocks)
         else:
-            table_regions = engine.detect_tables(ocr_blocks, image=image)
+            table_regions, tsr_metadata = engine.detect_tables(ocr_blocks, image=image)
     
     # Step 4: Cell Mapping (IoA)
     map_tokens_to_cells(ocr_blocks, table_regions)
@@ -137,6 +138,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "col_count": total_cols,
             "orphan_token_count": orphan_tokens,
             "ioa_success_rate": ioa_success_rate,
-            "empty_cell_ratio": empty_cell_ratio
+            "empty_cell_ratio": empty_cell_ratio,
+            **tsr_metadata
         }
     }
