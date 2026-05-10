@@ -18,7 +18,7 @@ def get_engine(mode: str):
     else:
         return HeuristicTSREngine()
 
-def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None) -> Dict[str, Any]:
+def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "heuristic", image: Any = None) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
     Orchestrates OCR geometry preservation, TSR grid detection, and Cell Mapping.
@@ -127,11 +127,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Structured Tables Output
     structured_tables = [tr.model_dump(mode='json') for tr in table_regions]
     
+    # Generate Semantic Markdown serialization
+    from services.semantic_serializer import serialize_to_markdown
+    semantic_markdown = serialize_to_markdown(legacy_reconstructed_rows)
+    
     return {
         "reconstructed_rows": legacy_reconstructed_rows,
         "detected_table_rows": legacy_table_rows,
         "columns_extracted": True,
         "structured_tables": structured_tables,
+        "semantic_markdown": semantic_markdown,
         "metrics": {
             "table_count": len(table_regions),
             "row_count": total_rows,
