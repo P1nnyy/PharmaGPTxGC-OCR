@@ -57,6 +57,8 @@ class RowRegion(BaseModel):
     original_geometry: Optional[GeometryBox] = None
     normalized_geometry: Optional[GeometryBox] = None
     confidence: float = 1.0
+    stability: float = 1.0  # Row-level stability score (0.0-1.0). Values < 0.5 = isolated row.
+    assigned_token_count: int = 0  # Number of OCR tokens assigned to cells in this row
 
 class ColumnRegion(BaseModel):
     col_id: str
@@ -76,6 +78,17 @@ class TableCell(BaseModel):
     confidence: float = 1.0
     mapped_block_ids: List[str] = Field(default_factory=list)
     text: str = ""
+    assignment_confidence: float = 1.0  # Composite confidence of token-to-cell assignment
+    assignment_strategy: str = "unassigned"  # "row_scoped", "neighbor_row", "global_fallback"
+
+class CellOwnership(BaseModel):
+    """Granular provenance record for a single token-to-cell assignment."""
+    cell_id: str  # Composite key: "{row_id}:{col_id}"
+    token_id: str
+    ioa_score: float = 0.0
+    right_edge_delta: float = 0.0  # Distance between token right edge and cell right edge
+    assignment_confidence: float = 0.0
+    strategy: str = "unassigned"  # "row_scoped", "neighbor_row", "global_fallback"
 
 class TableRegion(BaseModel):
     table_id: str
@@ -88,3 +101,4 @@ class TableRegion(BaseModel):
     cells: List[TableCell] = Field(default_factory=list)
     confidence: float = 1.0
     source_engine: str = "unknown"
+    topology_confidence: float = 1.0  # TSR-level reliability signal (degraded for heuristic fallback)

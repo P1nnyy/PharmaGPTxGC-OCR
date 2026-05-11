@@ -340,12 +340,28 @@ class PPStructure_TSREngine(BaseTSREngine):
                     utilized_rows.add(row_idx)
                     utilized_cols.add(col_idx)
                 
-                # 4. Materialize Active Sparse Domains ONLY
-                # Never generate phantom placeholder entities for empty regions
+                # 4. Materialize Active Sparse Domains with GEOMETRY from computed bands
+                # Row bands and column bands carry the canonical spatial truth — preserve it.
                 for rid in sorted(list(utilized_rows)):
-                    region.rows.append(RowRegion(row_id=f"row_{rid}"))
+                    band = row_bands[rid]
+                    row_geom = build_geom_from_bbox(
+                        [col_bands[0][0], band[0], col_bands[-1][1], band[1]], None
+                    )
+                    region.rows.append(RowRegion(
+                        row_id=f"row_{rid}",
+                        geometry=row_geom,
+                        normalized_geometry=row_geom
+                    ))
                 for cid in sorted(list(utilized_cols)):
-                    region.columns.append(ColumnRegion(col_id=f"col_{cid}"))
+                    band = col_bands[cid]
+                    col_geom = build_geom_from_bbox(
+                        [band[0], row_bands[0][0], band[1], row_bands[-1][1]], None
+                    )
+                    region.columns.append(ColumnRegion(
+                        col_id=f"col_{cid}",
+                        geometry=col_geom,
+                        normalized_geometry=col_geom
+                    ))
                     
                 if collision_count > 0:
                     logger.warning(f"[VALIDATION ALERT] Dropped {collision_count} overlapping cell box collisions inside Table {table_counter}")
@@ -353,6 +369,15 @@ class PPStructure_TSREngine(BaseTSREngine):
                 # Commit distinct, filtered cell set
                 for _, final_cell in slot_occupants.values():
                     region.cells.append(final_cell)
+                
+                # Compute topology confidence from structural quality signals
+                total_source_cells = len(final_cell_bboxes)
+                placed_cells = len(slot_occupants)
+                collision_ratio = collision_count / total_source_cells if total_source_cells > 0 else 0.0
+                coverage = placed_cells / max(1, len(utilized_rows) * len(utilized_cols))
+                # High collisions or low coverage = low confidence
+                region.topology_confidence = round(max(0.1, min(1.0, coverage * (1.0 - collision_ratio))), 3)
+                logger.info(f"Table {table_counter} topology_confidence={region.topology_confidence} (coverage={coverage:.2f}, collision_ratio={collision_ratio:.2f})")
                     
                 final_regions.append(region)
                 table_counter += 1

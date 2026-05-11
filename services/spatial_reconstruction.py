@@ -7,7 +7,10 @@ from services.layout_pipeline.skew import apply_skew_normalization
 from services.layout_pipeline.ioa_mapping import map_tokens_to_cells
 from services.layout_pipeline.semantic_column_classifier import SemanticColumnClassifier
 from services.layout_pipeline.stability_engine import TopologyStabilityEngine
+from services.layout_pipeline.row_validator import RowValidator
+from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.topology.column_stabilizer import ColumnStabilizer
+from services.financial_reconciler import FinancialReconciler
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_tatr import TATR_TSREngine
@@ -20,6 +23,33 @@ def get_engine(mode: str):
         return PPStructure_TSREngine()
     else:
         return HeuristicTSREngine()
+
+def _compute_tsr_confidence(table_regions) -> float:
+    """
+    Evaluate aggregate TSR output quality to decide if PPStructure topology is trustworthy.
+    Returns 0.0-1.0 confidence score.
+    
+    Signals checked:
+    - At least one table detected
+    - Tables have reasonable cell counts
+    - topology_confidence values from the engine are acceptable
+    """
+    if not table_regions:
+        return 0.0
+    
+    confidences = [tr.topology_confidence for tr in table_regions]
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    
+    # Check for degenerate tables (tables with zero cells)
+    total_cells = sum(len(tr.cells) for tr in table_regions)
+    if total_cells == 0:
+        return 0.0
+    
+    # A single table with very few cells on a full invoice is suspicious
+    if len(table_regions) == 1 and total_cells < 3:
+        avg_confidence *= 0.5
+    
+    return round(avg_confidence, 3)
 
 def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False) -> Dict[str, Any]:
     """
@@ -81,9 +111,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 2: Skew Normalization
     ocr_blocks = apply_skew_normalization(ocr_blocks)
     
-    # Step 3: TSR Table Region Detection
+    # Step 3: TSR Table Region Detection with Confidence-Gated Fallback
     table_regions = []
     tsr_metadata = {}
+    topology_source = "ppstructure"  # Track which engine produced the canonical topology
     
     if reconstruct_mode == "compare":
         logger.info("Running in compare mode. Executing multiple engines.")
@@ -95,18 +126,38 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         
         logger.info(f"[COMPARE] Heuristic detected {len(heuristic_regions)} tables.")
         logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
-        table_regions = pp_regions # Default to ppstructure for rest of pipeline
+        table_regions = pp_regions
+    elif reconstruct_mode == "heuristic":
+        # Explicit heuristic mode (debug only)
+        engine = HeuristicTSREngine()
+        table_regions, tsr_metadata = engine.detect_tables(ocr_blocks)
+        topology_source = "heuristic"
+        for tr in table_regions:
+            tr.topology_confidence = 0.5  # Degraded confidence for heuristic-derived topology
     else:
-        engine = get_engine(reconstruct_mode)
-        # Handle heuristic engines that don't need image
-        if reconstruct_mode == "heuristic":
-            table_regions, tsr_metadata = engine.detect_tables(ocr_blocks)
-        else:
-            table_regions, tsr_metadata = engine.detect_tables(ocr_blocks, image=image)
+        # PRIMARY PATH: PPStructure with confidence-gated fallback
+        pp_engine = PPStructure_TSREngine()
+        table_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
+        
+        # --- CONFIDENCE GATE ---
+        # Evaluate TSR output quality. If PPStructure fails or produces unreliable topology,
+        # fall back to heuristic engine rather than proceeding with garbage structure.
+        tsr_confidence = _compute_tsr_confidence(table_regions)
+        
+        if tsr_confidence < 0.4:
+            logger.warning(
+                f"[CONFIDENCE GATE] TSR confidence {tsr_confidence:.2f} below threshold (0.40). "
+                f"Falling back to heuristic topology."
+            )
+            heuristic_engine = HeuristicTSREngine()
+            table_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
+            topology_source = "heuristic_fallback"
+            for tr in table_regions:
+                tr.topology_confidence = 0.5  # Degraded confidence tag
     
-    # --- FAST-FAIL CHECKPOINT 1: No tables detected at all ---
+    # --- FAST-FAIL: No topology at all (both engines failed) ---
     if not table_regions:
-        logger.warning("[FAST FAIL] Zero table regions detected by TSR engine.")
+        logger.warning("[FAST FAIL] Zero table regions from both PPStructure and heuristic fallback.")
         return {
             "reconstructed_rows": [],
             "detected_table_rows": [],
@@ -115,6 +166,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "semantic_markdown": "",
             "fast_fail": True,
             "fast_fail_reason": "zero_tables",
+            "topology_source": topology_source,
             "metrics": {
                 "raw_token_count": len(ocr_blocks),
                 "table_count": 0,
@@ -122,6 +174,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 **tsr_metadata
             }
         }
+    
+    tsr_metadata["topology_source"] = topology_source
     
     # Step 4: PRE-ASSIGNMENT Geometry Stabilization (geometry-only, no text dependency)
     stabilizer = ColumnStabilizer()
@@ -145,6 +199,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     
     logger.info(f"Topology Confidence Check: Score={stability_metrics['stability_score']}, State={stability_metrics['state']}")
     
+    # Step 7: Row-Level Validation (semantic + financial per-row)
+    row_validator = RowValidator(semantic_column_cache=semantic_results)
+    row_validation_results = row_validator.validate_all(table_regions)
+    
+    # Step 8: Financial Reconciliation (subtotal/grand total verification)
+    reconciler = FinancialReconciler(semantic_column_cache=semantic_results)
+    reconciliation_results = reconciler.reconcile_all(table_regions)
+    
+    # Step 9: Hierarchical Confidence Composition (token→cell→row→table→invoice)
+    compositor = ConfidenceCompositor()
+    confidence_hierarchy = compositor.compute_full_hierarchy(
+        table_regions,
+        row_validation=row_validation_results,
+        reconciliation=reconciliation_results
+    )
+    
+    logger.info(f"Invoice Confidence: {confidence_hierarchy['invoice_confidence']}")
+    
     # --- FAST-FAIL CHECKPOINT 2: Critically low topology confidence ---
     if benchmark_mode and stability_metrics['stability_score'] < 30.0:
         logger.warning(f"[FAST FAIL] Topology confidence catastrophically low: {stability_metrics['stability_score']}")
@@ -156,6 +228,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "semantic_markdown": "",
             "fast_fail": True,
             "fast_fail_reason": "critical_instability",
+            "topology_source": topology_source,
             "metrics": {
                 "raw_token_count": len(ocr_blocks),
                 "table_count": len(table_regions),
@@ -217,7 +290,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         max_y = max([b.original_geometry.max_y for b in ocr_blocks if b.original_geometry] + [1000])
         draw_debug_visualization(ocr_blocks, table_regions, max_x + 100, max_y + 100, "datasets/debug/latest_reconstruction.png")
     
-    # --- Backward Compatibility Layer ---
+    # --- Backward Compatibility Shim ---
+    # This legacy row format is maintained for downstream serializer compatibility.
+    # The canonical output is `structured_tables` (the cell graph).
     legacy_reconstructed_rows = []
     legacy_table_rows = []
     row_counter = 0
@@ -280,6 +355,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "structured_tables": structured_tables,
         "semantic_markdown": semantic_markdown,
         "fast_fail": False,
+        "topology_source": topology_source,
+        "invoice_confidence": confidence_hierarchy["invoice_confidence"],
         "metrics": {
             "raw_token_count": raw_token_count,
             "reconstructed_line_count": recon_line_count,
@@ -294,6 +371,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_stability": stability_metrics,
             "column_semantic_cache": semantic_results,
             "topology_repairs": repair_metrics_total,
+            "row_validation": row_validation_results,
+            "financial_reconciliation": reconciliation_results,
+            "confidence_hierarchy": confidence_hierarchy,
             "fast_fail": False,
             **tsr_metadata
         }

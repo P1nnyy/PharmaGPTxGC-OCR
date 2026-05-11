@@ -85,108 +85,194 @@ def _compute_ioa(block_geom: GeometryBox, cell_geom: GeometryBox, pad: float = 2
         return float(intersection / b_area) if b_area > 0 else 0.0
     return 0.0
 
+def _compute_y_overlap(block_geom: GeometryBox, row_geom: GeometryBox) -> float:
+    """Compute normalized vertical overlap between a token and a row band."""
+    overlap = min(block_geom.max_y, row_geom.max_y) - max(block_geom.min_y, row_geom.min_y)
+    if overlap <= 0:
+        return 0.0
+    block_height = max(1.0, block_geom.max_y - block_geom.min_y)
+    return overlap / block_height
+
 def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> None:
     """
-    V3 Assignment Engine: Constrained Geometry-Aware Allocator.
-    Prioritizes structural integrity over naive coverage. Enforces multi-candidate disambiguation.
+    V4 Assignment Engine: Soft Row-Scoped Allocator.
+    
+    Three-tier assignment strategy:
+    - Tier 1 (row_scoped): Token assigned within its primary row band. Full confidence.
+    - Tier 2 (neighbor_row): Token assigned in adjacent row (±1). 0.85x confidence penalty.
+    - Tier 3 (global_fallback): Unrestricted cell search. 0.5x confidence penalty.
+    
+    Preserves right-edge scoring for numerics, IoA thresholds, and ambiguity rejection.
     """
-    # System Metric Trackers (including benchmark telemetry)
+    # System Metric Trackers
     metrics = {
         "numeric_assignment_conflicts": 0,
         "ambiguous_numeric_tokens": 0,
         "orphan_numeric_tokens": 0,
         "total_numeric_mapped": 0,
         "numeric_column_jumps": 0,
-        # Benchmark telemetry fields
+        # Benchmark telemetry
         "right_edge_alignment_variance": 0.0,
         "numeric_column_entropy": 0.0,
         "semantic_collision_count": 0,
         "assignment_rejection_rate": 0.0,
-        "phantom_repair_count": 0
+        "phantom_repair_count": 0,
+        # Row-scoped tier tracking
+        "tier1_assignments": 0,
+        "tier2_assignments": 0,
+        "tier3_assignments": 0,
     }
-    _right_edge_deltas = []  # Accumulated for variance calculation
+    _right_edge_deltas = []
     _total_tokens_attempted = 0
 
+    # Build row-indexed cell lookup and collect all rows with geometry
     all_cells = []
+    cells_by_row = {}  # row_id -> [cells]
+    all_rows = []       # RowRegion objects with geometry
+    row_order = []      # Ordered list of row_ids for neighbor lookup
+    
     for r in regions:
+        for row in r.rows:
+            if row.geometry:
+                all_rows.append(row)
+                row_order.append(row.row_id)
         for c in r.cells:
             c.mapped_block_ids = []
             c.text = ""
+            c.assignment_strategy = "unassigned"
+            c.assignment_confidence = 1.0
             if c.geometry:
                 all_cells.append(c)
+                if c.row_id not in cells_by_row:
+                    cells_by_row[c.row_id] = []
+                cells_by_row[c.row_id].append(c)
                 
     if not all_cells:
         logger.warning("Mapping aborted: 0 cells detected in downstream topological structure.")
         return
 
+    def _get_neighbor_row_ids(row_id: str) -> List[str]:
+        """Return IDs of the rows immediately above and below the given row."""
+        if row_id not in row_order:
+            return []
+        idx = row_order.index(row_id)
+        neighbors = []
+        if idx > 0:
+            neighbors.append(row_order[idx - 1])
+        if idx < len(row_order) - 1:
+            neighbors.append(row_order[idx + 1])
+        return neighbors
+
+    def _score_against_cells(block, cell_list, is_num, min_gate_ioa):
+        """Score a block against a list of candidate cells. Returns sorted (score, ioa, cell) list."""
+        scored = []
+        pad_size = 1.5 if is_num else 3.0
+        for cell in cell_list:
+            raw_ioa = _compute_ioa(block.normalized_geometry, cell.geometry, pad=pad_size)
+            if raw_ioa >= min_gate_ioa:
+                fit = _compute_weighted_candidate_score(block, cell, raw_ioa, is_num=is_num)
+                scored.append((fit, raw_ioa, cell))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored
+
+    def _check_ambiguity(scored_candidates) -> bool:
+        """Return True if top two candidates are dangerously close in score."""
+        if len(scored_candidates) > 1:
+            delta = scored_candidates[0][0] - scored_candidates[1][0]
+            if delta < 0.12:
+                return True
+        return False
+
     assignment_audit = []
     
     for block in blocks:
-        if not block.normalized_geometry or not block.id: continue
+        if not block.normalized_geometry or not block.id:
+            continue
         _total_tokens_attempted += 1
         
         text = (block.text or "").strip()
         is_num = is_numeric_like(text)
-        
-        # 1. Adaptive IoA Gatekeeper Thresholds
-        # STRICT for numbers (0.55), FLEXIBLE for prose (0.30)
         min_gate_ioa = 0.55 if is_num else 0.30
         
-        # 2. Multi-Candidate Collection
-        scored_candidates = []
-        for cell in all_cells:
-            # Use strict tight pad for financial checks (prevents column overlapping)
-            pad_size = 1.5 if is_num else 3.0 
-            raw_ioa = _compute_ioa(block.normalized_geometry, cell.geometry, pad=pad_size)
-            
-            if raw_ioa >= min_gate_ioa:
-                # Pass gate: compute combined weighted fit score (right-edge for numerics)
-                fit = _compute_weighted_candidate_score(block, cell, raw_ioa, is_num=is_num)
-                scored_candidates.append((fit, raw_ioa, cell))
-                
-        # 3. Execution Logic
-        if not scored_candidates:
-            if is_num: metrics["orphan_numeric_tokens"] += 1
-            assignment_audit.append({"id": block.id, "text": text, "status": "ORPHAN_NO_CANDIDATE"})
-            continue
-            
-        # Sort by final weighted score descending
-        scored_candidates.sort(key=lambda x: x[0], reverse=True)
-        top_score, top_ioa, top_cell = scored_candidates[0]
+        assigned = False
+        assignment_strategy = "unassigned"
+        confidence_multiplier = 1.0
         
-        # 4. The Conflict/Ambiguity Test
-        # If the second best candidate exists and floats dangerously close in score,
-        # the assignment is geometrically ambiguous. Reject it to prevent leakage.
-        is_ambiguous = False
-        if len(scored_candidates) > 1:
-            runner_up_score = scored_candidates[1][0]
-            delta = top_score - runner_up_score
-            # Minimum confidence gap requirement: 0.12
-            if delta < 0.12:
-                is_ambiguous = True
-                
-        if is_ambiguous:
+        # ── TIER 1: Primary Row Assignment ──
+        # Find the row whose band has the highest Y-overlap with this token.
+        if all_rows:
+            row_scores = [(row, _compute_y_overlap(block.normalized_geometry, row.geometry))
+                          for row in all_rows]
+            row_scores.sort(key=lambda x: x[1], reverse=True)
+            best_row, best_y_overlap = row_scores[0]
+            
+            if best_y_overlap > 0.3:
+                row_cells = cells_by_row.get(best_row.row_id, [])
+                if row_cells:
+                    scored = _score_against_cells(block, row_cells, is_num, min_gate_ioa)
+                    if scored and not _check_ambiguity(scored):
+                        top_score, top_ioa, top_cell = scored[0]
+                        top_cell.mapped_block_ids.append(block.id)
+                        top_cell.assignment_strategy = "row_scoped"
+                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score)
+                        assignment_strategy = "row_scoped"
+                        confidence_multiplier = 1.0
+                        assigned = True
+                        metrics["tier1_assignments"] += 1
+        
+        # ── TIER 2: Neighboring Row Tolerance (±1 row) ──
+        if not assigned and all_rows:
+            best_row_id = row_scores[0][0].row_id if row_scores[0][1] > 0.1 else None
+            if best_row_id:
+                neighbor_ids = _get_neighbor_row_ids(best_row_id)
+                neighbor_cells = []
+                for nid in neighbor_ids:
+                    neighbor_cells.extend(cells_by_row.get(nid, []))
+                if neighbor_cells:
+                    scored = _score_against_cells(block, neighbor_cells, is_num, min_gate_ioa)
+                    if scored and not _check_ambiguity(scored):
+                        top_score, top_ioa, top_cell = scored[0]
+                        top_cell.mapped_block_ids.append(block.id)
+                        top_cell.assignment_strategy = "neighbor_row"
+                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * 0.85)
+                        assignment_strategy = "neighbor_row"
+                        confidence_multiplier = 0.85
+                        assigned = True
+                        metrics["tier2_assignments"] += 1
+        
+        # ── TIER 3: Global Fallback ──
+        if not assigned:
+            scored = _score_against_cells(block, all_cells, is_num, min_gate_ioa)
+            if scored and not _check_ambiguity(scored):
+                top_score, top_ioa, top_cell = scored[0]
+                top_cell.mapped_block_ids.append(block.id)
+                top_cell.assignment_strategy = "global_fallback"
+                top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * 0.5)
+                assignment_strategy = "global_fallback"
+                confidence_multiplier = 0.5
+                assigned = True
+                metrics["tier3_assignments"] += 1
+        
+        # ── Record Result ──
+        if assigned:
             if is_num:
-                metrics["ambiguous_numeric_tokens"] += 1
-                logger.debug(f"[MAPPING AMBIGUOUS] Rejected numeric token '{text}' - fit delta too small ({delta:.3f})")
-            assignment_audit.append({"id": block.id, "text": text, "status": "ORPHAN_AMBIGUOUS"})
-            continue
-            
-        # 5. Final Commit Action
-        top_cell.mapped_block_ids.append(block.id)
-        if is_num:
-            metrics["total_numeric_mapped"] += 1
-            # Track right-edge delta for benchmark variance metric
-            _right_edge_deltas.append(abs(block.normalized_geometry.max_x - top_cell.geometry.max_x))
-        
-        assignment_audit.append({
-            "id": block.id,
-            "text": text,
-            "is_num": is_num,
-            "target": f"{top_cell.row_id}:{top_cell.col_id}",
-            "score": top_score,
-            "status": "MAPPED"
-        })
+                metrics["total_numeric_mapped"] += 1
+                _right_edge_deltas.append(abs(block.normalized_geometry.max_x - top_cell.geometry.max_x))
+            assignment_audit.append({
+                "id": block.id, "text": text, "is_num": is_num,
+                "target": f"{top_cell.row_id}:{top_cell.col_id}",
+                "score": round(top_score * confidence_multiplier, 4),
+                "strategy": assignment_strategy,
+                "status": "MAPPED"
+            })
+        else:
+            if is_num:
+                metrics["orphan_numeric_tokens"] += 1
+            assignment_audit.append({
+                "id": block.id, "text": text,
+                "status": "ORPHAN",
+                "reason": "no_valid_candidate" if not all_rows else "ambiguous_or_below_threshold"
+            })
 
     # 6. Cell Population and Semantic-Aware Collision Detection
     for cell in all_cells:
@@ -245,8 +331,9 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> N
                 "log": assignment_audit
             }, f, indent=2)
         logger.info(
-            f"V3 Allocator: mapped={metrics['total_numeric_mapped']} nums, "
-            f"orphans={metrics['orphan_numeric_tokens']}, ambiguous={metrics['ambiguous_numeric_tokens']}, "
+            f"V4 Row-Scoped Allocator: mapped={metrics['total_numeric_mapped']} nums, "
+            f"orphans={metrics['orphan_numeric_tokens']}, "
+            f"tier1={metrics['tier1_assignments']}, tier2={metrics['tier2_assignments']}, tier3={metrics['tier3_assignments']}, "
             f"rejection_rate={metrics['assignment_rejection_rate']:.2%}, "
             f"right_edge_variance={metrics['right_edge_alignment_variance']:.2f}px"
         )
