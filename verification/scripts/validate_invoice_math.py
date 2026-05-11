@@ -200,17 +200,50 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
     avg_int = total_integrity / len(files) if files else 0.0
     pass_rate = (global_pass / len(files) * 100) if files else 0.0
     
+    # Harvest allocator telemetry from result JSONs for benchmark aggregate metrics
+    total_rejection_rate = 0.0
+    total_right_edge_var = 0.0
+    total_semantic_collisions = 0
+    telemetry_count = 0
+    
+    for f in files:
+        try:
+            with open(f, "r", encoding="utf-8") as fj:
+                jdata = json.load(fj)
+            meta = jdata.get("metadata", {}).get("metrics", {})
+            # Try to pull IoA hardened metrics if they are embedded
+            total_rejection_rate += meta.get("assignment_rejection_rate", 0.0) if isinstance(meta.get("assignment_rejection_rate"), (int, float)) else 0.0
+            total_right_edge_var += meta.get("right_edge_alignment_variance", 0.0) if isinstance(meta.get("right_edge_alignment_variance"), (int, float)) else 0.0
+            total_semantic_collisions += meta.get("semantic_collision_count", 0) if isinstance(meta.get("semantic_collision_count"), int) else 0
+            telemetry_count += 1
+        except:
+            pass
+    
+    avg_rej = (total_rejection_rate / telemetry_count) if telemetry_count > 0 else 0.0
+    avg_rev = (total_right_edge_var / telemetry_count) if telemetry_count > 0 else 0.0
+    
     md.append(f"\n## Summary Aggregates\n")
     md.append(f"- **Topology Integrity Pass Rate:** {pass_rate:.1f}%")
     md.append(f"- **Average Integrity Score:** {avg_int:.1f} / 100")
     md.append(f"- **Global Merged Column Occurrences:** {total_hits}")
+    md.append(f"- **Average Assignment Rejection Rate:** {avg_rej:.2%}")
+    md.append(f"- **Average Right-Edge Variance:** {avg_rev:.2f}px")
+    md.append(f"- **Total Semantic Collisions:** {total_semantic_collisions}")
     
     with open(report_out, "w", encoding="utf-8") as fout:
         fout.write("\n".join(md))
     print(f"Dashboard written to: {report_out}")
 
 if __name__ == "__main__":
-    results_dir = os.path.join(PROJECT_ROOT, "results")
-    report_file = os.path.join(PROJECT_ROOT, "verification/benchmark_reports/topology_integrity_report.md")
-    if os.path.exists(results_dir):
-        generate_validation_dashboard(results_dir, report_file)
+    import argparse
+    parser = argparse.ArgumentParser(description="Topology Integrity & Financial Validation")
+    parser.add_argument("--results-dir", default=os.path.join(PROJECT_ROOT, "results"),
+                        help="Directory containing result JSON files")
+    parser.add_argument("--report-out", default=os.path.join(PROJECT_ROOT, "verification/benchmark_reports/topology_integrity_report.md"),
+                        help="Output path for the markdown report")
+    args = parser.parse_args()
+    
+    if os.path.exists(args.results_dir):
+        generate_validation_dashboard(args.results_dir, args.report_out)
+    else:
+        print(f"No results found in {args.results_dir}")

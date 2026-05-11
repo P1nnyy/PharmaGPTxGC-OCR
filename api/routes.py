@@ -22,7 +22,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure", extract: bool = False):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure", extract: bool = False, benchmark_mode: bool = False):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
         
@@ -38,7 +38,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
             metadata = {"blocks": blocks}
             if reconstruct or extract:
                 image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode, image=image)
+                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
                 logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
                 metadata.update(reconstruction_data)
                 
@@ -62,7 +62,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         blocks = ocr_result.get("blocks", [])
         metadata = {"blocks": blocks}
         if reconstruct or extract:
-            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=True, reconstruct_mode=reconstruct_mode, image=image)
+            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
             logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
             metadata.update(reconstruction_data)
             

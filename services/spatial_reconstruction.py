@@ -21,12 +21,15 @@ def get_engine(mode: str):
     else:
         return HeuristicTSREngine()
 
-def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None) -> Dict[str, Any]:
+def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
     Orchestrates OCR geometry preservation, TSR grid detection, and Cell Mapping.
+    
+    benchmark_mode: When True, disables expensive debug artifacts, enables fast-fail
+    on hopeless invoices, and minimizes intermediate dumps to maximize VM throughput.
     """
-    logger.info(f"Starting spatial reconstruction on {len(blocks)} blocks (Mode={reconstruct_mode}, Debug={debug})")
+    logger.info(f"Starting spatial reconstruction on {len(blocks)} blocks (Mode={reconstruct_mode}, Debug={debug}, Benchmark={benchmark_mode})")
     
     # Ensure blocks have IDs for mapping provenance
     for i, b in enumerate(blocks):
@@ -43,7 +46,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     debug_dir = "datasets/debug"
     os.makedirs(debug_dir, exist_ok=True)
     
-    if debug:
+    # In benchmark mode, skip expensive intermediate debug dumps to save VM time
+    if debug and not benchmark_mode:
         # 1. Dump absolutely raw API blocks
         with open(os.path.join(debug_dir, "raw_ocr.json"), "w", encoding="utf-8") as f:
             json.dump(blocks, f, indent=2)
@@ -53,7 +57,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             geom = b.original_geometry or b.normalized_geometry
             if not geom:
                 return (0, 0)
-            # Discretize Y threshold (10px) to approximate human visual baseline
             return (round(geom.min_y / 10), geom.min_x)
             
         sorted_blocks = sorted(ocr_blocks, key=_coord_sort_key)
@@ -101,6 +104,25 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         else:
             table_regions, tsr_metadata = engine.detect_tables(ocr_blocks, image=image)
     
+    # --- FAST-FAIL CHECKPOINT 1: No tables detected at all ---
+    if not table_regions:
+        logger.warning("[FAST FAIL] Zero table regions detected by TSR engine.")
+        return {
+            "reconstructed_rows": [],
+            "detected_table_rows": [],
+            "columns_extracted": False,
+            "structured_tables": [],
+            "semantic_markdown": "",
+            "fast_fail": True,
+            "fast_fail_reason": "zero_tables",
+            "metrics": {
+                "raw_token_count": len(ocr_blocks),
+                "table_count": 0,
+                "fast_fail": True,
+                **tsr_metadata
+            }
+        }
+    
     # Step 4: PRE-ASSIGNMENT Geometry Stabilization (geometry-only, no text dependency)
     stabilizer = ColumnStabilizer()
     repair_metrics_total = {"phantom_column_count": 0, "repaired_columns": 0, "semantic_column_drift": 0}
@@ -122,6 +144,26 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     stability_metrics = stability_engine.compute_stability(table_regions)
     
     logger.info(f"Topology Confidence Check: Score={stability_metrics['stability_score']}, State={stability_metrics['state']}")
+    
+    # --- FAST-FAIL CHECKPOINT 2: Critically low topology confidence ---
+    if benchmark_mode and stability_metrics['stability_score'] < 30.0:
+        logger.warning(f"[FAST FAIL] Topology confidence catastrophically low: {stability_metrics['stability_score']}")
+        return {
+            "reconstructed_rows": [],
+            "detected_table_rows": [],
+            "columns_extracted": False,
+            "structured_tables": [tr.model_dump(mode='json') for tr in table_regions],
+            "semantic_markdown": "",
+            "fast_fail": True,
+            "fast_fail_reason": "critical_instability",
+            "metrics": {
+                "raw_token_count": len(ocr_blocks),
+                "table_count": len(table_regions),
+                "topology_stability": stability_metrics,
+                "fast_fail": True,
+                **tsr_metadata
+            }
+        }
     
     # --- Metrics Logging ---
     total_cells = sum(len(r.cells) for r in table_regions)
@@ -169,8 +211,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     if empty_cell_ratio > 60.0:
         logger.warning(f"[VALIDATION ALERT] High sparsity threshold triggered: {empty_cell_ratio:.1f}% empty cells!")
     
-    # --- Debug Visualization ---
-    if debug and ocr_blocks:
+    # --- Debug Visualization (skipped in benchmark mode to save compute) ---
+    if debug and ocr_blocks and not benchmark_mode:
         max_x = max([b.original_geometry.max_x for b in ocr_blocks if b.original_geometry] + [1000])
         max_y = max([b.original_geometry.max_y for b in ocr_blocks if b.original_geometry] + [1000])
         draw_debug_visualization(ocr_blocks, table_regions, max_x + 100, max_y + 100, "datasets/debug/latest_reconstruction.png")
@@ -237,6 +279,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "columns_extracted": True,
         "structured_tables": structured_tables,
         "semantic_markdown": semantic_markdown,
+        "fast_fail": False,
         "metrics": {
             "raw_token_count": raw_token_count,
             "reconstructed_line_count": recon_line_count,
@@ -251,6 +294,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_stability": stability_metrics,
             "column_semantic_cache": semantic_results,
             "topology_repairs": repair_metrics_total,
+            "fast_fail": False,
             **tsr_metadata
         }
     }
