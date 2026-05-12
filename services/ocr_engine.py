@@ -53,12 +53,36 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     upscaled = False
     det_results = _detection_predictor([image])
     
+    # ── 180° Rotation Correction Logic (Failure Mode 5) ──
+    # Check if text flow goes from bottom-to-top (indicates 180 inversion)
+    if det_results and det_results[0].bboxes:
+        boxes = det_results[0].bboxes
+        if len(boxes) >= 10:
+            # Get Y centers for all boxes in temporal order
+            y_vals = []
+            for b in boxes:
+                 poly = getattr(b, 'polygon', [])
+                 if poly:
+                     y_vals.append(sum(p[1] for p in poly)/len(poly))
+            
+            if len(y_vals) >= 10:
+                 mid = len(y_vals) // 2
+                 avg_first = sum(y_vals[:mid]) / mid
+                 avg_second = sum(y_vals[mid:]) / (len(y_vals) - mid)
+                 # In standard flow, avg_second > avg_first. If strongly inverted, flip image.
+                 if avg_second < (avg_first - 50): 
+                     logger.warning(f"🚨 Image 180° inversion detected (AvgY1={avg_first:.0f}, AvgY2={avg_second:.0f}). Rotating 180°...")
+                     image = image.rotate(180, expand=True)
+                     # RERUN detection on fixed orientation image
+                     det_results = _detection_predictor([image])
+
+    # 2. Adaptive Resolution Upscaling
+    # Run coarse detection height validation after potential rotation correction
     if det_results:
         boxes = getattr(det_results[0], 'bboxes', None)
         heights = []
         if boxes:
             for box in boxes:
-                # Use dot notation to access the polygon list from the PolygonBox object
                 polygon = getattr(box, 'polygon', None)
                 if polygon:
                     min_y = min(p[1] for p in polygon)
@@ -76,7 +100,6 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
                 new_size = (image.width * 2, image.height * 2)
                 image = image.resize(new_size, Image.LANCZOS)
                 upscaled = True
-                # Re-run detection on the new high-res image
                 det_results = _detection_predictor([image])
 
     # 3. Run Recognition

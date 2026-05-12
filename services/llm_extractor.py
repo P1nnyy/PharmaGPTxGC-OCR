@@ -13,6 +13,7 @@ class MedicineItem(BaseModel):
     qty: Optional[float] = Field(None, description="Quantity")
     rate: Optional[float] = Field(None, description="Unit rate/price")
     amount: Optional[float] = Field(None, description="Total value/amount for this row")
+    discount: Optional[float] = Field(None, description="Item-level discount value")
     hsn_code: Optional[str] = Field(None, description="HSN code if visible")
 
 class TaxSummary(BaseModel):
@@ -30,7 +31,9 @@ class InvoiceMetadata(BaseModel):
 
 class InvoiceSchema(BaseModel):
     metadata: InvoiceMetadata
-    items: List[MedicineItem] = Field(default_factory=list)
+    items: List[MedicineItem] = Field(default_factory=list, description="Standard product items with amounts > 0")
+    scheme_items: List[MedicineItem] = Field(default_factory=list, description="Free goods or items explicitly listed as schemes with amount 0")
+    credit_notes: List[Dict[str, Any]] = Field(default_factory=list, description="Any embedded credit note items appearing in separate table grid")
     subtotal: float = 0.0
     tax: TaxSummary
     grand_total: float = 0.0
@@ -54,6 +57,8 @@ GUIDELINES:
 - Return RAW pure JSON only. No commentary, no triple backticks.
 - If a value is missing, use null or 0.0 as per schema.
 - Ensure mathematical consistency: Sum of items should equal subtotal.
+- Separate scheme items (with zero amount or 'FREE' label) into the 'scheme_items' array.
+- Separate credit note references into the 'credit_notes' array.
 - Ignore raw OCR noise/skew fragments.
 """
 

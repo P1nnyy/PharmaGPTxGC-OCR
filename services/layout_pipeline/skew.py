@@ -3,6 +3,55 @@ import numpy as np
 from typing import List
 from core.logger import logger
 from models.layout_models import OCRBlock, GeometryBox
+def detect_image_rotation(blocks: List[OCRBlock]) -> bool:
+    """
+    Checks if text blocks demonstrate inverted (180 deg) rotation.
+    Analyzes reading flow trends or individual block slopes.
+    """
+    if not blocks:
+        return False
+    
+    slopes = []
+    for block in blocks:
+        poly = block.polygon
+        if len(poly) >= 2:
+             # Vector from top-left to top-right of block
+             # In standard left-to-right reading: dx > 0. 
+             # But if text is 180 rotated, the polygon vertices may be inverted depending on OCR.
+             # Let's use the explicit heuristic requested: Check Y ordering vs confidence.
+             pass
+             
+    # Alternative robust signal: Check natural reading flow vs Y axis.
+    # Sort blocks into temporal order (their initial occurrence in OCR output stream).
+    # In normal document, block 1 is top, last block is bottom. Thus avg Y increases with index.
+    y_coords = [b.original_geometry.center_y for b in blocks if b.original_geometry]
+    if len(y_coords) < 5:
+        return False
+        
+    # Split stream into halves and compare means
+    mid = len(y_coords) // 2
+    first_half_y = sum(y_coords[:mid]) / mid
+    second_half_y = sum(y_coords[mid:]) / (len(y_coords) - mid)
+    
+    # In standard top-to-bottom, second half Y should be greater than first half Y
+    is_inverted = second_half_y < (first_half_y - 10) # Threshold buffer
+    
+    if is_inverted:
+        logger.warning(f"Inversion signals detected: AvgY1={first_half_y:.1f}, AvgY2={second_half_y:.1f}")
+        
+    return is_inverted
+
+def auto_rotate_image_180(image: Any, blocks: List[OCRBlock]) -> tuple[Any, bool]:
+    """
+    Potentially flips PIL Image 180 deg if inverted topology is discovered.
+    Returns (modified_image, was_rotated).
+    """
+    is_inverted = detect_image_rotation(blocks)
+    if is_inverted:
+        logger.warning("Image auto-rotated 180° — verify output")
+        rotated = image.rotate(180, expand=True)
+        return rotated, True
+    return image, False
 
 def estimate_skew_angle(blocks: List[OCRBlock]) -> float:
     angles = []

@@ -5,6 +5,8 @@ from models.layout_models import TableRegion, TableCell
 
 class ColumnSemantics:
     AMOUNT = "amount"
+    RATE = "rate"
+    DISCOUNT = "discount"
     QUANTITY = "quantity"
     TAX = "tax"
     TEXT = "text"
@@ -43,6 +45,9 @@ class SemanticColumnClassifier:
             tax_keywords_count = 0
             currency_symbol_count = 0
             
+            discount_keywords_count = 0
+            rate_keywords_count = 0
+            
             for c in active_cells:
                 text = c.text.upper()
                 clean = re.sub(r'[^\d.]', '', text)
@@ -60,6 +65,10 @@ class SemanticColumnClassifier:
                     pct_symbol_count += 1
                 if any(kw in text for kw in ["GST", "CGST", "SGST", "TAX"]):
                     tax_keywords_count += 1
+                if any(kw in text for kw in ["DIS", "DISC", "TD%", "CD%"]):
+                    discount_keywords_count += 1
+                if any(kw in text for kw in ["RATE", "UNIT PRICE", "MRP"]):
+                    rate_keywords_count += 1
                 if "₹" in text or "RS" in text:
                     currency_symbol_count += 1
             
@@ -67,17 +76,25 @@ class SemanticColumnClassifier:
             ratio_num = numeric_count / total_count
             ratio_dec = decimal_count / total_count
             ratio_tax = (pct_symbol_count + tax_keywords_count) / total_count
+            ratio_disc = (discount_keywords_count) / total_count
+            ratio_rate = (rate_keywords_count) / total_count
             
             # --- CLASSIFICATION DECISION TREE ---
             best_type = ColumnSemantics.UNKNOWN
             conf = 0.0
             
-            if ratio_num > 0.7:
+            if ratio_num > 0.6:
                 # Heavy Numeric Vector
-                if ratio_tax > 0.2 or tax_keywords_count > 0:
+                if ratio_tax > 0.15 or tax_keywords_count > 0:
                     best_type = ColumnSemantics.TAX
                     conf = 0.8
-                elif ratio_dec > 0.6 or currency_symbol_count > 0:
+                elif ratio_disc > 0.05 or discount_keywords_count > 0:
+                    best_type = ColumnSemantics.DISCOUNT
+                    conf = 0.85
+                elif ratio_rate > 0.05 or rate_keywords_count > 0:
+                    best_type = ColumnSemantics.RATE
+                    conf = 0.85
+                elif ratio_dec > 0.5 or currency_symbol_count > 0:
                     best_type = ColumnSemantics.AMOUNT
                     conf = 0.85
                 else:

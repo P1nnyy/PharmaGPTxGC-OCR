@@ -16,6 +16,9 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 from models.layout_models import TableRegion, TableCell, RowRegion
 from core.logger import logger
+from decimal import Decimal
+from services.qty_parser import parse_quantity
+from services.financial_reconciler import DiscountAwareVerifier
 
 
 def _parse_numeric(text: str) -> Optional[float]:
@@ -140,30 +143,42 @@ class RowValidator:
                     diag["penalties"].append(f"global_fallback:{cell.col_id}")
             
             # === Pass 2: Financial Sanity (qty × rate ≈ amount) ===
-            qty_val, rate_val, amount_val = None, None, None
+            qty_val, rate_val, amount_val, disc_val = None, None, None, None
+            
             for cell in populated_cells:
                 col_meta = table_semantics.get(cell.col_id, {})
-                col_type = col_meta.get("type", "UNKNOWN") if isinstance(col_meta, dict) else "UNKNOWN"
+                col_type = col_meta.get("type", "").upper() if isinstance(col_meta, dict) else str(col_meta).upper()
                 
-                if col_type == "QTY":
-                    qty_val = _parse_numeric(cell.text)
+                if col_type == "QUANTITY" or col_type == "QTY":
+                    qty_parsed = parse_quantity(cell.text)
+                    qty_val = Decimal(str(qty_parsed.billed_qty))
                 elif col_type == "RATE":
-                    rate_val = _parse_numeric(cell.text)
+                    parsed_num = _parse_numeric(cell.text)
+                    rate_val = Decimal(str(parsed_num)) if parsed_num is not None else None
                 elif col_type == "AMOUNT":
-                    amount_val = _parse_numeric(cell.text)
+                    parsed_num = _parse_numeric(cell.text)
+                    amount_val = Decimal(str(parsed_num)) if parsed_num is not None else None
+                elif "DISCOUNT" in col_type or "DISC" in col_type:
+                    parsed_num = _parse_numeric(cell.text)
+                    disc_val = Decimal(str(parsed_num)) if parsed_num is not None else None
             
             if qty_val is not None and rate_val is not None and amount_val is not None:
-                expected = qty_val * rate_val
-                discrepancy = abs(expected - amount_val)
+                # Integrate global discount verifier engine
+                verifier = DiscountAwareVerifier()
+                success, formula = verifier.verify_row_math(qty_val, rate_val, amount_val, disc_val)
                 
-                if discrepancy <= self.AMOUNT_TOLERANCE:
+                if success:
                     diag["financial_check"] = "PASS"
                     results["financial_passes"] += 1
                 else:
-                    diag["financial_check"] = f"FAIL (expected={expected:.2f}, actual={amount_val:.2f}, delta={discrepancy:.2f})"
+                    diag["financial_check"] = f"FAIL (formula: {formula})"
                     results["financial_failures"] += 1
+                    # Derive simple delta for penalization
+                    expected = qty_val * rate_val
+                    discrepancy = float(abs(expected - amount_val))
+                    
                     # Scale penalty by discrepancy magnitude
-                    if discrepancy > amount_val * 0.5 if amount_val else True:
+                    if discrepancy > float(amount_val) * 0.5 if amount_val else True:
                         stability *= 0.3  # Catastrophic mismatch
                     else:
                         stability *= 0.6  # Moderate mismatch

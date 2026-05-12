@@ -5,6 +5,7 @@ import math
 from typing import List, Dict, Any, Tuple, Optional
 from models.layout_models import OCRBlock, TableRegion, GeometryBox, TableCell
 from core.logger import logger
+from services.qty_parser import is_compound_quantity
 
 def is_numeric_like(text: str) -> bool:
     """
@@ -306,6 +307,10 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> N
                 near_duplicate = (len(vals) == 2 and abs(vals[0] - vals[1]) < 0.5)
                 if has_decimal_chain or (all_large and near_duplicate):
                     is_suspicious = True
+            
+            # EXPLICIT EXEMPTION: Suppress false positive if it's a structured Scheme/Pack quantity!
+            if is_suspicious and is_compound_quantity(cell.text):
+                 is_suspicious = False
                     
             if is_suspicious:
                 metrics["numeric_assignment_conflicts"] += 1

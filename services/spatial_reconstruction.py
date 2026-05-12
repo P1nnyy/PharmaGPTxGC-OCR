@@ -11,6 +11,7 @@ from services.layout_pipeline.row_validator import RowValidator
 from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler
+from services.table_classifier import TableClassifier, route_tables, TableType
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_tatr import TATR_TSREngine
@@ -188,6 +189,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions)
     
+    # ── Step 5.5: TABLE CLASSIFICATION & ROUTING (Failure Mode 4) ──
+    classifier_engine = TableClassifier()
+    try:
+        classifications = classifier_engine.classify_region_list(table_regions)
+        table_bundle = route_tables(table_regions, classifications)
+        logger.info(f"[ROUTER] Document bundle organized. Types assigned: {classifications}")
+    except Exception as e:
+        logger.error(f"Table classifier failure, continuing monolithically: {e}")
+        table_bundle = None
+    
     # Step 6: Semantic & Mathematical Stability Audits (ACTIVE SIGNAL GENERATION)
     semantic_results = {}
     classifier = SemanticColumnClassifier()
@@ -204,8 +215,14 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     row_validation_results = row_validator.validate_all(table_regions)
     
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
+    # Note: We reconcile the MAIN table specifically, or fall back to primary table list.
+    target_reconcile = table_regions
+    if table_bundle and table_bundle.main_table:
+        # Focus primary reconciliation strictly on main items grid if clearly isolated
+        target_reconcile = [table_bundle.main_table]
+        
     reconciler = FinancialReconciler(semantic_column_cache=semantic_results)
-    reconciliation_results = reconciler.reconcile_all(table_regions)
+    reconciliation_results = reconciler.reconcile_all(target_reconcile)
     
     # Step 9: Hierarchical Confidence Composition (token→cell→row→table→invoice)
     compositor = ConfidenceCompositor()
@@ -325,6 +342,14 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             
     # Structured Tables Output
     structured_tables = [tr.model_dump(mode='json') for tr in table_regions]
+    
+    # Re-order or subset markdown generation if we successfully isolated main items!
+    markdown_target_rows = legacy_reconstructed_rows
+    if table_bundle and table_bundle.main_table:
+         # Priority sort: Force main table to top of markdown
+         main_id = table_bundle.main_table.table_id
+         # Or ideally serialize based on semantic bundles...
+         pass
     
     # Generate Semantic Markdown serialization
     from services.semantic_serializer import serialize_to_markdown
