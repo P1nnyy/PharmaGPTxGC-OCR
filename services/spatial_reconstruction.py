@@ -8,6 +8,7 @@ from services.layout_pipeline.ioa_mapping import map_tokens_to_cells
 from services.layout_pipeline.semantic_column_classifier import SemanticColumnClassifier
 from services.layout_pipeline.stability_engine import TopologyStabilityEngine
 from services.layout_pipeline.row_validator import RowValidator
+from services.layout_pipeline.multiline_merging import merge_multiline_table_rows, update_row_stability_scores
 from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler
@@ -189,6 +190,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions)
     
+    # ── NEW: HIERARCHICAL ROW GRAPH STAGE ──
+    # Before applying destruction, snapshot Visual Row definitions for debug rendering
+    visual_rows_snapshot = []
+    for tr in table_regions:
+        for r in tr.rows:
+             visual_rows_snapshot.append({
+                 "row_id": r.row_id,
+                 "geometry": r.geometry.model_copy() if r.geometry else None
+             })
+             
+    merge_audit_full = []
+    for tr in table_regions:
+        tr, audit = merge_multiline_table_rows(tr, ocr_blocks)
+        tr = update_row_stability_scores(tr, ocr_blocks)
+        merge_audit_full.extend(audit)
+        
+    logger.info(f"[HIERARCHY] Consolidated multiline rows. Audited decisions: {len(merge_audit_full)}")
+    
     # ── Step 5.5: TABLE CLASSIFICATION & ROUTING (Failure Mode 4) ──
     classifier_engine = TableClassifier()
     try:
@@ -200,19 +219,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         table_bundle = None
     
     # Step 6: Semantic & Mathematical Stability Audits (ACTIVE SIGNAL GENERATION)
+    # ONLY perform downstream extraction / stability processing on Dominant Main Table to avoid contamination!
+    analysis_targets = table_regions
+    if table_bundle and table_bundle.main_table:
+        analysis_targets = [table_bundle.main_table]
+        
     semantic_results = {}
     classifier = SemanticColumnClassifier()
-    for tr in table_regions:
+    for tr in analysis_targets:
         semantic_results[tr.table_id] = classifier.enrich_region_metadata(tr)
         
     stability_engine = TopologyStabilityEngine()
-    stability_metrics = stability_engine.compute_stability(table_regions)
+    stability_metrics = stability_engine.compute_stability(analysis_targets)
     
-    logger.info(f"Topology Confidence Check: Score={stability_metrics['stability_score']}, State={stability_metrics['state']}")
+    logger.info(f"Topology Confidence Check: Overall Score={stability_metrics.get('overall', 0)}")
     
     # Step 7: Row-Level Validation (semantic + financial per-row)
     row_validator = RowValidator(semantic_column_cache=semantic_results)
-    row_validation_results = row_validator.validate_all(table_regions)
+    row_validation_results = row_validator.validate_all(analysis_targets)
     
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
     # Note: We reconcile the MAIN table specifically, or fall back to primary table list.
@@ -305,7 +329,17 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     if debug and ocr_blocks and not benchmark_mode:
         max_x = max([b.original_geometry.max_x for b in ocr_blocks if b.original_geometry] + [1000])
         max_y = max([b.original_geometry.max_y for b in ocr_blocks if b.original_geometry] + [1000])
-        draw_debug_visualization(ocr_blocks, table_regions, max_x + 100, max_y + 100, "datasets/debug/latest_reconstruction.png")
+        
+        from utils.debug_visualizer import draw_debug_visualization_v2
+        draw_debug_visualization_v2(
+            ocr_blocks, 
+            table_regions, 
+            max_x + 100, 
+            max_y + 100, 
+            "datasets/debug/latest_reconstruction.png",
+            visual_rows=visual_rows_snapshot,
+            merge_audit=merge_audit_full
+        )
     
     # --- Backward Compatibility Shim ---
     # This legacy row format is maintained for downstream serializer compatibility.

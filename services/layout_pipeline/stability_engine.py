@@ -1,89 +1,143 @@
+"""
+Enhanced Topology Stability Engine.
+Replaces catastrophic binary confidence collapse with composite structured metrics.
+Fulfills Task 4: Topology Confidence Redesign.
+"""
+
 import re
+import statistics
+import structlog
 from typing import List, Dict, Any
-from core.logger import logger
-from models.layout_models import TableRegion
+from models.layout_models import TableRegion, ColumnRegion
+
+log = structlog.get_logger()
 
 class TopologyStabilityEngine:
     """
-    Computes live reconstruction confidence ratings based purely on internal 
-    mathematical cohesion and structural hygiene.
+    Generates robust multi-vector confidence scoring representing absolute 
+    deterministic topological health.
     """
     
-    def __init__(self):
-        pass
-        
-    def compute_stability(self, regions: List[TableRegion]) -> Dict[str, Any]:
-        score = 100.0
-        deductions = []
-        math_confirmed_lines = 0
-        suspicious_density_lines = 0
+    def compute_stability(self, regions: List[TableRegion]) -> Dict[str, int]:
+        """
+        Aggregates multi-dimensional reliability vectors across visible table layouts.
+        Returns dict format mapping to requirement scale 0-100.
+        """
+        if not regions:
+            return {
+                "overall": 0,
+                "column_stability": 0,
+                "row_integrity": 0,
+                "ownership_confidence": 0,
+                "anchor_consistency": 0
+            }
+            
+        c_stability_scores = []
+        r_integrity_scores = []
+        ownership_scores = []
+        anchor_scores = []
         
         for region in regions:
-            # Regroup by logical Row
-            row_buckets = {}
-            for cell in region.cells:
-                rid = cell.row_id
-                if rid not in row_buckets: row_buckets[rid] = []
-                row_buckets[rid].append(cell)
-                
-            for rid, cells in row_buckets.items():
-                row_values = []
-                for c in cells:
-                    if not c.text: continue
-                    # Harvest valid clean numbers
-                    nums = re.findall(r'\d[\d\s,]*\.\d{2}', c.text)
-                    for n in nums:
-                        try:
-                            cleaned = re.sub(r'[^\d.]', '', n)
-                            if cleaned:
-                                row_values.append(float(cleaned))
-                        except:
-                            pass
-                            
-                # Check 1: Suspicious Item Concentration (Column Collision)
-                if len(row_values) > 4:
-                    suspicious_density_lines += 1
-                    
-                # Check 2: Live Row-Level Algebra Affirmation (Qty * Rate = Net)
-                if len(row_values) >= 3:
-                    sv = sorted(row_values)
-                    confirmed = False
-                    # Quick n^3 test on small sets (usually < 5 items)
-                    for i in range(len(sv)):
-                        for j in range(i + 1, len(sv)):
-                            for k in range(j + 1, len(sv)):
-                                if abs((sv[i] * sv[j]) - sv[k]) < 0.5:
-                                    confirmed = True
-                                    break
-                    if confirmed:
-                        math_confirmed_lines += 1
-
-        # Compute deductions
-        if suspicious_density_lines > 0:
-            penalty = suspicious_density_lines * 8
-            score -= penalty
-            deductions.append(f"Detected {suspicious_density_lines} fractured rows with colliding numbers")
+            # 1. COLUMN STABILITY VECTOR
+            # Signals: Moderate total count, symmetric geometries
+            col_count = len(region.columns)
+            c_score = 100.0
+            if col_count > 12:
+                c_score -= (col_count - 12) * 5.0 # Penalize excessive fracturing
+            elif col_count < 3:
+                c_score -= 20.0 # Too narrow/dead grid
             
-        # Small boost for consistent rows up to max
-        boost = min(20.0, math_confirmed_lines * 5.0)
-        # Neutralization if zero math proven on large grids
-        if math_confirmed_lines == 0 and score > 90:
-            score -= 10.0 # Penalty for zero mathematical affirmation on structural assertions
-            deductions.append("Zero mathematical affirmation found across table rows.")
-
-        final_score = max(0.0, min(100.0, score + boost))
+            # Check width distribution variance
+            if len(region.columns) > 2:
+                 widths = [(c.geometry.max_x - c.geometry.min_x) for c in region.columns if c.geometry]
+                 if widths:
+                      med_w = statistics.median(widths)
+                      # Tiny columns drag stability down
+                      narrow_count = sum(1 for w in widths if w < med_w * 0.15)
+                      c_score -= (narrow_count * 15.0)
+            
+            c_stability_scores.append(max(0.0, c_score))
+            
+            # 2. ROW INTEGRITY VECTOR
+            # Signals: Direct pull from RowRegion.stability and logical row density
+            row_stabilities = [getattr(r, 'stability', 1.0) for r in region.rows]
+            r_score = statistics.mean(row_stabilities) * 100.0 if row_stabilities else 50.0
+            
+            # Penalize if table has literally 0 rows
+            if not region.rows:
+                 r_score = 0.0
+            r_integrity_scores.append(r_score)
+            
+            # 3. OWNERSHIP CONFIDENCE VECTOR
+            # Signals: Ratio of mapped cells which contain text, vs empty grid spaces
+            total_slots = len(region.rows) * len(region.columns)
+            populated_cells = len([c for c in region.cells if c.text and c.text.strip()])
+            
+            coverage = populated_cells / max(1.0, total_slots)
+            # Ideal invoice density is usually 0.4 - 0.8
+            if coverage < 0.2:
+                 own_score = 40.0 # Massive empty grid noise
+            elif coverage > 0.9:
+                 own_score = 100.0 # Extremely full data grid
+            else:
+                 own_score = 60.0 + (coverage * 40.0)
+            
+            # Factor in topological engine confidence from model
+            own_score = (own_score + (region.topology_confidence * 100.0)) / 2.0
+            ownership_scores.append(own_score)
+            
+            # 4. ANCHOR CONSISTENCY VECTOR
+            # Measure right edge delta clustering
+            # For amount cells, retrieve right edge alignment vs expected wall
+            numeric_cells = [c for c in region.cells if c.text and re.search(r'\d', c.text)]
+            if not numeric_cells:
+                 a_score = 70.0 # Neutral fallback
+            else:
+                 # Group cells by column to look at right alignment variance
+                 col_groups = {}
+                 for c in numeric_cells:
+                      col_groups.setdefault(c.col_id, []).append(c)
+                 
+                 variances = []
+                 for cid, cell_list in col_groups.items():
+                      if len(cell_list) < 2: continue
+                      rights = [c.geometry.max_x for c in cell_list if c.geometry]
+                      if len(rights) >= 2:
+                           variances.append(statistics.stdev(rights))
+                 
+                 if not variances:
+                      a_score = 85.0 # Stable defaults
+                 else:
+                      avg_stdev = sum(variances) / len(variances)
+                      # Lower stdev (tight align) = higher score.
+                      # Penalty profile: 0px = 100, 30px = 70, 60px = 40
+                      a_score = max(30.0, 100.0 - (avg_stdev * 1.0))
+            anchor_scores.append(a_score)
+            
+        # FINAL AGGREGATION (Mean across primary regions)
+        c_stb = int(sum(c_stability_scores) / len(c_stability_scores))
+        r_int = int(sum(r_integrity_scores) / len(r_integrity_scores))
+        own_c = int(sum(ownership_scores) / len(ownership_scores))
+        anc_c = int(sum(anchor_scores) / len(anchor_scores))
         
-        status = "STABLE"
-        if final_score < 75.0:
-            status = "UNSTABLE"
-            logger.warning(f"[TOPOLOGY UNSTABLE] Confidence dropped to {final_score:.1f} due to structural integrity conflicts.")
+        # Cap 0-100
+        c_stb = max(0, min(100, c_stb))
+        r_int = max(0, min(100, r_int))
+        own_c = max(0, min(100, own_c))
+        anc_c = max(0, min(100, anc_c))
         
-        return {
-            "stability_score": round(final_score, 2),
-            "state": status,
-            "diagnostics": {
-                "confirmed_math_rows": math_confirmed_lines,
-                "fractured_rows": suspicious_density_lines,
-                "warnings": deductions
-            }
+        # Compute Weighted Overall
+        # Weights prioritize Row Stability (35%) and Column Logic (25%)
+        overall = int((c_stb * 0.25) + (r_int * 0.35) + (own_c * 0.20) + (anc_c * 0.20))
+        
+        results = {
+            "overall": overall,
+            "column_stability": c_stb,
+            "row_integrity": r_int,
+            "ownership_confidence": own_c,
+            "anchor_consistency": anc_c
         }
+        
+        log.info("topology_stability_evaluated", scores=results)
+        
+        return results

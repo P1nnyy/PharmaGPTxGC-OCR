@@ -123,25 +123,44 @@ class SemanticColumnClassifier:
             
         return analysis_results
 
-    def enrich_region_metadata(self, region: TableRegion) -> None:
+    def enrich_region_metadata(self, region: TableRegion) -> Dict[str, Any]:
         """
-        Mutates region internally, attaching classification tags to Columns, and fires diagnostics.
+        Mutates region internally, enforcing hard classification constraints 
+        and dropping violating cell assignments completely.
         """
         results = self.analyze_table_columns(region)
         
-        # Store aggregated findings in logging and attach back to Column objects if applicable
+        # ── TASK 3: HARD OWNERSHIP REJECTION CONSTRAINTS ──
+        QTY_WHITELIST = r"^[ \d\+\*xX\.,\s\(\)-]+$"
+        AMOUNT_WHITELIST = r"^[ \d\.,₹$RS]+$" # Strict finance whitelist
+        
+        rejections = 0
+        for cid, data in results.items():
+            ctype = data["type"]
+            if ctype in (ColumnSemantics.QUANTITY, ColumnSemantics.AMOUNT):
+                target_regex = QTY_WHITELIST if ctype == ColumnSemantics.QUANTITY else AMOUNT_WHITELIST
+                
+                q_cells = [c for c in region.cells if c.col_id == cid]
+                for c in q_cells:
+                    if not c.text: continue
+                    clean_t = c.text.strip()
+                    if not re.match(target_regex, clean_t, re.IGNORECASE):
+                        # Absolute Violation: Contains address/company noise!
+                        # Log explicit rejection event and WIPE mapping assignment.
+                        logger.info(f"[HARD REJECT] Dropping corrupt text from {ctype.upper()} column '{cid}': '{c.text[:15]}...'")
+                        c.text = ""
+                        c.mapped_block_ids = [] # Hard de-link tokens
+                        c.confidence = 0.0
+                        rejections += 1
+                        
+        if rejections > 0:
+            logger.warning(f"[HARD CONSTRAINT] Rejected {rejections} non-conforming cell assignments from numeric columns.")
+
+        # Summarize final structure
         type_counts = {}
         for cid, data in results.items():
             ctype = data["type"]
             type_counts[ctype] = type_counts.get(ctype, 0) + 1
             
-        logger.info(f"[COLUMN SEMANTICS] Breakdown: {type_counts}")
-        
-        # Log potential validation alerts
-        amt_cols = [cid for cid, data in results.items() if data["type"] == ColumnSemantics.AMOUNT]
-        if len(amt_cols) > 4:
-            logger.warning(f"[SEMANTIC ALERT] Abnormally high Amount-Column density ({len(amt_cols)}) detected! Potential column fracturing.")
-            
-        # Attaches explicit semantics to source region telemetry for downstream observation
-        # Note: In current model ColumnRegion may not support 'semantic_tag', we inject via region.source_engine metadata update trick or logger export
+        logger.info(f"[COLUMN SEMANTICS] Post-Hardening Breakdown: {type_counts}")
         return results

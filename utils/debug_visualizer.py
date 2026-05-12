@@ -109,3 +109,82 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
         # 1. REMOVE silent exception swallowing, use logger.exception and re-raise
         logger.exception(f"Failed to generate debug visualization: {e}")
         raise
+
+def draw_debug_visualization_v2(blocks: List[OCRBlock], regions: List[TableRegion], image_width: float, image_height: float, output_path: str, visual_rows: List[Dict] = None, merge_audit: List[Dict] = None):
+    """
+    TASK 4: Advanced Visualizer rendering visual vs semantic layers and fusion connectors.
+    """
+    try:
+        image_width = int(image_width)
+        image_height = int(image_height)
+        
+        # Allocate white canvas
+        canvas = np.ones((image_height, image_width, 3), dtype=np.uint8) * 255
+        
+        # Layer Colors (BGR)
+        COLOR_TEXT = (100, 100, 100)
+        COLOR_VISUAL_ROW = (200, 200, 255) # Light blue thin boxes
+        COLOR_SEMANTIC_ROW = (0, 150, 0)   # Dark green thick boxes
+        COLOR_MERGE_SUCCESS = (0, 255, 0)  # Bright green arrows
+        COLOR_MERGE_REJECT = (0, 0, 255)   # Red X line
+        
+        # --- 1. Render Visual Rows (Input State) ---
+        if visual_rows:
+            for v_row in visual_rows:
+                geom = v_row.get("geometry")
+                if geom:
+                    cv2.rectangle(canvas, (int(geom.min_x), int(geom.min_y)), (int(geom.max_x), int(geom.max_y)), COLOR_VISUAL_ROW, 1)
+                    cv2.putText(canvas, "V-Row", (int(geom.min_x) + 5, int(geom.min_y) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_VISUAL_ROW, 1)
+
+        # --- 2. Render Semantic Rows (Output State) ---
+        for region in regions:
+             for row in region.rows:
+                 if row.geometry:
+                     g = row.geometry
+                     # Thicker border for semantic composite
+                     cv2.rectangle(canvas, (int(g.min_x), int(g.min_y)), (int(g.max_x), int(g.max_y)), COLOR_SEMANTIC_ROW, 2)
+                     
+                     # Show Stability Score
+                     score = getattr(row, 'stability', 1.0)
+                     label = f"SEMANTIC ROW [S={score:.2f}]"
+                     cv2.putText(canvas, label, (int(g.min_x) + 2, int(g.max_y) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_SEMANTIC_ROW, 1)
+
+        # --- 3. Render Merge Action Audit Trail (Connectors) ---
+        if merge_audit and visual_rows:
+             v_row_map = {r["row_id"]: r["geometry"] for r in visual_rows if r.get("geometry")}
+             
+             for action in merge_audit:
+                 p_id = action.get("prev_id")
+                 c_id = action.get("curr_id")
+                 success = action.get("should_merge", False)
+                 
+                 g1 = v_row_map.get(p_id)
+                 g2 = v_row_map.get(c_id)
+                 
+                 if g1 and g2:
+                     start_pt = (int(g1.min_x + 30), int(g1.center_y))
+                     end_pt = (int(g2.min_x + 30), int(g2.center_y))
+                     
+                     if success:
+                         # Draw Success Arrow linking them
+                         cv2.arrowedLine(canvas, start_pt, end_pt, COLOR_MERGE_SUCCESS, 2, tipLength=0.3)
+                     else:
+                         # Draw explicit rejection line/marker
+                         mid_pt = (int((start_pt[0] + end_pt[0])/2), int((start_pt[1] + end_pt[1])/2))
+                         cv2.line(canvas, (mid_pt[0]-10, mid_pt[1]-10), (mid_pt[0]+10, mid_pt[1]+10), COLOR_MERGE_REJECT, 2)
+                         cv2.line(canvas, (mid_pt[0]+10, mid_pt[1]-10), (mid_pt[0]-10, mid_pt[1]+10), COLOR_MERGE_REJECT, 2)
+                         # Print reject reason small
+                         cv2.putText(canvas, action.get("reason", ""), (mid_pt[0] + 15, mid_pt[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_MERGE_REJECT, 1)
+
+        # --- 4. Draw basic text overlay for spatial reference ---
+        for b in blocks:
+             if b.normalized_geometry:
+                 g = b.normalized_geometry
+                 cv2.putText(canvas, b.text[:8], (int(g.min_x), int(g.center_y)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_TEXT, 1)
+                 
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        cv2.imwrite(output_path, canvas)
+        logger.info(f"Saved v2 visualization showing multiline graph to {output_path}")
+        
+    except Exception as e:
+        logger.exception(f"V2 viz failure: {e}")
