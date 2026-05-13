@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     DATASETS_DIR: str = "datasets"
     OCR_RESULTS_DIR: str = f"{DATASETS_DIR}/ocr_results"
     ENABLE_CACHE: bool = True
+    PIPELINE_VERSION: str = "2.0"
 
     class Config:
         env_file = ".env"

@@ -1,248 +1,156 @@
+"""
+Topology Integrity & Financial Validation — THIN WRAPPER.
+
+Delegates ALL validation logic to the live services.financial_reconciler module.
+Preserves backward-compatible function signatures consumed by:
+  - scripts/run_benchmark.sh
+  - verification/scripts/run_full_verification.py
+"""
+
 import os
 import sys
 import json
-import re
+import structlog
 from typing import List, Dict, Any, Optional
-from core.logger import logger
+
+log = structlog.get_logger()
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-def is_valid_financial_number(text: str) -> bool:
-    """Strict rejection of noise pretending to be numbers."""
-    text = text.strip()
-    if not text:
-        return False
-    if any(c.isalpha() for c in text):
-        return False
-    if text.count('.') > 1:
-        return False
-    digits = "".join(c for c in text if c.isdigit())
-    if len(digits) > 12 or len(digits) == 0:
-        return False
-    if not re.match(r'^[\d\s.,]+$', text):
-        return False
-    cleaned = re.sub(r'[^\d.]', '', text)
-    try:
-        val = float(cleaned)
-        if val >= 10000000.0: return False # 1 Crore cap
-        if len(cleaned.split('.')[0]) > 8: return False
-    except ValueError:
-        return False
-    return True
+# Import the LIVE reconciler — single source of truth
+from services.financial_reconciler import (
+    validate_invoice_json as _live_validate,
+    compute_integrity_score,
+)
 
-def parse_price(text: str) -> Optional[float]:
-    if not is_valid_financial_number(text):
-        return None
-    cleaned = re.sub(r'[^\d.]', '', text)
-    try:
-        return float(cleaned) if cleaned else None
-    except ValueError:
-        return None
-
-def find_all_numbers(text: str) -> List[float]:
-    """Extracts all potential valid money numbers from a text block."""
-    matches = re.findall(r'\d[\d\s,]*\.\d{2}', text)
-    results = []
-    for m in matches:
-        p = parse_price(m)
-        if p is not None:
-            results.append(p)
-    return results
 
 def validate_invoice_json(filepath: str) -> Dict[str, Any]:
+    """
+    Load a benchmark result JSON and delegate to live reconciler.
+
+    Backward-compatible return shape:
+        filename, integrity_score, passed, items, math_confirmed_rows,
+        merged_column_warnings, derived_subtotal, parsed_grand_total,
+        discrepancy, warnings_log
+    """
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-        
-    metadata = data.get("metadata", {})
-    structured_tables = metadata.get("structured_tables", [])
-    
-    line_items = []
-    subtotal_candidates = []
-    grand_total_candidates = []
-    gst_candidates = []
-    
-    warnings = []
-    merged_column_hits = 0
-    structural_integrity_score = 100.0
-    
-    math_confirmed_rows = 0
-    possible_product_rows = 0
-    
-    for t_idx, table in enumerate(structured_tables):
-        rows = {}
-        for cell in table.get("cells", []):
-            r_id = cell.get("row_id")
-            if r_id not in rows:
-                rows[r_id] = []
-            rows[r_id].append(cell)
-            
-        for r_id, cells in rows.items():
-            row_numbers = []
-            for c in cells:
-                c_text = c.get("text", "")
-                nums_in_cell = find_all_numbers(c_text)
-                
-                # ALERT 1: Multiple distinct money numbers inside 1 Cell
-                if len(nums_in_cell) > 1:
-                    merged_column_hits += 1
-                    warnings.append(f"Merged Cell Audit: row {r_id} cell contains multiple numbers {nums_in_cell}")
-                
-                row_numbers.extend(nums_in_cell)
-                
-            full_text = " ".join([c.get("text", "") for c in cells]).upper()
-            
-            # Totals classification
-            if "SUB" in full_text or "NET" in full_text:
-                subtotal_candidates.extend(row_numbers)
-            elif "GST" in full_text or "TAX" in full_text or "CGST" in full_text:
-                gst_candidates.extend(row_numbers)
-            elif "GRAND" in full_text or "TOTAL" in full_text:
-                if "SUB" not in full_text:
-                    grand_total_candidates.extend(row_numbers)
-            else:
-                # Probable product line item row
-                if row_numbers:
-                    possible_product_rows += 1
-                    # ALERT 2: Too many money entries in a single product line suggests column merging
-                    if len(row_numbers) > 4:
-                        warnings.append(f"Suspicious density: row {r_id} has {len(row_numbers)} money values.")
-                        merged_column_hits += 1
-                    
-                    # Math Verification heuristic: (Qty * Rate = Amount)
-                    # Test all triples permutations looking for multiplication confirmation
-                    row_has_math = False
-                    if len(row_numbers) >= 3:
-                        sorted_nums = sorted(row_numbers)
-                        # Simple check: smallest * middle approx largest?
-                        for i in range(len(sorted_nums)):
-                            for j in range(i + 1, len(sorted_nums)):
-                                for k in range(j + 1, len(sorted_nums)):
-                                    # Check both possible multiply combinations (a*b=c, a*c=b, b*c=a)
-                                    a, b, c = sorted_nums[i], sorted_nums[j], sorted_nums[k]
-                                    if abs((a * b) - c) < 0.5:
-                                        row_has_math = True
-                                        break
-                    if row_has_math:
-                        math_confirmed_rows += 1
-                        
-                    line_items.append(max(row_numbers))
-                    
-    # Final Aggregate Recon
-    derived_subtotal = sum(line_items)
-    
-    p_subtotal = max(subtotal_candidates) if subtotal_candidates else derived_subtotal
-    p_gst = max(gst_candidates) if gst_candidates else 0.0
-    p_grand = max(grand_total_candidates) if grand_total_candidates else 0.0
-    
-    expected_grand = derived_subtotal + p_gst
-    discrepancy = abs(p_grand - expected_grand) if p_grand > 0 else 0
-    
-    # DEDUCTIONS Logic for Structural Integrity Score
-    structural_integrity_score -= (merged_column_hits * 10) # Heavy penalty for merged columns
-    
-    if len(line_items) == 0:
-        structural_integrity_score -= 50
-        warnings.append("ZERO valid monetary items extracted.")
-    
-    if p_grand > 0 and discrepancy > 2.0:
-        structural_integrity_score -= 30
-        warnings.append(f"Critical Math mismatch: Diff of {discrepancy:.2f}")
-        
-    if possible_product_rows > 0 and math_confirmed_rows == 0:
-        # Didn't prove math consistency on even one row
-        structural_integrity_score -= 10
-        
-    # Clamp floor
-    structural_integrity_score = max(0.0, structural_integrity_score)
-    passed = structural_integrity_score >= 70.0 # Minimum requirement to pass integrity check
-    
+
+    # The benchmark result JSON stores the LLM extraction under metadata.llm_extraction
+    llm_data = data.get("metadata", {}).get("llm_extraction")
+
+    if not llm_data:
+        log.warning("no_llm_extraction_found", filepath=filepath)
+        # Fall back to trying the top-level data as invoice JSON
+        llm_data = data
+
+    # Delegate to the live reconciler
+    live_result = _live_validate(llm_data)
+
+    # Map live reconciler output to backward-compatible shape
+    integrity_score = float(live_result.get("integrity_score", 0))
+    passed = integrity_score >= 70.0
+
     return {
         "filename": os.path.basename(filepath),
-        "integrity_score": round(structural_integrity_score, 1),
+        "integrity_score": round(integrity_score, 1),
         "passed": passed,
-        "items": len(line_items),
-        "math_confirmed_rows": math_confirmed_rows,
-        "merged_column_warnings": merged_column_hits,
-        "derived_subtotal": round(derived_subtotal, 2),
-        "parsed_grand_total": round(p_grand, 2),
-        "discrepancy": round(discrepancy, 2),
-        "warnings_log": warnings
+        "items": live_result.get("total_rows", 0),
+        "math_confirmed_rows": live_result.get("rows_math_passed", 0),
+        "merged_column_warnings": 0,  # Live reconciler doesn't track merged columns
+        "derived_subtotal": float(live_result.get("derived_subtotal", 0)),
+        "parsed_grand_total": float(live_result.get("parsed_grand_total", 0)),
+        "discrepancy": float(live_result.get("grand_total_discrepancy", 0)),
+        "warnings_log": live_result.get("warnings", []),
     }
 
+
+# Preserved for run_full_verification.py backward compat
+run_financial_validation = None  # defined below
+
+
 def generate_validation_dashboard(results_dir: str, report_out: str):
+    """Generate markdown dashboard from benchmark result JSONs."""
     os.makedirs(os.path.dirname(report_out), exist_ok=True)
-    files = [os.path.join(results_dir, f) for f in os.listdir(results_dir) if f.endswith(".json")]
-    
-    print(f"Evaluating Topology Integrity on {len(files)} files...")
-    
+    files = [
+        os.path.join(results_dir, f)
+        for f in os.listdir(results_dir)
+        if f.endswith(".json")
+    ]
+
+    log.info("benchmark_validation_starting", file_count=len(files))
+
     global_pass = 0
     total_integrity = 0.0
-    total_hits = 0
-    
+
     md = [
         "# Topology Integrity & Financial Validation Dashboard\n",
-        "This audit uses accounting consistency (Quantity x Rate verification & Aggregate Reconciliation) to calculate a final layout correctness score.\n",
-        "| File | Score | Status | Items | Math Confirmed | Merged Collisions | Diff |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
+        "Delegated to live `services.financial_reconciler.validate_invoice_json()`.\n",
+        "| File | Score | Status | Items | Math Confirmed | Diff |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
-    
-    for f in files:
-        res = validate_invoice_json(f)
-        icon = "✅ PASS" if res["passed"] else "❌ FAIL"
-        md.append(f"| {res['filename']} | **{res['integrity_score']}** | {icon} | {res['items']} | {res['math_confirmed_rows']} | {res['merged_column_warnings']} | {res['discrepancy']} |")
-        
-        if res["passed"]: global_pass += 1
-        total_integrity += res["integrity_score"]
-        total_hits += res["merged_column_warnings"]
-        
-    avg_int = total_integrity / len(files) if files else 0.0
-    pass_rate = (global_pass / len(files) * 100) if files else 0.0
-    
-    # Harvest allocator telemetry from result JSONs for benchmark aggregate metrics
-    total_rejection_rate = 0.0
-    total_right_edge_var = 0.0
-    total_semantic_collisions = 0
-    telemetry_count = 0
-    
+
     for f in files:
         try:
-            with open(f, "r", encoding="utf-8") as fj:
-                jdata = json.load(fj)
-            meta = jdata.get("metadata", {}).get("metrics", {})
-            # Try to pull IoA hardened metrics if they are embedded
-            total_rejection_rate += meta.get("assignment_rejection_rate", 0.0) if isinstance(meta.get("assignment_rejection_rate"), (int, float)) else 0.0
-            total_right_edge_var += meta.get("right_edge_alignment_variance", 0.0) if isinstance(meta.get("right_edge_alignment_variance"), (int, float)) else 0.0
-            total_semantic_collisions += meta.get("semantic_collision_count", 0) if isinstance(meta.get("semantic_collision_count"), int) else 0
-            telemetry_count += 1
-        except:
-            pass
-    
-    avg_rej = (total_rejection_rate / telemetry_count) if telemetry_count > 0 else 0.0
-    avg_rev = (total_right_edge_var / telemetry_count) if telemetry_count > 0 else 0.0
-    
+            res = validate_invoice_json(f)
+        except Exception as e:
+            log.error("validation_file_error", filepath=f, error=str(e))
+            continue
+
+        icon = "✅ PASS" if res["passed"] else "❌ FAIL"
+        md.append(
+            f"| {res['filename']} | **{res['integrity_score']}** | {icon} "
+            f"| {res['items']} | {res['math_confirmed_rows']} | {res['discrepancy']} |"
+        )
+
+        if res["passed"]:
+            global_pass += 1
+        total_integrity += res["integrity_score"]
+
+    avg_int = total_integrity / len(files) if files else 0.0
+    pass_rate = (global_pass / len(files) * 100) if files else 0.0
+
     md.append(f"\n## Summary Aggregates\n")
-    md.append(f"- **Topology Integrity Pass Rate:** {pass_rate:.1f}%")
+    md.append(f"- **Pass Rate:** {pass_rate:.1f}%")
     md.append(f"- **Average Integrity Score:** {avg_int:.1f} / 100")
-    md.append(f"- **Global Merged Column Occurrences:** {total_hits}")
-    md.append(f"- **Average Assignment Rejection Rate:** {avg_rej:.2%}")
-    md.append(f"- **Average Right-Edge Variance:** {avg_rev:.2f}px")
-    md.append(f"- **Total Semantic Collisions:** {total_semantic_collisions}")
-    
+
     with open(report_out, "w", encoding="utf-8") as fout:
         fout.write("\n".join(md))
-    print(f"Dashboard written to: {report_out}")
+    log.info("dashboard_written", path=report_out)
+
+
+def _run_financial_validation(results_dir: str, report_out: str):
+    """Alias consumed by run_full_verification.py."""
+    generate_validation_dashboard(results_dir, report_out)
+
+
+# Bind the alias
+run_financial_validation = _run_financial_validation
+
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Topology Integrity & Financial Validation")
-    parser.add_argument("--results-dir", default=os.path.join(PROJECT_ROOT, "results"),
-                        help="Directory containing result JSON files")
-    parser.add_argument("--report-out", default=os.path.join(PROJECT_ROOT, "verification/benchmark_reports/topology_integrity_report.md"),
-                        help="Output path for the markdown report")
+
+    parser = argparse.ArgumentParser(
+        description="Topology Integrity & Financial Validation (thin wrapper)"
+    )
+    parser.add_argument(
+        "--results-dir",
+        default=os.path.join(PROJECT_ROOT, "results"),
+        help="Directory containing result JSON files",
+    )
+    parser.add_argument(
+        "--report-out",
+        default=os.path.join(
+            PROJECT_ROOT,
+            "verification/benchmark_reports/topology_integrity_report.md",
+        ),
+        help="Output path for the markdown report",
+    )
     args = parser.parse_args()
-    
+
     if os.path.exists(args.results_dir):
         generate_validation_dashboard(args.results_dir, args.report_out)
     else:

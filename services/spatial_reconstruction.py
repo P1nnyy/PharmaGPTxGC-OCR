@@ -213,7 +213,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     try:
         classifications = classifier_engine.classify_region_list(table_regions)
         table_bundle = route_tables(table_regions, classifications)
-        logger.info(f"[ROUTER] Document bundle organized. Types assigned: {classifications}")
+        logger.info(
+            "[TABLE ROUTING] "
+            f"main={1 if table_bundle.main_table else 0}, "
+            f"gst={len(table_bundle.gst_summary)}, "
+            f"scheme={len(table_bundle.scheme_items)}, "
+            f"credit={len(table_bundle.credit_notes)}"
+        )
     except Exception as e:
         logger.error(f"Table classifier failure, continuing monolithically: {e}")
         table_bundle = None
@@ -259,8 +265,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     logger.info(f"Invoice Confidence: {confidence_hierarchy['invoice_confidence']}")
     
     # --- FAST-FAIL CHECKPOINT 2: Critically low topology confidence ---
-    if benchmark_mode and stability_metrics['stability_score'] < 30.0:
-        logger.warning(f"[FAST FAIL] Topology confidence catastrophically low: {stability_metrics['stability_score']}")
+    if benchmark_mode and stability_metrics.get('overall', 100) < 30:
+        logger.warning(f"[FAST FAIL] Topology confidence catastrophically low: {stability_metrics.get('overall', 0)}")
         return {
             "reconstructed_rows": [],
             "detected_table_rows": [],
@@ -407,11 +413,21 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     recon_line_count = len(legacy_reconstructed_rows)
     avg_tok = (raw_token_count / recon_line_count) if recon_line_count > 0 else 0.0
     
+    # Build auxiliary tables metadata from routing bundle
+    auxiliary_tables = {}
+    if table_bundle:
+        auxiliary_tables = {
+            "gst_summary": [tr.model_dump(mode='json') for tr in table_bundle.gst_summary],
+            "scheme_items": [tr.model_dump(mode='json') for tr in table_bundle.scheme_items],
+            "credit_notes": [tr.model_dump(mode='json') for tr in table_bundle.credit_notes],
+        }
+    
     return {
         "reconstructed_rows": legacy_reconstructed_rows,
         "detected_table_rows": legacy_table_rows,
         "columns_extracted": True,
         "structured_tables": structured_tables,
+        "auxiliary_tables": auxiliary_tables,
         "semantic_markdown": semantic_markdown,
         "fast_fail": False,
         "topology_source": topology_source,

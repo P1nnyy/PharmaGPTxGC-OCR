@@ -5,7 +5,7 @@ import math
 from typing import List, Dict, Any, Tuple, Optional
 from models.layout_models import OCRBlock, TableRegion, GeometryBox, TableCell
 from core.logger import logger
-from services.qty_parser import is_compound_quantity
+from services.qty_parser import is_compound_quantity, parse_quantity
 
 def is_numeric_like(text: str) -> bool:
     """
@@ -308,9 +308,21 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> N
                 if has_decimal_chain or (all_large and near_duplicate):
                     is_suspicious = True
             
-            # EXPLICIT EXEMPTION: Suppress false positive if it's a structured Scheme/Pack quantity!
-            if is_suspicious and is_compound_quantity(cell.text):
-                 is_suspicious = False
+            # EXPLICIT EXEMPTION: Suppress false positive for structured Scheme/Pack quantities
+            if is_suspicious:
+                # Quick surface check first
+                if is_compound_quantity(cell.text):
+                    is_suspicious = False
+                    logger.debug(f"[IOA] Compound qty collision suppressed: {cell.text}")
+                else:
+                    # Deeper structural parse — catches edge cases is_compound_quantity misses
+                    try:
+                        pq = parse_quantity(cell.text)
+                        if pq.is_scheme or pq.pack_size is not None:
+                            is_suspicious = False
+                            logger.debug(f"[IOA] Compound qty collision suppressed: {cell.text}")
+                    except Exception:
+                        pass  # parse failure — leave is_suspicious as-is
                     
             if is_suspicious:
                 metrics["numeric_assignment_conflicts"] += 1
