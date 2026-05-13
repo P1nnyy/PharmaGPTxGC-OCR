@@ -59,6 +59,12 @@ def _to_decimal(val: Any) -> Decimal:
     
     # String cleaning
     cleaned = re.sub(r'[₹$,\s]', '', str(val).strip())
+    
+    # OCR Digit Repair
+    cleaned = re.sub(r'(?<=\d)[OoOo](?=\d|\.|$)', '0', cleaned)
+    cleaned = re.sub(r'(?<=\d|\.)[lI](?=\d|\.|$)', '1', cleaned)
+    cleaned = re.sub(r'(?<=\d)[B8](?=\d|\.|$)', '8', cleaned)
+    
     # If multiple dots, assume last one is decimal
     if cleaned.count('.') > 1:
         parts = cleaned.split('.')

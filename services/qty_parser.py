@@ -85,6 +85,12 @@ def _normalize_ocr_noise(raw: str) -> str:
     # Indian qty values are small (< 1000), so commas are never thousands separators.
     text = text.replace(",", ".")
 
+    # OCR Digit Corruption Patterns (Context-Aware)
+    # Only replace O/I/B if surrounded by digits or near decimal points
+    text = re.sub(r'(?<=\d)[OoOo](?=\d|\.|$)', '0', text)
+    text = re.sub(r'(?<=\d|\.)[lI](?=\d|\.|$)', '1', text)
+    text = re.sub(r'(?<=\d)[B8](?=\d|\.|$)', '8', text)
+
     # Normalize whitespace around operators but preserve the operator
     text = re.sub(r'\s*\+\s*', '+', text)  # collapse spaces around '+'
     text = re.sub(r'\s*\*\s*', '*', text)  # collapse spaces around '*'

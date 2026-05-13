@@ -210,25 +210,23 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     
     # ── Step 5.5: TABLE CLASSIFICATION & ROUTING (Failure Mode 4) ──
     classifier_engine = TableClassifier()
-    try:
-        classifications = classifier_engine.classify_region_list(table_regions)
-        table_bundle = route_tables(table_regions, classifications)
-        logger.info(
-            "[TABLE ROUTING] "
-            f"main={1 if table_bundle.main_table else 0}, "
-            f"gst={len(table_bundle.gst_summary)}, "
-            f"scheme={len(table_bundle.scheme_items)}, "
-            f"credit={len(table_bundle.credit_notes)}"
-        )
-    except Exception as e:
-        logger.error(f"Table classifier failure, continuing monolithically: {e}")
-        table_bundle = None
+    classifications = classifier_engine.classify_region_list(table_regions)
+    table_bundle = route_tables(table_regions, classifications)
+    
+    ignored_tables_count = len(table_regions) - (1 if table_bundle.main_table else 0)
+    
+    logger.info(
+        f"Detected {len(table_regions)} tables. "
+        f"Chosen main table: {table_bundle.main_table.table_id if table_bundle.main_table else 'None'}. "
+        f"Ignored tables: {ignored_tables_count}"
+    )
+    
+    if not table_bundle.main_table:
+        raise ValueError("Failed to isolate a dominant main invoice table.")
     
     # Step 6: Semantic & Mathematical Stability Audits (ACTIVE SIGNAL GENERATION)
     # ONLY perform downstream extraction / stability processing on Dominant Main Table to avoid contamination!
-    analysis_targets = table_regions
-    if table_bundle and table_bundle.main_table:
-        analysis_targets = [table_bundle.main_table]
+    analysis_targets = [table_bundle.main_table]
         
     semantic_results = {}
     classifier = SemanticColumnClassifier()
@@ -245,11 +243,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     row_validation_results = row_validator.validate_all(analysis_targets)
     
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
-    # Note: We reconcile the MAIN table specifically, or fall back to primary table list.
-    target_reconcile = table_regions
-    if table_bundle and table_bundle.main_table:
-        # Focus primary reconciliation strictly on main items grid if clearly isolated
-        target_reconcile = [table_bundle.main_table]
+    # Note: We reconcile the MAIN table specifically
+    target_reconcile = [table_bundle.main_table]
         
     reconciler = FinancialReconciler(semantic_column_cache=semantic_results)
     reconciliation_results = reconciler.reconcile_all(target_reconcile)
