@@ -4,7 +4,6 @@ import numpy as np
 from typing import List
 from core.logger import logger
 from models.layout_models import OCRBlock, TableRegion
-from services.layout_pipeline.column_projection import get_anchor_x
 
 def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion], image_width: float, image_height: float, output_path: str):
     """
@@ -58,11 +57,7 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
                 cv2.putText(canvas, block.text[:10], (int(geom.min_x) + 2, int(geom.min_y) + 12), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
                 
-                # Draw numeric anchors
-                if block.is_numeric:
-                    anchor_x = int(get_anchor_x(block))
-                    anchor_y = int(geom.center_y)
-                    cv2.circle(canvas, (anchor_x, anchor_y), 3, COLOR_ANCHOR, -1)
+                # Numeric anchor drawing disabled: get_anchor_x was removed from column_projection.
                     
         # 2. Draw TSR Grids
         for region in regions:
