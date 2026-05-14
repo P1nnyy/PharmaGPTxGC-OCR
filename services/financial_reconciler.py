@@ -265,6 +265,11 @@ class FinancialReconciler:
         rows_valid_total = 0
         
         verifier = DiscountAwareVerifier()
+        footer_row_pattern = re.compile(
+            r"\b(SUB\s*TOTAL|GRAND\s*TOTAL|TOTAL|SGST|CGST|GST|ROUND(?:OFF)?|DISCOUNT)\b"
+            r"|(?:\b(?:RS\.?|RUPEES)\b.*\bONLY\b)",
+            re.IGNORECASE
+        )
         
         for row in region.rows:
             # Skip highly unstable or header rows
@@ -272,6 +277,13 @@ class FinancialReconciler:
                 continue
             
             row_cells = cells_by_row.get(row.row_id, [])
+            row_text = " ".join(c.text for c in row_cells if c.text).strip()
+            if footer_row_pattern.search(row_text):
+                logger.debug(
+                    f"[FOOTER ROW REJECTED] Skipping row '{row.row_id}' from item subtotal derivation: "
+                    f"'{row_text[:120]}'"
+                )
+                continue
             
             # Extract candidate numeric values
             r_amt = r_qty_obj = r_rate = r_disc = None
