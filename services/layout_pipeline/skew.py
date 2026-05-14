@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from typing import List
+from typing import Any, List
 from core.logger import logger
 from models.layout_models import OCRBlock, GeometryBox
 def detect_image_rotation(blocks: List[OCRBlock]) -> bool:
