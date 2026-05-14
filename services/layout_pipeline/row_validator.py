@@ -120,6 +120,7 @@ class RowValidator:
             for cell in populated_cells:
                 col_meta = table_semantics.get(cell.col_id, {})
                 col_type = col_meta.get("type", "UNKNOWN") if isinstance(col_meta, dict) else "UNKNOWN"
+                col_type = str(col_type).upper()
                 
                 cell_is_numeric = _is_numeric_cell(cell.text)
                 
@@ -202,6 +203,7 @@ class RowValidator:
             for cell in row_cells:
                 col_meta = table_semantics.get(cell.col_id, {})
                 col_type = col_meta.get("type", "UNKNOWN") if isinstance(col_meta, dict) else "UNKNOWN"
+                col_type = str(col_type).upper()
                 if col_type == "AMOUNT":
                     val = _parse_numeric(cell.text)
                     if val is not None and val > 0:

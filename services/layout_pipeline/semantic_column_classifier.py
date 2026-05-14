@@ -155,10 +155,15 @@ class SemanticColumnClassifier:
                         
         if rejections > 0:
             logger.warning(f"[HARD CONSTRAINT] Rejected {rejections} non-conforming cell assignments from numeric columns.")
+        results["_rejection_summary"] = {
+            "semantic_rejection_count": rejections
+        }
 
         # Summarize final structure
         type_counts = {}
         for cid, data in results.items():
+            if cid.startswith("_"):
+                continue
             ctype = data["type"]
             type_counts[ctype] = type_counts.get(ctype, 0) + 1
             

@@ -157,10 +157,15 @@ class ConfidenceCompositor:
         
         result = {
             "tables": {},
-            "invoice_confidence": 0.0
+            "invoice_confidence": 0.0,
+            "confidence_variance": {
+                "table_confidence_variance": 0.0,
+                "row_confidence_variance": 0.0
+            }
         }
         
         table_confidences = []
+        all_row_confidences = []
         
         for region in regions:
             # Build cell lookup
@@ -193,6 +198,7 @@ class ConfidenceCompositor:
                 
                 row_conf = self.compute_row_confidence(row, row_cells, financial_sanity, completeness)
                 row_confs[row.row_id] = row_conf
+                all_row_confidences.append(row_conf)
             
             # Compute table confidence
             table_conf = self.compute_table_confidence(region, row_confs)
@@ -214,10 +220,15 @@ class ConfidenceCompositor:
                 recon_confidence = sum(recon_vals) / len(recon_vals)
         
         result["invoice_confidence"] = self.compute_invoice_confidence(table_confidences, recon_confidence)
+        if len(table_confidences) > 1:
+            result["confidence_variance"]["table_confidence_variance"] = round(statistics.variance(table_confidences), 6)
+        if len(all_row_confidences) > 1:
+            result["confidence_variance"]["row_confidence_variance"] = round(statistics.variance(all_row_confidences), 6)
         
         logger.info(
             f"Confidence Hierarchy: invoice={result['invoice_confidence']}, "
-            f"tables={[result['tables'][t]['table_confidence'] for t in result['tables']]}"
+            f"tables={[result['tables'][t]['table_confidence'] for t in result['tables']]}, "
+            f"variance={result['confidence_variance']}"
         )
         
         return result
