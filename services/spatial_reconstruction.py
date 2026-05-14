@@ -10,6 +10,7 @@ from services.layout_pipeline.stability_engine import TopologyStabilityEngine
 from services.layout_pipeline.row_validator import RowValidator
 from services.layout_pipeline.multiline_merging import merge_multiline_table_rows, update_row_stability_scores
 from services.layout_pipeline.confidence import ConfidenceCompositor
+from services.layout_pipeline.row_roles import classify_row_roles
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler
 from services.table_classifier import TableClassifier, route_tables, TableType
@@ -259,14 +260,45 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # ONLY perform downstream extraction / stability processing on Dominant Main Table to avoid contamination!
     analysis_targets = [table_bundle.main_table]
 
+    row_role_metrics = {
+        "item_rows_count": 0,
+        "header_rows_count": 0,
+        "footer_rows_count": 0,
+        "tax_rows_count": 0,
+        "metadata_rows_count": 0,
+        "unknown_rows_count": 0,
+        "by_table": {},
+    }
+    for tr in analysis_targets:
+        table_role_metrics = classify_row_roles(tr)
+        row_role_metrics["by_table"][tr.table_id] = table_role_metrics
+        for key in (
+            "item_rows_count",
+            "header_rows_count",
+            "footer_rows_count",
+            "tax_rows_count",
+            "metadata_rows_count",
+            "unknown_rows_count",
+        ):
+            row_role_metrics[key] += table_role_metrics.get(key, 0)
+
     semantic_results = {}
     classifier = SemanticColumnClassifier()
     semantic_rejection_total = 0
+    semantic_outlier_total = 0
+    hard_deleted_cells_total = 0
+    columns_inferred_from_item_rows_only = True
     for tr in analysis_targets:
         semantic_results[tr.table_id] = classifier.enrich_region_metadata(tr)
-        semantic_rejection_total += semantic_results[tr.table_id].get(
-            "_rejection_summary", {}
-        ).get("semantic_rejection_count", 0)
+        rejection_summary = semantic_results[tr.table_id].get("_rejection_summary", {})
+        inference_summary = semantic_results[tr.table_id].get("_inference_summary", {})
+        semantic_rejection_total += rejection_summary.get("semantic_rejection_count", 0)
+        semantic_outlier_total += rejection_summary.get("semantic_outlier_count", 0)
+        hard_deleted_cells_total += rejection_summary.get("hard_deleted_cells_count", 0)
+        columns_inferred_from_item_rows_only = (
+            columns_inferred_from_item_rows_only
+            and inference_summary.get("columns_inferred_from_item_rows_only", False)
+        )
 
     stability_engine = TopologyStabilityEngine()
     stability_metrics = stability_engine.compute_stability(analysis_targets)
@@ -297,6 +329,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         f"[Instrumentation] TSR contribution={tsr_contribution_percent:.1f}% "
         f"heuristic_fallback={heuristic_fallback_used} "
         f"semantic_rejections={semantic_rejection_total} "
+        f"semantic_outliers={semantic_outlier_total} "
         f"confidence_variance={confidence_hierarchy.get('confidence_variance', {})}"
     )
 
@@ -321,6 +354,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "heuristic_fallback_used": heuristic_fallback_used,
                     "heuristic_fallback_count": 1 if heuristic_fallback_used else 0,
                     "semantic_rejection_count": semantic_rejection_total,
+                    "semantic_outlier_count": semantic_outlier_total,
+                    "hard_deleted_cells_count": hard_deleted_cells_total,
+                    "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+                    "item_rows_count": row_role_metrics["item_rows_count"],
+                    "footer_rows_count": row_role_metrics["footer_rows_count"],
+                    "tax_rows_count": row_role_metrics["tax_rows_count"],
+                    "row_role_metrics": row_role_metrics,
                     "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                 },
                 "fast_fail": True,
@@ -416,6 +456,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "row_index": row_counter,
                 "blocks": blocks_in_row,
                 "classification": tr.region_type.value,
+                "row_role": getattr(row_region, "row_role", "unknown_row"),
                 "columns": columns_dict
             }
             legacy_reconstructed_rows.append(legacy_row)
@@ -489,6 +530,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_stability": stability_metrics,
             "column_semantic_cache": semantic_results,
             "semantic_rejection_count": semantic_rejection_total,
+            "semantic_outlier_count": semantic_outlier_total,
+            "hard_deleted_cells_count": hard_deleted_cells_total,
+            "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+            "item_rows_count": row_role_metrics["item_rows_count"],
+            "footer_rows_count": row_role_metrics["footer_rows_count"],
+            "tax_rows_count": row_role_metrics["tax_rows_count"],
+            "row_role_metrics": row_role_metrics,
             "topology_repairs": repair_metrics_total,
             "row_validation": row_validation_results,
             "financial_reconciliation": reconciliation_results,
@@ -498,6 +546,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "heuristic_fallback_used": heuristic_fallback_used,
                 "heuristic_fallback_count": 1 if heuristic_fallback_used else 0,
                 "semantic_rejection_count": semantic_rejection_total,
+                "semantic_outlier_count": semantic_outlier_total,
+                "hard_deleted_cells_count": hard_deleted_cells_total,
+                "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+                "item_rows_count": row_role_metrics["item_rows_count"],
+                "footer_rows_count": row_role_metrics["footer_rows_count"],
+                "tax_rows_count": row_role_metrics["tax_rows_count"],
+                "row_role_metrics": row_role_metrics,
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
             },
             "fast_fail": False,

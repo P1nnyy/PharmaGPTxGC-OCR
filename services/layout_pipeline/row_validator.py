@@ -74,6 +74,8 @@ class RowValidator:
             "isolated_rows": 0,
             "financial_passes": 0,
             "financial_failures": 0,
+            "structural_failures": 0,
+            "missing_semantic_columns": [],
             "incomplete_rows": 0,
             "duplicate_suspects": 0,
             "semantic_mismatches": 0,
@@ -89,18 +91,41 @@ class RowValidator:
         
         # Get column semantic types for this table
         table_semantics = self.semantic_cache.get(region.table_id, {})
-        
+        semantic_types = {
+            str(meta.get("type", "") if isinstance(meta, dict) else meta).upper()
+            for col_id, meta in table_semantics.items()
+            if not str(col_id).startswith("_")
+        }
+        required_semantics = {
+            "quantity": ("QUANTITY", "QTY"),
+            "rate": ("RATE",),
+            "amount": ("AMOUNT",),
+        }
+        missing_semantic_columns = [
+            name for name, aliases in required_semantics.items()
+            if not any(alias in semantic_types for alias in aliases)
+        ]
+        if missing_semantic_columns:
+            results["missing_semantic_columns"] = missing_semantic_columns
+            logger.warning(
+                f"[STRUCTURAL VALIDATION] Missing semantic columns for table {region.table_id}: "
+                f"{missing_semantic_columns}"
+            )
+
         # === Pass 1: Row Completeness + Semantic Validation ===
         for row in region.rows:
             row_cells = cells_by_row.get(row.row_id, [])
             populated_cells = [c for c in row_cells if c.text.strip()]
-            
+            row_role = getattr(row, "row_role", "unknown_row")
+
             diag = {
                 "row_id": row.row_id,
+                "row_role": row_role,
                 "cell_count": len(row_cells),
                 "populated_count": len(populated_cells),
                 "penalties": [],
-                "financial_check": None
+                "financial_check": None,
+                "structural_check": None
             }
             
             stability = 1.0
@@ -131,7 +156,7 @@ class RowValidator:
                     results["semantic_mismatches"] += 1
                 
                 # Text content in a numeric column
-                if col_type in ("AMOUNT", "RATE", "QTY", "TAX") and not cell_is_numeric and cell.text.strip():
+                if col_type in ("AMOUNT", "RATE", "QTY", "QUANTITY", "TAX") and not cell_is_numeric and cell.text.strip():
                     # Allow header-like text (the first row often has column labels)
                     if not re.search(r'(AMOUNT|RATE|QTY|TAX|GST|TOTAL|PRICE|QUANTITY)', cell.text.upper()):
                         stability *= 0.85
@@ -142,28 +167,44 @@ class RowValidator:
                 if cell.assignment_strategy == "global_fallback":
                     stability *= 0.7
                     diag["penalties"].append(f"global_fallback:{cell.col_id}")
-            
+                if getattr(cell, "semantic_outlier", False):
+                    stability *= 0.85
+                    diag["penalties"].append(f"semantic_outlier:{cell.col_id}")
+
             # === Pass 2: Financial Sanity (qty × rate ≈ amount) ===
             qty_val, rate_val, amount_val, disc_val = None, None, None, None
-            
-            for cell in populated_cells:
-                col_meta = table_semantics.get(cell.col_id, {})
-                col_type = col_meta.get("type", "").upper() if isinstance(col_meta, dict) else str(col_meta).upper()
-                
-                if col_type == "QUANTITY" or col_type == "QTY":
-                    qty_parsed = parse_quantity(cell.text)
-                    qty_val = Decimal(str(qty_parsed.billed_qty))
-                elif col_type == "RATE":
-                    parsed_num = _parse_numeric(cell.text)
-                    rate_val = Decimal(str(parsed_num)) if parsed_num is not None else None
-                elif col_type == "AMOUNT":
-                    parsed_num = _parse_numeric(cell.text)
-                    amount_val = Decimal(str(parsed_num)) if parsed_num is not None else None
-                elif "DISCOUNT" in col_type or "DISC" in col_type:
-                    parsed_num = _parse_numeric(cell.text)
-                    disc_val = Decimal(str(parsed_num)) if parsed_num is not None else None
-            
-            if qty_val is not None and rate_val is not None and amount_val is not None:
+
+            if row_role != "item_row":
+                diag["structural_check"] = f"SKIP non_item_role:{row_role}"
+            elif missing_semantic_columns:
+                diag["structural_check"] = f"FAIL missing_semantic_columns:{','.join(missing_semantic_columns)}"
+                diag["penalties"].append("missing_semantic_columns")
+                results["structural_failures"] += 1
+                stability *= 0.6
+            else:
+                diag["structural_check"] = "PASS"
+
+            if diag["structural_check"] == "PASS":
+                for cell in populated_cells:
+                    if getattr(cell, "semantic_outlier", False):
+                        continue
+                    col_meta = table_semantics.get(cell.col_id, {})
+                    col_type = col_meta.get("type", "").upper() if isinstance(col_meta, dict) else str(col_meta).upper()
+
+                    if col_type == "QUANTITY" or col_type == "QTY":
+                        qty_parsed = parse_quantity(cell.text)
+                        qty_val = Decimal(str(qty_parsed.billed_qty))
+                    elif col_type == "RATE":
+                        parsed_num = _parse_numeric(cell.text)
+                        rate_val = Decimal(str(parsed_num)) if parsed_num is not None else None
+                    elif col_type == "AMOUNT":
+                        parsed_num = _parse_numeric(cell.text)
+                        amount_val = Decimal(str(parsed_num)) if parsed_num is not None else None
+                    elif "DISCOUNT" in col_type or "DISC" in col_type:
+                        parsed_num = _parse_numeric(cell.text)
+                        disc_val = Decimal(str(parsed_num)) if parsed_num is not None else None
+
+            if diag["structural_check"] == "PASS" and qty_val is not None and rate_val is not None and amount_val is not None:
                 # Integrate global discount verifier engine
                 verifier = DiscountAwareVerifier()
                 success, formula = verifier.verify_row_math(qty_val, rate_val, amount_val, disc_val)
@@ -184,6 +225,11 @@ class RowValidator:
                     else:
                         stability *= 0.6  # Moderate mismatch
                     diag["penalties"].append("financial_inconsistency")
+            elif diag["structural_check"] == "PASS":
+                diag["structural_check"] = "FAIL incomplete_qty_rate_amount_values"
+                diag["penalties"].append("incomplete_qty_rate_amount_values")
+                results["structural_failures"] += 1
+                stability *= 0.75
             
             # Clamp and commit stability
             row.stability = round(max(0.05, min(1.0, stability)), 3)
@@ -199,8 +245,12 @@ class RowValidator:
         # === Pass 3: Duplicate Row Detection ===
         amount_rows = {}  # amount_value -> [row_ids]
         for row in region.rows:
+            if getattr(row, "row_role", "unknown_row") != "item_row":
+                continue
             row_cells = cells_by_row.get(row.row_id, [])
             for cell in row_cells:
+                if getattr(cell, "semantic_outlier", False):
+                    continue
                 col_meta = table_semantics.get(cell.col_id, {})
                 col_type = col_meta.get("type", "UNKNOWN") if isinstance(col_meta, dict) else "UNKNOWN"
                 col_type = str(col_type).upper()

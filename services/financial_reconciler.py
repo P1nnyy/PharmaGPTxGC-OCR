@@ -257,6 +257,8 @@ class FinancialReconciler:
         cells_by_row = {}
         for cell in region.cells:
             cells_by_row.setdefault(cell.row_id, []).append(cell)
+        row_roles = {row.row_id: getattr(row, "row_role", "unknown_row") for row in region.rows}
+        roles_available = any(role != "unknown_row" for role in row_roles.values())
             
         # 3. Per-Row Processing (Amount derivation, math checks)
         derived_subtotal = Decimal("0")
@@ -277,6 +279,10 @@ class FinancialReconciler:
                 continue
             
             row_cells = cells_by_row.get(row.row_id, [])
+            row_role = getattr(row, "row_role", "unknown_row")
+            if row_role in ("header_row", "footer_summary_row", "tax_summary_row", "metadata_row"):
+                logger.debug(f"[RECONCILE ROW SKIP] Skipping row '{row.row_id}' role={row_role}")
+                continue
             row_text = " ".join(c.text for c in row_cells if c.text).strip()
             if footer_row_pattern.search(row_text):
                 logger.debug(
@@ -289,6 +295,8 @@ class FinancialReconciler:
             r_amt = r_qty_obj = r_rate = r_disc = None
             
             for c in row_cells:
+                if getattr(c, "semantic_outlier", False):
+                    continue
                 if c.col_id in amt_cols: r_amt = _to_decimal(c.text)
                 if c.col_id in qty_cols: r_qty_obj = parse_quantity(c.text)
                 if c.col_id in rate_cols: r_rate = _to_decimal(c.text)
@@ -332,9 +340,12 @@ class FinancialReconciler:
             
             val = _to_decimal(text)
             cy = cell.geometry.center_y if cell.geometry else 0
+            row_role = row_roles.get(cell.row_id, "unknown_row")
+            summary_row = row_role in ("footer_summary_row", "tax_summary_row")
+            summary_eligible = summary_row or not roles_available
             
             # Is it in a Tax column? Accumulate directly
-            if cell.col_id in tax_cols and val > 0:
+            if summary_eligible and cell.col_id in tax_cols and val > 0 and getattr(cell, "semantic_outlier", False) is False:
                 parsed_gst_sum += val
                 
             # Candidate metadata object
@@ -343,10 +354,10 @@ class FinancialReconciler:
             # Scan for labels
             text_up = text.upper()
             # Subtotal check
-            if any(kw in text_up for kw in FinancialConfig.SUBTOTAL_KEYWORDS):
+            if summary_eligible and any(kw in text_up for kw in FinancialConfig.SUBTOTAL_KEYWORDS):
                 potential_subtotals.append(meta)
             # Grand total check - pass everything containing 'total' or 'net' for fuzzy vetting
-            if "TOTAL" in text_up or "NET" in text_up or "AMT" in text_up:
+            if summary_eligible and ("TOTAL" in text_up or "NET" in text_up or "AMT" in text_up):
                 potential_grand_totals.append(meta)
 
         # Run fuzzy grand total selection
