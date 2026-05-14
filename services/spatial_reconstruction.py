@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 from core.logger import logger
-from utils.debug_visualizer import draw_debug_visualization
+from core.config import settings
 
 from services.layout_pipeline.geometry import process_blocks
 from services.layout_pipeline.skew import apply_skew_normalization
@@ -11,6 +11,7 @@ from services.layout_pipeline.row_validator import RowValidator
 from services.layout_pipeline.multiline_merging import merge_multiline_table_rows, update_row_stability_scores
 from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.layout_pipeline.row_roles import classify_row_roles
+from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler
 from services.table_classifier import TableClassifier, route_tables, TableType
@@ -53,6 +54,152 @@ def _compute_tsr_confidence(table_regions) -> float:
         avg_confidence *= 0.5
 
     return round(avg_confidence, 3)
+
+def _box_to_dict(geom) -> Dict[str, Any]:
+    if not geom:
+        return {
+            "x1": None, "y1": None, "x2": None, "y2": None,
+            "center_x": None, "center_y": None,
+            "width": None, "height": None,
+        }
+    return {
+        "x1": float(geom.min_x),
+        "y1": float(geom.min_y),
+        "x2": float(geom.max_x),
+        "y2": float(geom.max_y),
+        "center_x": float(geom.center_x),
+        "center_y": float(geom.center_y),
+        "width": float(geom.max_x - geom.min_x),
+        "height": float(geom.max_y - geom.min_y),
+    }
+
+def _token_flags(text: str) -> Dict[str, bool]:
+    import re
+    clean = (text or "").strip()
+    compact = re.sub(r"\s+", "", clean.upper())
+    return {
+        "is_decimal": bool(re.fullmatch(r"[₹$]?\d[\d,]*\.\d+%?", compact)),
+        "is_date_like": bool(re.fullmatch(r"\d{1,2}[/-]\d{2,4}", compact)),
+        "is_batch_like": bool(re.search(r"[A-Z]\d|\d[A-Z]", compact)),
+        "is_hsn_like": bool(re.fullmatch(r"\d{6,8}", compact)),
+    }
+
+def _build_topology_debug(ocr_blocks, table_regions, main_tables=None, semantic_results=None) -> Dict[str, Any]:
+    """
+    Non-mutating topology inspection artifact for debugging token→row→cell→column failures.
+    """
+    import re
+    main_tables = main_tables or []
+    semantic_results = semantic_results or {}
+
+    assignment_by_token = {}
+    blocks_by_id = {b.id: b for b in ocr_blocks if b.id}
+
+    for table in table_regions:
+        for cell in table.cells:
+            cell_id = f"{cell.row_id}:{cell.col_id}"
+            for token_id in cell.mapped_block_ids:
+                assignment_by_token.setdefault(token_id, {
+                    "assigned_row_id": cell.row_id,
+                    "assigned_cell_id": cell_id,
+                    "assigned_col_id": cell.col_id,
+                    "assigned_table_id": table.table_id,
+                })
+
+    raw_token_graph = []
+    for block in ocr_blocks:
+        geom = block.normalized_geometry or block.original_geometry
+        box = _box_to_dict(geom)
+        flags = _token_flags(block.text)
+        assignment = assignment_by_token.get(block.id, {})
+        raw_token_graph.append({
+            "token_id": block.id,
+            "text": block.text,
+            **box,
+            "is_numeric": bool(block.is_numeric),
+            **flags,
+            "assigned_row_id": assignment.get("assigned_row_id"),
+            "assigned_cell_id": assignment.get("assigned_cell_id"),
+            "assigned_col_id": assignment.get("assigned_col_id"),
+        })
+
+    main_table_ids = {t.table_id for t in main_tables}
+    debug_tables = []
+    for table in table_regions:
+        if main_table_ids and table.table_id not in main_table_ids:
+            continue
+
+        cells_by_row = {}
+        for cell in table.cells:
+            cells_by_row.setdefault(cell.row_id, []).append(cell)
+
+        rows_debug = []
+        for row in table.rows:
+            row_cells = cells_by_row.get(row.row_id, [])
+            token_ids = []
+            for cell in row_cells:
+                token_ids.extend(cell.mapped_block_ids)
+            row_tokens = []
+            for token_id in token_ids:
+                block = blocks_by_id.get(token_id)
+                if not block:
+                    continue
+                geom = block.normalized_geometry or block.original_geometry
+                row_tokens.append({
+                    "token_id": token_id,
+                    "text": block.text,
+                    **_box_to_dict(geom),
+                })
+            row_tokens.sort(key=lambda t: (
+                t["center_y"] if t["center_y"] is not None else 0,
+                t["center_x"] if t["center_x"] is not None else 0,
+            ))
+            rows_debug.append({
+                "row_id": row.row_id,
+                "row_role": getattr(row, "row_role", "unknown_row"),
+                "geometry": _box_to_dict(row.geometry),
+                "token_count": len(row_tokens),
+                "tokens": row_tokens,
+            })
+
+        debug_tables.append({
+            "table_id": table.table_id,
+            "row_count": len(table.rows),
+            "column_count": len(table.columns),
+            "rows": rows_debug,
+            "current_reconstructed_cells": [
+                {
+                    "cell_id": f"{cell.row_id}:{cell.col_id}",
+                    "row_id": cell.row_id,
+                    "col_id": cell.col_id,
+                    "text": cell.text,
+                    "mapped_block_ids": list(cell.mapped_block_ids),
+                    "geometry": _box_to_dict(cell.geometry),
+                    "assignment_strategy": cell.assignment_strategy,
+                    "assignment_confidence": cell.assignment_confidence,
+                    "semantic_outlier": getattr(cell, "semantic_outlier", False),
+                    "semantic_outlier_reason": getattr(cell, "semantic_outlier_reason", None),
+                }
+                for cell in table.cells
+            ],
+            "current_column_boundaries": [
+                {
+                    "col_id": col.col_id,
+                    "geometry": _box_to_dict(col.geometry),
+                }
+                for col in table.columns
+            ],
+            "current_semantic_labels": {
+                col_id: data.get("type")
+                for col_id, data in semantic_results.get(table.table_id, {}).items()
+                if isinstance(data, dict) and not col_id.startswith("_")
+            },
+        })
+
+    return {
+        "raw_token_graph": raw_token_graph,
+        "main_tables": debug_tables,
+    }
 
 def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False) -> Dict[str, Any]:
     """
@@ -117,30 +264,56 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 3: TSR Table Region Detection with Confidence-Gated Fallback
     table_regions = []
     tsr_metadata = {}
-    topology_source = "ppstructure"  # Track which engine produced the canonical topology
+    ppstructure_enabled = bool(
+        settings.ENABLE_PPSTRUCTURE
+        or str(settings.TSR_PRIMARY_ENGINE).lower() == "ppstructure"
+    )
+    ppstructure_threshold = float(settings.PPSTRUCTURE_CONFIDENCE_THRESHOLD)
+    topology_source = "ppstructure" if ppstructure_enabled else "heuristic_anchor"
     heuristic_fallback_used = False
     ppstructure_regions_attempted = 0
     ppstructure_cells_attempted = 0
+    tsr_status_metric = {
+        "ppstructure_enabled": ppstructure_enabled,
+        "ppstructure_skipped_reason": None,
+        "fallback_used": False,
+    }
 
     if reconstruct_mode == "compare":
         logger.info("Running in compare mode. Executing multiple engines.")
         heuristic_engine = HeuristicTSREngine()
-        pp_engine = PPStructure_TSREngine()
-
         heuristic_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
-        pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
-        ppstructure_regions_attempted = len(pp_regions)
-        ppstructure_cells_attempted = sum(len(tr.cells) for tr in pp_regions)
-
+        if ppstructure_enabled:
+            pp_engine = PPStructure_TSREngine()
+            pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
+            ppstructure_regions_attempted = len(pp_regions)
+            ppstructure_cells_attempted = sum(len(tr.cells) for tr in pp_regions)
+            logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
+            table_regions = pp_regions
+        else:
+            logger.info("[PPSTRUCTURE] Skipped compare-mode PPStructure pass: disabled_by_config")
+            table_regions = heuristic_regions
+            topology_source = "heuristic_anchor"
+            heuristic_fallback_used = True
+            tsr_metadata = {
+                "tsr_engine": "heuristic_anchor",
+                "tsr_disabled_reason": "disabled_by_config",
+            }
+            tsr_status_metric["ppstructure_skipped_reason"] = "disabled_by_config"
+            tsr_status_metric["fallback_used"] = True
+            for tr in table_regions:
+                tr.topology_confidence = 0.5
         logger.info(f"[COMPARE] Heuristic detected {len(heuristic_regions)} tables.")
-        logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
-        table_regions = pp_regions
-    elif reconstruct_mode == "heuristic":
+    elif reconstruct_mode == "heuristic" or not ppstructure_enabled:
         # Explicit heuristic mode (debug only)
+        if not ppstructure_enabled:
+            logger.info("[PPSTRUCTURE] Skipped PPStructure: disabled_by_config")
+            tsr_status_metric["ppstructure_skipped_reason"] = "disabled_by_config"
+            tsr_status_metric["fallback_used"] = True
+            heuristic_fallback_used = True
         engine = HeuristicTSREngine()
         table_regions, tsr_metadata = engine.detect_tables(ocr_blocks)
-        topology_source = "heuristic"
-        heuristic_fallback_used = False
+        topology_source = "heuristic_anchor" if not ppstructure_enabled else "heuristic"
         for tr in table_regions:
             tr.topology_confidence = 0.5  # Degraded confidence for heuristic-derived topology
     else:
@@ -154,16 +327,22 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         # Evaluate TSR output quality. If PPStructure fails or produces unreliable topology,
         # fall back to heuristic engine rather than proceeding with garbage structure.
         tsr_confidence = _compute_tsr_confidence(table_regions)
+        tsr_status_metric["ppstructure_confidence"] = tsr_confidence
+        tsr_status_metric["confidence_threshold"] = ppstructure_threshold
 
-        if tsr_confidence < 0.4:
+        if ppstructure_regions_attempted == 0 and ppstructure_cells_attempted == 0:
+            logger.warning("[PPSTRUCTURE] tables=0 cells=0; falling back to heuristic topology.")
+
+        if tsr_confidence < ppstructure_threshold:
             logger.warning(
-                f"[CONFIDENCE GATE] TSR confidence {tsr_confidence:.2f} below threshold (0.40). "
+                f"[CONFIDENCE GATE] TSR confidence {tsr_confidence:.2f} below threshold ({ppstructure_threshold:.2f}). "
                 f"Falling back to heuristic topology."
             )
             heuristic_engine = HeuristicTSREngine()
             table_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
             topology_source = "heuristic_fallback"
             heuristic_fallback_used = True
+            tsr_status_metric["fallback_used"] = True
             for tr in table_regions:
                 tr.topology_confidence = 0.5  # Degraded confidence tag
 
@@ -177,11 +356,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "tsr_contribution_percent": tsr_contribution_percent,
         "heuristic_fallback_used": heuristic_fallback_used,
         "heuristic_fallback_count": 1 if heuristic_fallback_used else 0,
+        "ppstructure_enabled": ppstructure_enabled,
+        "ppstructure_multi_orientation_enabled": bool(settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION),
+        "ppstructure_confidence_threshold": ppstructure_threshold,
     })
 
     # --- FAST-FAIL: No topology at all (both engines failed) ---
     if not table_regions:
-        logger.warning("[FAST FAIL] Zero table regions from both PPStructure and heuristic fallback.")
+        logger.warning("[FAST FAIL] Zero table regions from selected topology path.")
+        topology_debug = _build_topology_debug(ocr_blocks, [], [], {})
         return {
             "reconstructed_rows": [],
             "detected_table_rows": [],
@@ -194,6 +377,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "metrics": {
                 "raw_token_count": len(ocr_blocks),
                 "table_count": 0,
+                "topology_debug": topology_debug,
+                "column_anchor_debug": {},
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -205,7 +390,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     },
                 },
                 "fast_fail": True,
-                **tsr_metadata
+                **tsr_metadata,
+                "tsr_status": tsr_status_metric
             }
         }
 
@@ -282,12 +468,54 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         ):
             row_role_metrics[key] += table_role_metrics.get(key, 0)
 
+    column_anchor_debug = {}
+    anchor_repair = {
+        "enabled": False,
+        "reason": "not_evaluated",
+        "before_column_count": len(table_bundle.main_table.columns),
+        "after_column_count": len(table_bundle.main_table.columns),
+        "before_avg_cell_text_len": 0.0,
+        "after_avg_cell_text_len": 0.0,
+        "repaired_row_count": 0,
+        "product_col_detected": False,
+        "anchor_columns_used": [],
+    }
+    for tr in analysis_targets:
+        column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
+        anchor_repair = repair_undersegmented_table_with_anchors(
+            tr,
+            ocr_blocks,
+            column_anchor_debug[tr.table_id],
+        )
+        if anchor_repair.get("enabled"):
+            table_role_metrics = classify_row_roles(tr)
+            row_role_metrics = {
+                "item_rows_count": table_role_metrics.get("item_rows_count", 0),
+                "header_rows_count": table_role_metrics.get("header_rows_count", 0),
+                "footer_rows_count": table_role_metrics.get("footer_rows_count", 0),
+                "tax_rows_count": table_role_metrics.get("tax_rows_count", 0),
+                "metadata_rows_count": table_role_metrics.get("metadata_rows_count", 0),
+                "unknown_rows_count": table_role_metrics.get("unknown_rows_count", 0),
+                "by_table": {tr.table_id: table_role_metrics},
+            }
+            column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
+
     semantic_results = {}
     classifier = SemanticColumnClassifier()
     semantic_rejection_total = 0
     semantic_outlier_total = 0
     hard_deleted_cells_total = 0
+    quarantined_cell_total = 0
     columns_inferred_from_item_rows_only = True
+    semantic_column_scores_by_col = {}
+    final_column_semantics = {}
+    amount_column_candidates = {}
+    rejected_amount_candidates = {}
+    product_column_candidates = {}
+    expiry_column_candidates = {}
+    batch_column_candidates = {}
+    hsn_column_candidates = {}
+    gst_column_candidates = {}
     for tr in analysis_targets:
         semantic_results[tr.table_id] = classifier.enrich_region_metadata(tr)
         rejection_summary = semantic_results[tr.table_id].get("_rejection_summary", {})
@@ -295,10 +523,20 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         semantic_rejection_total += rejection_summary.get("semantic_rejection_count", 0)
         semantic_outlier_total += rejection_summary.get("semantic_outlier_count", 0)
         hard_deleted_cells_total += rejection_summary.get("hard_deleted_cells_count", 0)
+        quarantined_cell_total += rejection_summary.get("quarantined_cell_count", 0)
         columns_inferred_from_item_rows_only = (
             columns_inferred_from_item_rows_only
             and inference_summary.get("columns_inferred_from_item_rows_only", False)
         )
+        semantic_column_scores_by_col[tr.table_id] = inference_summary.get("semantic_column_scores_by_col", {})
+        final_column_semantics[tr.table_id] = inference_summary.get("final_column_semantics", {})
+        amount_column_candidates[tr.table_id] = inference_summary.get("amount_column_candidates", [])
+        rejected_amount_candidates[tr.table_id] = inference_summary.get("rejected_amount_candidates", [])
+        product_column_candidates[tr.table_id] = inference_summary.get("product_column_candidates", [])
+        expiry_column_candidates[tr.table_id] = inference_summary.get("expiry_column_candidates", [])
+        batch_column_candidates[tr.table_id] = inference_summary.get("batch_column_candidates", [])
+        hsn_column_candidates[tr.table_id] = inference_summary.get("hsn_column_candidates", [])
+        gst_column_candidates[tr.table_id] = inference_summary.get("gst_column_candidates", [])
 
     stability_engine = TopologyStabilityEngine()
     stability_metrics = stability_engine.compute_stability(analysis_targets)
@@ -332,6 +570,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         f"semantic_outliers={semantic_outlier_total} "
         f"confidence_variance={confidence_hierarchy.get('confidence_variance', {})}"
     )
+    topology_debug = _build_topology_debug(
+        ocr_blocks,
+        table_regions,
+        analysis_targets,
+        semantic_results,
+    )
+    semantic_debug = {
+        "semantic_column_scores_by_col": semantic_column_scores_by_col,
+        "final_column_semantics": final_column_semantics,
+        "amount_column_candidates": amount_column_candidates,
+        "rejected_amount_candidates": rejected_amount_candidates,
+        "product_column_candidates": product_column_candidates,
+        "expiry_column_candidates": expiry_column_candidates,
+        "batch_column_candidates": batch_column_candidates,
+        "hsn_column_candidates": hsn_column_candidates,
+        "gst_column_candidates": gst_column_candidates,
+        "quarantined_cell_count": quarantined_cell_total,
+    }
 
     # --- FAST-FAIL CHECKPOINT 2: Critically low topology confidence ---
     if benchmark_mode and stability_metrics.get('overall', 100) < 30:
@@ -349,6 +605,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "raw_token_count": len(ocr_blocks),
                 "table_count": len(table_regions),
                 "topology_stability": stability_metrics,
+                "topology_debug": topology_debug,
+                "semantic_debug": semantic_debug,
+                "column_anchor_debug": column_anchor_debug,
+                "anchor_repair": anchor_repair,
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -356,6 +616,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "semantic_rejection_count": semantic_rejection_total,
                     "semantic_outlier_count": semantic_outlier_total,
                     "hard_deleted_cells_count": hard_deleted_cells_total,
+                    "quarantined_cell_count": quarantined_cell_total,
                     "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
                     "item_rows_count": row_role_metrics["item_rows_count"],
                     "footer_rows_count": row_role_metrics["footer_rows_count"],
@@ -364,7 +625,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                 },
                 "fast_fail": True,
-                **tsr_metadata
+                **tsr_metadata,
+                "tsr_status": tsr_status_metric
             }
         }
 
@@ -528,11 +790,25 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "ioa_success_rate": ioa_success_rate,
             "empty_cell_ratio": empty_cell_ratio,
             "topology_stability": stability_metrics,
+            "topology_debug": topology_debug,
+            "semantic_debug": semantic_debug,
+            "column_anchor_debug": column_anchor_debug,
+            "anchor_repair": anchor_repair,
             "column_semantic_cache": semantic_results,
             "semantic_rejection_count": semantic_rejection_total,
             "semantic_outlier_count": semantic_outlier_total,
             "hard_deleted_cells_count": hard_deleted_cells_total,
+            "quarantined_cell_count": quarantined_cell_total,
             "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+            "semantic_column_scores_by_col": semantic_column_scores_by_col,
+            "final_column_semantics": final_column_semantics,
+            "amount_column_candidates": amount_column_candidates,
+            "rejected_amount_candidates": rejected_amount_candidates,
+            "product_column_candidates": product_column_candidates,
+            "expiry_column_candidates": expiry_column_candidates,
+            "batch_column_candidates": batch_column_candidates,
+            "hsn_column_candidates": hsn_column_candidates,
+            "gst_column_candidates": gst_column_candidates,
             "item_rows_count": row_role_metrics["item_rows_count"],
             "footer_rows_count": row_role_metrics["footer_rows_count"],
             "tax_rows_count": row_role_metrics["tax_rows_count"],
@@ -548,6 +824,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "semantic_rejection_count": semantic_rejection_total,
                 "semantic_outlier_count": semantic_outlier_total,
                 "hard_deleted_cells_count": hard_deleted_cells_total,
+                "quarantined_cell_count": quarantined_cell_total,
                 "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
                 "item_rows_count": row_role_metrics["item_rows_count"],
                 "footer_rows_count": row_role_metrics["footer_rows_count"],
@@ -556,6 +833,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
             },
             "fast_fail": False,
-            **tsr_metadata
+            **tsr_metadata,
+            "tsr_status": tsr_status_metric
         }
     }

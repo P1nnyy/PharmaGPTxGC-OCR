@@ -1,152 +1,492 @@
 import re
-from typing import List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 from core.logger import logger
-from models.layout_models import TableRegion, TableCell
+from models.layout_models import TableCell, TableRegion
+
 
 class ColumnSemantics:
-    AMOUNT = "amount"
+    PRODUCT = "product"
+    BATCH = "batch"
+    EXPIRY = "expiry"
+    HSN = "hsn"
+    QUANTITY = "quantity"
+    FREE_QUANTITY = "free_quantity"
+    MRP = "mrp"
     RATE = "rate"
     DISCOUNT = "discount"
-    QUANTITY = "quantity"
-    TAX = "tax"
-    TEXT = "text"
+    TAXABLE_VALUE = "taxable_value"
+    GST = "gst"
+    AMOUNT = "amount"
     UNKNOWN = "unknown"
+
+
+NUMERIC_SEMANTICS = {
+    ColumnSemantics.QUANTITY,
+    ColumnSemantics.FREE_QUANTITY,
+    ColumnSemantics.MRP,
+    ColumnSemantics.RATE,
+    ColumnSemantics.DISCOUNT,
+    ColumnSemantics.TAXABLE_VALUE,
+    ColumnSemantics.GST,
+    ColumnSemantics.AMOUNT,
+}
+
 
 class SemanticColumnClassifier:
     """
-    Post-Analysis Engine that consumes mapped cell contents to deduce the semantic purpose 
-    of each structural column. Enables advanced telemetry and dynamic alignment reinforcement.
-    """
-    
-    def __init__(self):
-        pass
+    Geometry-aware semantic classifier for reconstructed table columns.
 
-    def _cell_votes(self, text: str) -> Dict[str, float]:
-        text_up = text.upper()
-        votes = {
-            ColumnSemantics.AMOUNT: 0.0,
-            ColumnSemantics.RATE: 0.0,
-            ColumnSemantics.DISCOUNT: 0.0,
-            ColumnSemantics.QUANTITY: 0.0,
-            ColumnSemantics.TAX: 0.0,
-            ColumnSemantics.TEXT: 0.0,
+    The classifier only infers item-table column meanings from rows marked
+    item_row. Footer/tax/header/metadata rows are left available downstream for
+    totals extraction but do not vote on item column semantics.
+    """
+
+    GST_VALUES = {0.0, 2.5, 5.0, 6.0, 9.0, 12.0, 18.0, 28.0}
+
+    def _compact(self, text: str) -> str:
+        return re.sub(r"\s+", "", (text or "").strip().upper())
+
+    def _numeric_value(self, text: str) -> Optional[float]:
+        cleaned = re.sub(r"[₹$,%\s,]", "", (text or "").upper())
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    def _table_x_bounds(self, region: TableRegion) -> Tuple[float, float]:
+        if region.geometry:
+            return region.geometry.min_x, region.geometry.max_x
+
+        xs: List[float] = []
+        for col in region.columns:
+            if col.geometry:
+                xs.extend([col.geometry.min_x, col.geometry.max_x])
+        for cell in region.cells:
+            if cell.geometry:
+                xs.extend([cell.geometry.min_x, cell.geometry.max_x])
+        if not xs:
+            return 0.0, 1.0
+        return min(xs), max(xs)
+
+    def _x_ratio(self, region: TableRegion, col_id: str, fallback_center_x: Optional[float] = None) -> float:
+        table_min_x, table_max_x = self._table_x_bounds(region)
+        span = max(1.0, table_max_x - table_min_x)
+
+        center_x = fallback_center_x
+        col = next((c for c in region.columns if c.col_id == col_id), None)
+        if col and col.geometry:
+            center_x = col.geometry.center_x
+        if center_x is None:
+            center_x = table_min_x + (span / 2.0)
+        return max(0.0, min(1.0, (center_x - table_min_x) / span))
+
+    def _text_features(self, text: str) -> Dict[str, Any]:
+        raw = (text or "").strip()
+        compact = self._compact(raw)
+        content_chars = [c for c in compact if c.isalnum() or c in "./-%"]
+        alpha = sum(1 for c in content_chars if c.isalpha())
+        digit = sum(1 for c in content_chars if c.isdigit())
+        decimal = 1 if re.search(r"\d+\.\d+", compact) else 0
+        denom = max(1, len(content_chars))
+        numeric_value = self._numeric_value(compact)
+
+        is_expiry = bool(re.fullmatch(r"\d{1,2}[/-]\d{2,4}", compact))
+        is_hsn = bool(re.fullmatch(r"\d{6,8}", compact))
+        is_batch = (
+            bool(re.fullmatch(r"[A-Z0-9-]{5,20}", compact))
+            and bool(re.search(r"[A-Z]", compact))
+            and bool(re.search(r"\d", compact))
+            and not bool(re.search(r"\s", raw))
+            and not is_expiry
+            and not is_hsn
+        )
+        is_money = bool(re.fullmatch(r"[₹$]?\d[\d,]*\.\d{1,3}%?", compact))
+        is_integer = bool(re.fullmatch(r"\d+", compact))
+        is_qty = (
+            bool(re.fullmatch(r"\d+(?:[+*xX]\d+)?", compact))
+            and len(compact) <= 6
+            and not is_hsn
+        )
+        is_gst = (
+            "GST" in compact
+            or "CGST" in compact
+            or "SGST" in compact
+            or "IGST" in compact
+            or (numeric_value in self.GST_VALUES if numeric_value is not None else False)
+        )
+        has_discount_token = bool(re.search(r"(DISC|DISCOUNT|LESS)", compact))
+
+        return {
+            "alpha_chars": alpha,
+            "digit_chars": digit,
+            "decimal_chars": decimal,
+            "char_count": denom,
+            "alpha_ratio": alpha / denom,
+            "digit_ratio": digit / denom,
+            "is_decimal": bool(decimal),
+            "is_expiry": is_expiry,
+            "is_hsn": is_hsn,
+            "is_batch": is_batch,
+            "is_money": is_money,
+            "is_integer": is_integer,
+            "is_qty": is_qty,
+            "is_gst": is_gst,
+            "is_discount": has_discount_token,
+            "is_long_alpha_text": len(raw) >= 10 and alpha >= 4,
+            "numeric_value": numeric_value,
         }
 
-        if not text_up.strip():
-            return votes
+    def _column_profile(self, region: TableRegion, col_id: str, active_cells: List[TableCell]) -> Dict[str, Any]:
+        features = [self._text_features(c.text) for c in active_cells]
+        sample_size = len(features)
+        centers = [c.geometry.center_x for c in active_cells if c.geometry]
+        avg_center_x = sum(centers) / len(centers) if centers else None
+        right_side_score = self._x_ratio(region, col_id, avg_center_x)
 
-        has_digit = bool(re.search(r"\d", text_up))
-        has_decimal = bool(re.search(r"\d+\.\d+", text_up))
+        total_chars = max(1, sum(f["char_count"] for f in features))
+        alpha_density = sum(f["alpha_chars"] for f in features) / total_chars
+        digit_density = sum(f["digit_chars"] for f in features) / total_chars
+        decimal_density = sum(f["decimal_chars"] for f in features) / max(1, sample_size)
 
-        if any(kw in text_up for kw in ["DIS", "DISC", "TD%", "CD%"]):
-            votes[ColumnSemantics.DISCOUNT] += 1.0
-        if any(kw in text_up for kw in ["RATE", "UNIT PRICE", "MRP"]):
-            votes[ColumnSemantics.RATE] += 1.0
-        if any(kw in text_up for kw in ["GST", "CGST", "SGST", "IGST", "TAX"]):
-            votes[ColumnSemantics.TAX] += 0.5
+        numeric_values = [
+            f["numeric_value"]
+            for f in features
+            if f["numeric_value"] is not None
+        ]
+        gst_value_count = sum(1 for v in numeric_values if v in self.GST_VALUES)
 
-        if has_digit:
-            if re.search(r"\d+\s*[\+\*xX]\s*\d+", text_up):
-                votes[ColumnSemantics.QUANTITY] += 1.2
-            elif has_decimal:
-                votes[ColumnSemantics.AMOUNT] += 1.0
+        return {
+            "sample_size": sample_size,
+            "unique_row_support": len({c.row_id for c in active_cells}),
+            "alpha_density": alpha_density,
+            "digit_density": digit_density,
+            "decimal_density": decimal_density,
+            "expiry_pattern_count": sum(1 for f in features if f["is_expiry"]),
+            "batch_pattern_count": sum(1 for f in features if f["is_batch"]),
+            "hsn_pattern_count": sum(1 for f in features if f["is_hsn"]),
+            "gst_pattern_count": sum(1 for f in features if f["is_gst"]),
+            "money_pattern_count": sum(1 for f in features if f["is_money"]),
+            "qty_pattern_count": sum(1 for f in features if f["is_qty"]),
+            "integer_pattern_count": sum(1 for f in features if f["is_integer"]),
+            "discount_pattern_count": sum(1 for f in features if f["is_discount"]),
+            "long_alpha_text_count": sum(1 for f in features if f["is_long_alpha_text"]),
+            "gst_small_value_count": gst_value_count,
+            "numeric_value_min": min(numeric_values) if numeric_values else None,
+            "numeric_value_max": max(numeric_values) if numeric_values else None,
+            "avg_center_x": avg_center_x,
+            "right_side_score": right_side_score,
+        }
+
+    def _base_scores(self, profile: Dict[str, Any]) -> Dict[str, float]:
+        sample_size = max(1, profile["sample_size"])
+        expiry_ratio = profile["expiry_pattern_count"] / sample_size
+        batch_ratio = profile["batch_pattern_count"] / sample_size
+        hsn_ratio = profile["hsn_pattern_count"] / sample_size
+        gst_ratio = profile["gst_pattern_count"] / sample_size
+        money_ratio = profile["money_pattern_count"] / sample_size
+        qty_ratio = profile["qty_pattern_count"] / sample_size
+        right_side = profile["right_side_score"]
+
+        scores = {
+            ColumnSemantics.PRODUCT: 0.0,
+            ColumnSemantics.BATCH: batch_ratio * 4.0,
+            ColumnSemantics.EXPIRY: expiry_ratio * 5.0,
+            ColumnSemantics.HSN: hsn_ratio * 5.0,
+            ColumnSemantics.QUANTITY: qty_ratio * 3.0,
+            ColumnSemantics.FREE_QUANTITY: 0.0,
+            ColumnSemantics.MRP: 0.0,
+            ColumnSemantics.RATE: 0.0,
+            ColumnSemantics.DISCOUNT: profile["discount_pattern_count"] * 2.0,
+            ColumnSemantics.TAXABLE_VALUE: 0.0,
+            ColumnSemantics.GST: gst_ratio * 3.5,
+            ColumnSemantics.AMOUNT: 0.0,
+            ColumnSemantics.UNKNOWN: 0.0,
+        }
+
+        if profile["alpha_density"] >= 0.35 and right_side <= 0.55:
+            scores[ColumnSemantics.PRODUCT] += 2.0 + (profile["alpha_density"] * 3.0)
+        if profile["long_alpha_text_count"] > 0 and right_side <= 0.65:
+            scores[ColumnSemantics.PRODUCT] += 1.5
+
+        if money_ratio >= 0.45 and profile["alpha_density"] <= 0.18:
+            money_score = money_ratio * 2.0
+            scores[ColumnSemantics.MRP] += money_score * max(0.2, 1.0 - right_side)
+            scores[ColumnSemantics.RATE] += money_score
+            scores[ColumnSemantics.TAXABLE_VALUE] += money_score * right_side
+            scores[ColumnSemantics.AMOUNT] += money_score * (1.0 + right_side)
+
+        return scores
+
+    def _strong_non_amount_signal(self, profile: Dict[str, Any]) -> bool:
+        sample_size = max(1, profile["sample_size"])
+        return (
+            profile["alpha_density"] >= 0.28
+            or profile["expiry_pattern_count"] / sample_size >= 0.35
+            or profile["batch_pattern_count"] / sample_size >= 0.35
+            or profile["hsn_pattern_count"] / sample_size >= 0.35
+            or profile["gst_small_value_count"] / sample_size >= 0.55
+        )
+
+    def _strict_amount_candidate(self, profile: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        sample_size = max(1, profile["sample_size"])
+        reasons: List[str] = []
+        if profile["money_pattern_count"] / sample_size < 0.45:
+            reasons.append("insufficient_money_like_cells")
+        if profile["alpha_density"] > 0.18:
+            reasons.append("alpha_density_too_high")
+        if profile["right_side_score"] < 0.55:
+            reasons.append("not_right_side_column")
+        if profile["expiry_pattern_count"] > 0:
+            reasons.append("expiry_signal_present")
+        if profile["batch_pattern_count"] > 0:
+            reasons.append("batch_signal_present")
+        if profile["hsn_pattern_count"] > 0:
+            reasons.append("hsn_signal_present")
+        if profile["gst_small_value_count"] / sample_size >= 0.55:
+            reasons.append("gst_small_value_pattern")
+        return not reasons, reasons
+
+    def _ratio(self, profile: Dict[str, Any], key: str) -> float:
+        return profile.get(key, 0) / max(1, profile.get("sample_size", 0))
+
+    def _round_metrics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        rounded: Dict[str, Any] = {}
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                rounded[key] = round(value, 3)
+            elif isinstance(value, dict):
+                rounded[key] = self._round_metrics(value)
             else:
-                votes[ColumnSemantics.QUANTITY] += 0.8
-        else:
-            votes[ColumnSemantics.TEXT] += 1.0
+                rounded[key] = value
+        return rounded
 
-        return votes
-        
     def analyze_table_columns(self, region: TableRegion) -> Dict[str, Dict[str, Any]]:
         """
-        Scans all cell text inside each mapped ColumnRegion and scores their distribution profiles.
-        Returns map of {col_id: {type, confidence, audit_metrics}}
+        Score item-row cells per reconstructed column and return semantic labels.
         """
-        analysis_results = {}
-        
+        analysis_results: Dict[str, Dict[str, Any]] = {}
         row_roles = {r.row_id: getattr(r, "row_role", "unknown_row") for r in region.rows}
-        item_row_ids = {row_id for row_id, role in row_roles.items() if role == "item_row"}
+        excluded_roles = {"header_row", "footer_summary_row", "tax_summary_row", "metadata_row"}
+        item_row_ids: Set[str] = {
+            row_id
+            for row_id, role in row_roles.items()
+            if role == "item_row" and role not in excluded_roles
+        }
         columns_inferred_from_item_rows_only = bool(item_row_ids)
-        preliminary_amount_cols = []
+
+        semantic_column_scores_by_col: Dict[str, Any] = {}
+        final_column_semantics: Dict[str, str] = {}
+        amount_column_candidates: List[Dict[str, Any]] = []
+        rejected_amount_candidates: List[Dict[str, Any]] = []
+        product_column_candidates: List[str] = []
+        expiry_column_candidates: List[str] = []
+        batch_column_candidates: List[str] = []
+        hsn_column_candidates: List[str] = []
+        gst_column_candidates: List[str] = []
+
+        profiles: Dict[str, Dict[str, Any]] = {}
+        scores_by_col: Dict[str, Dict[str, float]] = {}
+        hard_semantics: Dict[str, str] = {}
+        money_candidates: List[str] = []
+        quantity_candidates: List[str] = []
 
         for col in region.columns:
-            c_id = col.col_id
+            col_id = col.col_id
             active_cells = [
                 c for c in region.cells
-                if c.col_id == c_id
+                if c.col_id == col_id
                 and c.row_id in item_row_ids
                 and (c.text or "").strip()
             ]
-
             if not active_cells:
-                analysis_results[c_id] = {
+                analysis_results[col_id] = {
                     "type": ColumnSemantics.UNKNOWN,
                     "confidence": 0.0,
                     "metrics": {
                         "sample_size": 0,
-                        "inferred_from_item_rows_only": columns_inferred_from_item_rows_only
-                    }
+                        "unique_row_support": 0,
+                        "inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+                    },
                 }
+                semantic_column_scores_by_col[col_id] = analysis_results[col_id]["metrics"]
                 continue
 
-            total_count = len(active_cells)
-            vote_totals = {
-                ColumnSemantics.AMOUNT: 0.0,
-                ColumnSemantics.RATE: 0.0,
-                ColumnSemantics.DISCOUNT: 0.0,
-                ColumnSemantics.QUANTITY: 0.0,
-                ColumnSemantics.TAX: 0.0,
-                ColumnSemantics.TEXT: 0.0,
-            }
-            numeric_count = decimal_count = tax_keywords_count = 0
+            profile = self._column_profile(region, col_id, active_cells)
+            scores = self._base_scores(profile)
+            profiles[col_id] = profile
+            scores_by_col[col_id] = scores
+            sample_size = max(1, profile["sample_size"])
 
-            for c in active_cells:
-                text = c.text.upper()
-                if re.search(r'\d', text):
-                    numeric_count += 1
-                if '.' in text:
-                    decimal_count += 1
-                if any(kw in text for kw in ["GST", "CGST", "SGST", "TAX"]):
-                    tax_keywords_count += 1
-                for semantic_type, weight in self._cell_votes(text).items():
-                    vote_totals[semantic_type] += weight
+            expiry_ratio = self._ratio(profile, "expiry_pattern_count")
+            hsn_ratio = self._ratio(profile, "hsn_pattern_count")
+            batch_ratio = self._ratio(profile, "batch_pattern_count")
+            gst_ratio = self._ratio(profile, "gst_pattern_count")
+            money_ratio = self._ratio(profile, "money_pattern_count")
+            qty_ratio = self._ratio(profile, "qty_pattern_count")
+            gst_small_ratio = self._ratio(profile, "gst_small_value_count")
 
-            best_type, best_score = max(vote_totals.items(), key=lambda kv: kv[1])
-            sorted_votes = sorted(vote_totals.values(), reverse=True)
-            runner_up = sorted_votes[1] if len(sorted_votes) > 1 else 0.0
-            conf = (best_score - runner_up) / max(1.0, sum(vote_totals.values()))
-            conf = max(0.0, min(0.95, conf))
+            amount_eligible, amount_reasons = self._strict_amount_candidate(profile)
+            if amount_eligible:
+                amount_column_candidates.append({
+                    "col_id": col_id,
+                    "right_side_score": round(profile["right_side_score"], 3),
+                    "money_pattern_count": profile["money_pattern_count"],
+                    "sample_size": sample_size,
+                })
+                money_candidates.append(col_id)
+            elif profile["money_pattern_count"] > 0 or profile["digit_density"] >= 0.6:
+                rejected_amount_candidates.append({
+                    "col_id": col_id,
+                    "reason": ",".join(amount_reasons) or "not_selected_as_amount",
+                    "right_side_score": round(profile["right_side_score"], 3),
+                    "alpha_density": round(profile["alpha_density"], 3),
+                    "digit_density": round(profile["digit_density"], 3),
+                    "decimal_density": round(profile["decimal_density"], 3),
+                })
 
-            if best_score <= 0:
-                best_type = ColumnSemantics.UNKNOWN
+            money_like_candidate = (
+                money_ratio >= 0.45
+                and profile["alpha_density"] <= 0.18
+                and expiry_ratio < 0.25
+                and batch_ratio < 0.25
+                and hsn_ratio < 0.25
+                and gst_small_ratio < 0.55
+            )
+            if money_like_candidate and col_id not in money_candidates:
+                money_candidates.append(col_id)
 
-            if best_type == ColumnSemantics.AMOUNT:
-                preliminary_amount_cols.append(c_id)
+            if profile["alpha_density"] >= 0.35 and profile["right_side_score"] <= 0.6:
+                product_column_candidates.append(col_id)
+            if expiry_ratio >= 0.25:
+                expiry_column_candidates.append(col_id)
+            if batch_ratio >= 0.25:
+                batch_column_candidates.append(col_id)
+            if hsn_ratio >= 0.25:
+                hsn_column_candidates.append(col_id)
+            if gst_ratio >= 0.25 or gst_small_ratio >= 0.55:
+                gst_column_candidates.append(col_id)
 
-            analysis_results[c_id] = {
-                "type": best_type,
-                "confidence": round(conf, 3),
+            if expiry_ratio >= 0.35:
+                hard_semantics[col_id] = ColumnSemantics.EXPIRY
+            elif hsn_ratio >= 0.35:
+                hard_semantics[col_id] = ColumnSemantics.HSN
+            elif batch_ratio >= 0.35 and profile["alpha_density"] >= 0.12:
+                hard_semantics[col_id] = ColumnSemantics.BATCH
+            elif (
+                (gst_ratio >= 0.45 or gst_small_ratio >= 0.55)
+                and profile["right_side_score"] >= 0.65
+                and money_ratio <= 0.7
+            ):
+                hard_semantics[col_id] = ColumnSemantics.GST
+            elif profile["alpha_density"] >= 0.35 and profile["right_side_score"] <= 0.55:
+                hard_semantics[col_id] = ColumnSemantics.PRODUCT
+            elif (
+                qty_ratio >= 0.45
+                and profile["alpha_density"] <= 0.2
+                and money_ratio < 0.35
+                and not self._strong_non_amount_signal(profile)
+            ):
+                quantity_candidates.append(col_id)
+
+            analysis_results[col_id] = {
+                "type": ColumnSemantics.UNKNOWN,
+                "confidence": 0.0,
                 "metrics": {
-                    "sample_size": total_count,
-                    "numeric_density": round(numeric_count / total_count, 2),
-                    "decimal_density": round(decimal_count / total_count, 2),
-                    "tax_signal": tax_keywords_count > 0,
-                    "weighted_votes": {k: round(v, 3) for k, v in vote_totals.items()},
-                    "inferred_from_item_rows_only": columns_inferred_from_item_rows_only
-                }
+                    **self._round_metrics(profile),
+                    "weighted_votes": {k: round(v, 3) for k, v in scores.items()},
+                    "amount_eligible": amount_eligible,
+                    "inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
+                },
             }
+            semantic_column_scores_by_col[col_id] = analysis_results[col_id]["metrics"]
 
-        if len(preliminary_amount_cols) > 1:
-            col_order = {c.col_id: i for i, c in enumerate(region.columns)}
-            rightmost_amount_col = max(preliminary_amount_cols, key=lambda cid: col_order.get(cid, -1))
-            for cid in preliminary_amount_cols:
-                if cid != rightmost_amount_col:
-                    analysis_results[cid]["type"] = ColumnSemantics.RATE
-                    analysis_results[cid]["metrics"]["amount_column_demoted_to_rate"] = True
+        quantity_candidates = sorted(
+            [cid for cid in quantity_candidates if cid not in hard_semantics],
+            key=lambda cid: profiles[cid]["right_side_score"],
+        )
+        if quantity_candidates:
+            hard_semantics[quantity_candidates[0]] = ColumnSemantics.QUANTITY
+            if len(quantity_candidates) > 1:
+                hard_semantics[quantity_candidates[1]] = ColumnSemantics.FREE_QUANTITY
+
+        money_candidates = sorted(
+            [
+                cid for cid in money_candidates
+                if cid not in hard_semantics
+                and not self._strong_non_amount_signal(profiles[cid])
+            ],
+            key=lambda cid: profiles[cid]["right_side_score"],
+        )
+        money_assignment: Dict[str, str] = {}
+        if money_candidates:
+            money_assignment[money_candidates[-1]] = ColumnSemantics.AMOUNT
+            left_money = money_candidates[:-1]
+            for idx, cid in enumerate(left_money):
+                if profiles[cid]["discount_pattern_count"] > 0:
+                    money_assignment[cid] = ColumnSemantics.DISCOUNT
+                    continue
+                if len(left_money) == 1:
+                    money_assignment[cid] = ColumnSemantics.RATE
+                elif idx == 0:
+                    money_assignment[cid] = ColumnSemantics.MRP
+                elif idx == 1:
+                    money_assignment[cid] = ColumnSemantics.RATE
+                else:
+                    money_assignment[cid] = ColumnSemantics.TAXABLE_VALUE
+
+        for col_id, data in analysis_results.items():
+            if col_id.startswith("_") or col_id not in profiles:
+                continue
+
+            profile = profiles[col_id]
+            scores = scores_by_col.get(col_id, {})
+            if col_id in hard_semantics:
+                best_type = hard_semantics[col_id]
+            elif col_id in money_assignment:
+                best_type = money_assignment[col_id]
+            else:
+                best_type, best_score = max(scores.items(), key=lambda item: item[1])
+                if best_score <= 0.0:
+                    best_type = ColumnSemantics.UNKNOWN
+                if best_type == ColumnSemantics.AMOUNT and self._strong_non_amount_signal(profile):
+                    rejected_amount_candidates.append({
+                        "col_id": col_id,
+                        "reason": "amount_vote_blocked_by_non_amount_signal",
+                    })
+                    best_type = ColumnSemantics.UNKNOWN
+
+            best_score = scores.get(best_type, 0.0)
+            sample_size = max(1, profile["sample_size"])
+            if col_id in hard_semantics:
+                best_score = max(best_score, 1.0)
+            if col_id in money_assignment:
+                best_score = max(best_score, profile["money_pattern_count"] / sample_size)
+
+            sorted_scores = sorted(scores.values(), reverse=True)
+            runner_up = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+            confidence = (best_score - runner_up) / max(1.0, sum(scores.values()))
+            if col_id in hard_semantics or col_id in money_assignment:
+                confidence = max(confidence, min(0.85, best_score))
+
+            data["type"] = best_type
+            data["confidence"] = round(max(0.0, min(0.95, confidence)), 3)
+            final_column_semantics[col_id] = best_type
 
         analysis_results["_inference_summary"] = {
             "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
             "item_rows_used": len(item_row_ids),
+            "semantic_column_scores_by_col": semantic_column_scores_by_col,
+            "final_column_semantics": final_column_semantics,
+            "amount_column_candidates": amount_column_candidates,
+            "rejected_amount_candidates": rejected_amount_candidates,
+            "product_column_candidates": product_column_candidates,
+            "expiry_column_candidates": expiry_column_candidates,
+            "batch_column_candidates": batch_column_candidates,
+            "hsn_column_candidates": hsn_column_candidates,
+            "gst_column_candidates": gst_column_candidates,
         }
         return analysis_results
 
@@ -155,45 +495,44 @@ class SemanticColumnClassifier:
         Annotates semantic outliers without deleting OCR text.
         """
         results = self.analyze_table_columns(region)
-
-        QTY_WHITELIST = r"^[ \d\+\*xX\.,\s\(\)-]+$"
-        AMOUNT_WHITELIST = r"^[ \d\.,₹$RS]+$" # Strict finance whitelist
+        numeric_whitelist = r"^[ \d\+\*xX\.,₹$RS%\s\(\)-]+$"
 
         outliers = 0
         hard_deleted = 0
-        for cid, data in results.items():
-            if cid.startswith("_"):
+        for col_id, data in results.items():
+            if col_id.startswith("_"):
                 continue
-            ctype = data["type"]
-            if ctype in (ColumnSemantics.QUANTITY, ColumnSemantics.AMOUNT):
-                target_regex = QTY_WHITELIST if ctype == ColumnSemantics.QUANTITY else AMOUNT_WHITELIST
-
-                q_cells = [c for c in region.cells if c.col_id == cid]
-                for c in q_cells:
-                    if not c.text: continue
-                    clean_t = c.text.strip()
-                    if not re.match(target_regex, clean_t, re.IGNORECASE):
-                        if c.original_text is None:
-                            c.original_text = c.text
-                        c.semantic_outlier = True
-                        c.semantic_outlier_reason = f"non_conforming_{ctype}_cell"
-                        outliers += 1
+            col_type = data["type"]
+            if col_type not in NUMERIC_SEMANTICS:
+                continue
+            for cell in [c for c in region.cells if c.col_id == col_id]:
+                if not (cell.text or "").strip():
+                    continue
+                if re.match(numeric_whitelist, cell.text.strip(), re.IGNORECASE):
+                    continue
+                if cell.original_text is None:
+                    cell.original_text = cell.text
+                cell.semantic_outlier = True
+                cell.semantic_outlier_reason = "expected_numeric_column_but_text_found"
+                outliers += 1
 
         if outliers > 0:
-            logger.warning(f"[SEMANTIC QUARANTINE] Marked {outliers} non-conforming cells as semantic outliers.")
+            logger.warning(
+                f"[SEMANTIC QUARANTINE] Marked {outliers} non-conforming cells as semantic outliers."
+            )
         results["_rejection_summary"] = {
             "semantic_rejection_count": outliers,
             "semantic_outlier_count": outliers,
             "hard_deleted_cells_count": hard_deleted,
+            "quarantined_cell_count": outliers,
         }
 
-        # Summarize final structure
-        type_counts = {}
-        for cid, data in results.items():
-            if cid.startswith("_"):
+        type_counts: Dict[str, int] = {}
+        for col_id, data in results.items():
+            if col_id.startswith("_"):
                 continue
-            ctype = data["type"]
-            type_counts[ctype] = type_counts.get(ctype, 0) + 1
-            
-        logger.info(f"[COLUMN SEMANTICS] Post-Hardening Breakdown: {type_counts}")
+            col_type = data["type"]
+            type_counts[col_type] = type_counts.get(col_type, 0) + 1
+
+        logger.info(f"[COLUMN SEMANTICS] Final Semantic Breakdown: {type_counts}")
         return results

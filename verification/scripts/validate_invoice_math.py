@@ -53,6 +53,272 @@ def _sum_row_validation(row_validation: Dict[str, Any]) -> Dict[str, int]:
         totals["math_failed_rows"] += int(value.get("financial_failures", 0) or 0)
     return totals
 
+def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _metric(metrics: Dict[str, Any], key: str, default: Any = None) -> Any:
+    if key in metrics:
+        return metrics.get(key)
+    instrumentation = metrics.get("instrumentation") or {}
+    return instrumentation.get(key, default)
+
+def _extract_type_map(data: Dict[str, Any]) -> Dict[str, str]:
+    type_map = {}
+    if not isinstance(data, dict):
+        return type_map
+    for col_id, meta in data.items():
+        if str(col_id).startswith("_"):
+            continue
+        if isinstance(meta, dict):
+            semantic_type = meta.get("type")
+        else:
+            semantic_type = meta
+        if semantic_type:
+            type_map[str(col_id)] = str(semantic_type).lower()
+    return type_map
+
+def _semantic_map_from(value: Any, main_table_id: Optional[str]) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    if main_table_id and isinstance(value.get(main_table_id), dict):
+        return _extract_type_map(value[main_table_id])
+
+    direct = _extract_type_map(value)
+    if direct:
+        return direct
+
+    for nested in value.values():
+        if isinstance(nested, dict):
+            nested_map = _extract_type_map(nested)
+            if nested_map:
+                return nested_map
+    return {}
+
+def _semantic_breakdown(final_semantics: Dict[str, str]) -> Dict[str, int]:
+    breakdown: Dict[str, int] = {}
+    for semantic_type in final_semantics.values():
+        key = str(semantic_type or "unknown").lower()
+        breakdown[key] = breakdown.get(key, 0) + 1
+    return breakdown
+
+def _format_breakdown(breakdown: Dict[str, int]) -> str:
+    if not breakdown:
+        return "n/a"
+    return ", ".join(f"{key}:{breakdown[key]}" for key in sorted(breakdown))
+
+def _select_main_table_id(
+    metadata: Dict[str, Any],
+    metrics: Dict[str, Any],
+    row_validation: Dict[str, Any],
+    reconciliation: Dict[str, Any],
+) -> Optional[str]:
+    for source in (row_validation, reconciliation):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if isinstance(value, dict) and not str(key).startswith("_"):
+                    return str(key)
+
+    semantic_debug = metrics.get("semantic_debug") or {}
+    for source in (
+        semantic_debug.get("final_column_semantics"),
+        metrics.get("final_column_semantics"),
+        metrics.get("column_semantic_cache"),
+    ):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if isinstance(value, dict) and not str(key).startswith("_"):
+                    return str(key)
+
+    topology_debug = metrics.get("topology_debug") or {}
+    main_tables = topology_debug.get("main_tables") or []
+    if main_tables and isinstance(main_tables[0], dict):
+        table_id = main_tables[0].get("table_id")
+        if table_id:
+            return str(table_id)
+
+    structured_tables = metadata.get("structured_tables") or []
+    if structured_tables:
+        best = max(
+            structured_tables,
+            key=lambda table: (
+                len(table.get("rows") or []),
+                len(table.get("cells") or []),
+                len(table.get("columns") or []),
+            ),
+        )
+        return best.get("table_id")
+    return None
+
+def _find_table(metadata: Dict[str, Any], metrics: Dict[str, Any], table_id: Optional[str]) -> Dict[str, Any]:
+    structured_tables = metadata.get("structured_tables") or []
+    if table_id:
+        for table in structured_tables:
+            if table.get("table_id") == table_id:
+                return table
+    if structured_tables:
+        return max(
+            structured_tables,
+            key=lambda table: (
+                len(table.get("rows") or []),
+                len(table.get("cells") or []),
+                len(table.get("columns") or []),
+            ),
+        )
+
+    topology_debug = metrics.get("topology_debug") or {}
+    main_tables = topology_debug.get("main_tables") or []
+    if table_id:
+        for table in main_tables:
+            if table.get("table_id") == table_id:
+                return table
+    return main_tables[0] if main_tables else {}
+
+def _row_validation_for_table(row_validation: Dict[str, Any], table_id: Optional[str]) -> Dict[str, Any]:
+    if not isinstance(row_validation, dict):
+        return {}
+    if table_id and isinstance(row_validation.get(table_id), dict):
+        return row_validation[table_id]
+    return _first_dict_value(row_validation)
+
+def _item_row_cell_stats(table: Dict[str, Any], table_row_validation: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = table_row_validation.get("row_diagnostics") if isinstance(table_row_validation, dict) else None
+    if isinstance(diagnostics, list) and diagnostics:
+        item_diags = [d for d in diagnostics if d.get("row_role") == "item_row"] or diagnostics
+        counts = [
+            _safe_int(d.get("populated_count"), _safe_int(d.get("cell_count"), 0))
+            for d in item_diags
+        ]
+        counts = [c for c in counts if c >= 0]
+        if counts:
+            return {
+                "avg_cells_per_item_row": round(sum(counts) / len(counts), 2),
+                "one_cell_item_rows_count": sum(1 for count in counts if count <= 1),
+            }
+
+    rows = table.get("rows") or []
+    cells = table.get("cells") or table.get("current_reconstructed_cells") or []
+    if not rows:
+        return {"avg_cells_per_item_row": 0.0, "one_cell_item_rows_count": 0}
+
+    row_roles = {
+        row.get("row_id"): row.get("row_role", "unknown_row")
+        for row in rows
+        if isinstance(row, dict)
+    }
+    item_row_ids = [row_id for row_id, role in row_roles.items() if role == "item_row"] or list(row_roles.keys())
+    counts = []
+    for row_id in item_row_ids:
+        row_cells = [cell for cell in cells if cell.get("row_id") == row_id]
+        populated = [cell for cell in row_cells if str(cell.get("text") or "").strip()]
+        counts.append(len(populated) if populated else len(row_cells))
+
+    if not counts:
+        return {"avg_cells_per_item_row": 0.0, "one_cell_item_rows_count": 0}
+    return {
+        "avg_cells_per_item_row": round(sum(counts) / len(counts), 2),
+        "one_cell_item_rows_count": sum(1 for count in counts if count <= 1),
+    }
+
+def _extract_topology_fields(
+    filepath: str,
+    data: Dict[str, Any],
+    row_validation: Optional[Dict[str, Any]] = None,
+    reconciliation: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata = data.get("metadata") or {}
+    metrics = metadata.get("metrics") or {}
+    row_validation = row_validation if row_validation is not None else (metrics.get("row_validation") or {})
+    reconciliation = reconciliation if reconciliation is not None else (metrics.get("financial_reconciliation") or {})
+
+    main_table_id = _select_main_table_id(metadata, metrics, row_validation, reconciliation)
+    main_table = _find_table(metadata, metrics, main_table_id)
+    table_row_validation = _row_validation_for_table(row_validation, main_table_id)
+    cell_stats = _item_row_cell_stats(main_table, table_row_validation)
+
+    semantic_debug = metrics.get("semantic_debug") or {}
+    final_semantics = (
+        _semantic_map_from(semantic_debug.get("final_column_semantics"), main_table_id)
+        or _semantic_map_from(metrics.get("final_column_semantics"), main_table_id)
+        or _semantic_map_from(metrics.get("column_semantic_cache"), main_table_id)
+    )
+    semantic_breakdown = _semantic_breakdown(final_semantics)
+    semantic_types = set(semantic_breakdown.keys())
+
+    anchor_repair = metrics.get("anchor_repair") or {}
+    missing_semantic_columns = []
+    if isinstance(table_row_validation, dict):
+        missing_semantic_columns = table_row_validation.get("missing_semantic_columns") or []
+
+    topology_debug = metrics.get("topology_debug") or {}
+    topology_main = {}
+    for table in topology_debug.get("main_tables") or []:
+        if not main_table_id or table.get("table_id") == main_table_id:
+            topology_main = table
+            break
+
+    row_count = len(main_table.get("rows") or [])
+    col_count = len(main_table.get("columns") or [])
+    if not row_count:
+        row_count = _safe_int(topology_main.get("row_count"), _safe_int(table_row_validation.get("total_rows"), 0))
+    if not col_count:
+        col_count = _safe_int(topology_main.get("column_count"), 0)
+
+    topology_source = (
+        metadata.get("topology_source")
+        or metrics.get("topology_source")
+        or (metrics.get("tsr_status") or {}).get("topology_source")
+        or main_table.get("source_engine")
+        or "unknown"
+    )
+    invoice_confidence = (
+        _safe_float(metadata.get("invoice_confidence"), None)
+        or _safe_float((metrics.get("confidence_hierarchy") or {}).get("invoice_confidence"), None)
+        or _safe_float(metrics.get("invoice_confidence"), None)
+        or 0.0
+    )
+
+    return {
+        "filename": os.path.basename(filepath),
+        "topology_source": topology_source,
+        "invoice_confidence": round(float(invoice_confidence), 3),
+        "raw_token_count": _safe_int(metrics.get("raw_token_count"), len(metadata.get("blocks") or [])),
+        "table_count": _safe_int(metrics.get("table_count"), len(metadata.get("structured_tables") or [])),
+        "main_table_id": main_table_id or "unknown",
+        "main_table_row_count": row_count,
+        "main_table_column_count": col_count,
+        "avg_cells_per_item_row": cell_stats["avg_cells_per_item_row"],
+        "one_cell_item_rows_count": cell_stats["one_cell_item_rows_count"],
+        "anchor_repair_enabled": bool(anchor_repair.get("enabled", False)),
+        "before_column_count": _safe_int(anchor_repair.get("before_column_count"), 0),
+        "after_column_count": _safe_int(anchor_repair.get("after_column_count"), 0),
+        "final_semantic_breakdown": semantic_breakdown,
+        "has_product_column": "product" in semantic_types,
+        "has_batch_column": "batch" in semantic_types,
+        "has_expiry_column": "expiry" in semantic_types,
+        "has_qty_column": bool({"quantity", "qty", "free_quantity"} & semantic_types),
+        "has_rate_column": "rate" in semantic_types,
+        "has_amount_column": "amount" in semantic_types,
+        "quarantined_cell_count": _safe_int(
+            semantic_debug.get("quarantined_cell_count"),
+            _safe_int(_metric(metrics, "quarantined_cell_count"), 0),
+        ),
+        "missing_semantic_columns_count": len(missing_semantic_columns),
+        "missing_semantic_columns": missing_semantic_columns,
+    }
+
 def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     metadata = data.get("metadata", {})
     metrics = metadata.get("metrics") or {}
@@ -65,13 +331,16 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
     row_totals = _sum_row_validation(row_validation)
     rec = _first_dict_value(reconciliation)
     confidence = rec.get("confidence")
-    score = float(confidence) * 100.0 if confidence is not None else float(metadata.get("invoice_confidence") or 0) * 100.0
+    score = _safe_float(rec.get("integrity_score"), None)
+    if score is None:
+        score = float(confidence) * 100.0 if confidence is not None else float(metadata.get("invoice_confidence") or 0) * 100.0
     status = str(rec.get("status", "")).upper()
     passed = status == "PASS" if status else score >= 70.0
     instrumentation = metrics.get("instrumentation") or {}
     confidence_variance = instrumentation.get("confidence_variance") or (metrics.get("confidence_hierarchy") or {}).get("confidence_variance") or {}
+    topology_fields = _extract_topology_fields(filepath, data, row_validation, reconciliation)
 
-    return {
+    result = {
         "filename": os.path.basename(filepath),
         "integrity_score": round(score, 1),
         "passed": passed,
@@ -87,7 +356,11 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
         "heuristic_fallback_used": instrumentation.get("heuristic_fallback_used", metrics.get("heuristic_fallback_used")),
         "semantic_rejection_count": instrumentation.get("semantic_rejection_count", metrics.get("semantic_rejection_count", 0)),
         "confidence_variance": confidence_variance,
+        "financial_status": status or ("PASS" if passed else "FAIL"),
+        "financial_score": round(score, 1),
     }
+    result.update(topology_fields)
+    return result
 
 def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     metadata = data.get("metadata", {})
@@ -98,7 +371,8 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
     if not rows and not metadata.get("structured_tables"):
         return None
 
-    return {
+    topology_fields = _extract_topology_fields(filepath, data)
+    result = {
         "filename": os.path.basename(filepath),
         "integrity_score": 0.0,
         "passed": False,
@@ -114,7 +388,11 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
         "heuristic_fallback_used": None,
         "semantic_rejection_count": None,
         "confidence_variance": {},
+        "financial_status": "MISSING",
+        "financial_score": 0.0,
     }
+    result.update(topology_fields)
+    return result
 
 def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any]:
     from services.financial_reconciler import validate_invoice_json as _live_validate
@@ -136,6 +414,9 @@ def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any
         "heuristic_fallback_used": None,
         "semantic_rejection_count": None,
         "confidence_variance": {},
+        "financial_status": str(live_result.get("status", "")).upper() or "UNKNOWN",
+        "financial_score": round(integrity_score, 1),
+        **_extract_topology_fields(filepath, {}),
     }
 
 def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
@@ -155,6 +436,9 @@ def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
         "heuristic_fallback_used": None,
         "semantic_rejection_count": None,
         "confidence_variance": {},
+        "financial_status": "UNSUPPORTED",
+        "financial_score": 0.0,
+        **_extract_topology_fields(filepath, {}),
     }
 
 def validate_invoice_json(filepath: str) -> Dict[str, Any]:
@@ -201,17 +485,15 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
 
     log.info("benchmark_validation_starting", file_count=len(files))
 
-    global_pass = 0
-    total_integrity = 0.0
-    fallback_count = 0
+    results = []
     schema_sources = {}
     confidence_variances = []
 
     md = [
-        "# Topology Integrity & Financial Validation Dashboard\n",
-        "Reads live runtime metrics first, then falls back to reconstructed rows or LLM extraction.\n",
-        "| File | Score | Status | Items | Math Confirmed | Diff | TSR % | Heuristic Fallback | Semantic Rejects | Source Path |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+        "# Topology-First Benchmark Dashboard\n",
+        "Reads live runtime topology metrics first, then includes financial reconciliation as a downstream signal.\n",
+        "| Filename | Topology Source | Invoice Confidence | Raw Tokens | Tables | Main Table | Main Rows | Main Cols | Avg Cells / Item Row | One-Cell Item Rows | Anchor Repair | Before Cols | After Cols | Final Semantic Breakdown | Product | Batch | Expiry | Qty | Rate | Amount | Quarantined Cells | Missing Semantic Cols | Financial Status | Financial Score |",
+        "| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
 
     for f in files:
@@ -221,37 +503,93 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
             log.error("validation_file_error", filepath=f, error=str(e))
             continue
 
-        icon = "✅ PASS" if res["passed"] else "❌ FAIL"
-        tsr_pct = res.get("tsr_contribution_percent")
-        tsr_pct_str = "n/a" if tsr_pct is None else f"{float(tsr_pct):.1f}"
-        fallback_used = res.get("heuristic_fallback_used")
-        fallback_str = "n/a" if fallback_used is None else str(bool(fallback_used))
-        semantic_rejects = res.get("semantic_rejection_count")
-        semantic_rejects_str = "n/a" if semantic_rejects is None else str(semantic_rejects)
+        results.append(res)
         md.append(
-            f"| {res['filename']} | **{res['integrity_score']}** | {icon} "
-            f"| {res['items']} | {res['math_confirmed_rows']} | {res['discrepancy']} "
-            f"| {tsr_pct_str} | {fallback_str} | {semantic_rejects_str} | `{res['schema_source_path']}` |"
+            f"| {res['filename']} "
+            f"| {res.get('topology_source', 'unknown')} "
+            f"| {res.get('invoice_confidence', 0):.3f} "
+            f"| {res.get('raw_token_count', 0)} "
+            f"| {res.get('table_count', 0)} "
+            f"| `{res.get('main_table_id', 'unknown')}` "
+            f"| {res.get('main_table_row_count', 0)} "
+            f"| {res.get('main_table_column_count', 0)} "
+            f"| {res.get('avg_cells_per_item_row', 0):.2f} "
+            f"| {res.get('one_cell_item_rows_count', 0)} "
+            f"| {bool(res.get('anchor_repair_enabled'))} "
+            f"| {res.get('before_column_count', 0)} "
+            f"| {res.get('after_column_count', 0)} "
+            f"| {_format_breakdown(res.get('final_semantic_breakdown') or {})} "
+            f"| {bool(res.get('has_product_column'))} "
+            f"| {bool(res.get('has_batch_column'))} "
+            f"| {bool(res.get('has_expiry_column'))} "
+            f"| {bool(res.get('has_qty_column'))} "
+            f"| {bool(res.get('has_rate_column'))} "
+            f"| {bool(res.get('has_amount_column'))} "
+            f"| {res.get('quarantined_cell_count', 0)} "
+            f"| {res.get('missing_semantic_columns_count', 0)} "
+            f"| {res.get('financial_status', 'UNKNOWN')} "
+            f"| {res.get('financial_score', res.get('integrity_score', 0)):.1f} |"
         )
 
-        if res["passed"]:
-            global_pass += 1
-        if res.get("heuristic_fallback_used"):
-            fallback_count += 1
         schema_sources[res["schema_source_path"]] = schema_sources.get(res["schema_source_path"], 0) + 1
         conf_var = res.get("confidence_variance") or {}
         row_var = conf_var.get("row_confidence_variance")
         if row_var is not None:
             confidence_variances.append(float(row_var))
-        total_integrity += res["integrity_score"]
-
-    avg_int = total_integrity / len(files) if files else 0.0
-    pass_rate = (global_pass / len(files) * 100) if files else 0.0
 
     md.append(f"\n## Summary Aggregates\n")
-    md.append(f"- **Pass Rate:** {pass_rate:.1f}%")
-    md.append(f"- **Average Integrity Score:** {avg_int:.1f} / 100")
-    md.append(f"- **Heuristic Fallback Frequency:** {fallback_count}/{len(files)}")
+    invoice_results = [
+        res for res in results
+        if res.get("schema_source_path") != "unsupported_schema"
+    ]
+    processed = len(invoice_results)
+    invoices_with_one_column_main_table = sum(
+        1 for res in invoice_results
+        if _safe_int(res.get("main_table_column_count"), 0) == 1
+    )
+    invoices_with_product_column_detected = sum(1 for res in invoice_results if res.get("has_product_column"))
+    invoices_with_anchor_repair_enabled = sum(1 for res in invoice_results if res.get("anchor_repair_enabled"))
+    avg_main_cols = (
+        sum(_safe_int(res.get("main_table_column_count"), 0) for res in invoice_results) / processed
+        if processed else 0.0
+    )
+    confidence_values = [
+        float(res.get("invoice_confidence"))
+        for res in invoice_results
+        if res.get("invoice_confidence") is not None
+    ]
+    avg_invoice_confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+    ppstructure_success_count = sum(
+        1 for res in invoice_results
+        if res.get("topology_source") == "ppstructure"
+        or (_safe_float(res.get("tsr_contribution_percent"), 0.0) or 0.0) > 0.0
+    )
+    heuristic_fallback_count = sum(
+        1 for res in invoice_results
+        if res.get("topology_source") == "heuristic_fallback"
+        or (
+            bool(res.get("heuristic_fallback_used"))
+            and res.get("topology_source") != "heuristic_anchor"
+        )
+    )
+    heuristic_anchor_count = sum(1 for res in invoice_results if res.get("topology_source") == "heuristic_anchor")
+    financial_pass_count = sum(1 for res in invoice_results if str(res.get("financial_status")).upper() == "PASS")
+    avg_financial_score = (
+        sum(_safe_float(res.get("financial_score"), 0.0) or 0.0 for res in invoice_results) / processed
+        if processed else 0.0
+    )
+
+    md.append(f"- **Invoices Processed:** {processed}/{len(files)}")
+    md.append(f"- **invoices_with_one_column_main_table:** {invoices_with_one_column_main_table}")
+    md.append(f"- **invoices_with_product_column_detected:** {invoices_with_product_column_detected}")
+    md.append(f"- **invoices_with_anchor_repair_enabled:** {invoices_with_anchor_repair_enabled}")
+    md.append(f"- **average_main_table_columns:** {avg_main_cols:.2f}")
+    md.append(f"- **average_invoice_confidence:** {avg_invoice_confidence:.3f}")
+    md.append(f"- **ppstructure_success_count:** {ppstructure_success_count}")
+    md.append(f"- **heuristic_fallback_count:** {heuristic_fallback_count}")
+    md.append(f"- **heuristic_anchor_count:** {heuristic_anchor_count}")
+    md.append(f"- **Financial PASS Count:** {financial_pass_count}")
+    md.append(f"- **Average Financial Score:** {avg_financial_score:.1f} / 100")
     md.append(f"- **Validator Schema Sources:** `{schema_sources}`")
     if confidence_variances:
         avg_var = sum(confidence_variances) / len(confidence_variances)

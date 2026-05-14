@@ -7,6 +7,7 @@ from typing import List, Tuple, Dict, Any
 from models.layout_models import OCRBlock, TableRegion, RowRegion, ColumnRegion, TableCell, GeometryBox, RegionType
 from services.tsr.base_tsr import BaseTSREngine
 from core.logger import logger
+from core.config import settings
 from services.topology.topology_cleanup import TopologyCleaner
 
 def compute_stable_bands(intervals: List[Tuple[float, float]], overlap_thresh: float = 0.35) -> List[Tuple[float, float]]:
@@ -179,16 +180,22 @@ class PPStructure_TSREngine(BaseTSREngine):
         img_np = np.array(image.convert("RGB"))
         img_cv = img_np[:, :, ::-1]
 
-        candidate_orientations = [
-            (0, "tsr_input_original.png"),
-            (90, "tsr_input_rot90.png"),
-            (180, "tsr_input_rot180.png"),
-            (270, "tsr_input_rot270.png")
-        ]
+        if settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION:
+            candidate_orientations = [
+                (0, "tsr_input_original.png"),
+                (90, "tsr_input_rot90.png"),
+                (180, "tsr_input_rot180.png"),
+                (270, "tsr_input_rot270.png")
+            ]
+        else:
+            candidate_orientations = [(0, "tsr_input_original.png")]
 
         candidates = []
 
-        logger.info(f"Starting multi-orientation analysis ({len(candidate_orientations)} candidates)...")
+        if settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION:
+            logger.info(f"Starting multi-orientation PPStructure analysis ({len(candidate_orientations)} candidates)...")
+        else:
+            logger.info("Running PPStructure single-orientation analysis (multi-orientation disabled).")
 
         for angle, filename in candidate_orientations:
             norm_img, M_total = get_full_affine_transform(img_cv, angle)
@@ -281,17 +288,18 @@ class PPStructure_TSREngine(BaseTSREngine):
         ]
 
         if winner["table_count"] == 0 and winner["total_cells"] == 0:
-            logger.warning("[PPSTRUCTURE DISABLED] All orientation candidates returned zero tables/cells.")
+            logger.warning("[PPSTRUCTURE] returned zero tables/cells.")
             return [], {
                 "tsr_engine": "ppstructure",
-                "tsr_status": "disabled",
-                "tsr_disabled_reason": "zero_tables_all_orientations",
+                "tsr_status": "failed",
+                "tsr_disabled_reason": "zero_tables_cells",
                 "ppstructure_candidate_summary": candidate_summary,
                 "ppstructure_table_count": 0,
                 "ppstructure_cell_count": 0,
                 "selected_orientation": f"rotate_{winner['angle']}",
                 "orientation_score": float(winner["score"]) if winner["score"] != float("-inf") else None,
-                "orientation_candidates_tested": len(candidate_orientations)
+                "orientation_candidates_tested": len(candidate_orientations),
+                "multi_orientation_enabled": bool(settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION)
             }
 
         # Save selected final output debug image
@@ -468,6 +476,7 @@ class PPStructure_TSREngine(BaseTSREngine):
             "selected_orientation": f"rotate_{winner['angle']}",
             "orientation_score": float(winner["score"]),
             "orientation_candidates_tested": len(candidate_orientations),
+            "multi_orientation_enabled": bool(settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION),
             "final_inference_dims": list(winner["image"].shape[:2]),
             "ppstructure_candidate_summary": candidate_summary,
             "ppstructure_table_count": int(winner["table_count"]),

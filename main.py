@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from core.logger import logger
 from api.routes import router
+from services import cache_service
 import uvicorn
 
 app = FastAPI(
@@ -14,6 +15,7 @@ app.include_router(router)
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting up PharmaGPT OCR API...")
+    cache_service.check_cache_status()
     import torch
     if torch.cuda.is_available():
         logger.info(f"CUDA is available! GPU: {torch.cuda.get_device_name(0)}")

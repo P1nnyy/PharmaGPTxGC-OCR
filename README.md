@@ -41,3 +41,17 @@ curl -X POST http://localhost:8000/upload-invoice \
 - **Caching**: The app hashes uploaded images (MD5) and saves OCR JSON outputs to `datasets/ocr_results/`. Subsequent uploads of the same image instantly return the JSON from cache.
 - **Images**: Uploaded images are kept entirely in-memory and not written to disk to maximize IO speed during iteration.
 - **Lazy Loading**: Surya OCR models are loaded into GPU memory precisely upon the first `POST /upload-invoice` request to minimize container startup delays.
+
+## Table Reconstruction Defaults
+
+Dense, borderless Indian pharma invoices currently default to `heuristic_anchor` topology because PPStructure frequently returns `tables=0, cells=0` on this layout class. PPStructure code remains available behind config: set `ENABLE_PPSTRUCTURE=true` or `TSR_PRIMARY_ENGINE=ppstructure` to re-enable the confidence-gated PPStructure path. Multi-orientation PPStructure probing is off by default; enable it with `ENABLE_PPSTRUCTURE_MULTI_ORIENTATION=true` only when explicitly debugging TSR orientation.
+
+## Cache Directory Permissions
+
+If benchmark runs log cache permission warnings, fix the local datasets ownership/permissions:
+
+```bash
+sudo chown -R $USER:$USER datasets
+chmod -R u+rwX datasets
+mkdir -p datasets/ocr_results
+```

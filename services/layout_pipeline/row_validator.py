@@ -150,13 +150,24 @@ class RowValidator:
                 cell_is_numeric = _is_numeric_cell(cell.text)
                 
                 # Numeric content in a text-only column
-                if col_type in ("DRUG_NAME", "TEXT") and cell_is_numeric:
+                if col_type in ("DRUG_NAME", "PRODUCT", "TEXT") and cell_is_numeric:
                     stability *= 0.85
                     diag["penalties"].append(f"semantic_mismatch:{cell.col_id}")
                     results["semantic_mismatches"] += 1
                 
                 # Text content in a numeric column
-                if col_type in ("AMOUNT", "RATE", "QTY", "QUANTITY", "TAX") and not cell_is_numeric and cell.text.strip():
+                if col_type in (
+                    "AMOUNT",
+                    "RATE",
+                    "QTY",
+                    "QUANTITY",
+                    "FREE_QUANTITY",
+                    "MRP",
+                    "DISCOUNT",
+                    "TAXABLE_VALUE",
+                    "GST",
+                    "TAX",
+                ) and not cell_is_numeric and cell.text.strip():
                     # Allow header-like text (the first row often has column labels)
                     if not re.search(r'(AMOUNT|RATE|QTY|TAX|GST|TOTAL|PRICE|QUANTITY)', cell.text.upper()):
                         stability *= 0.85
@@ -275,6 +286,8 @@ class RowValidator:
             f"RowValidator [{region.table_id}]: "
             f"rows={results['total_rows']}, isolated={results['isolated_rows']}, "
             f"financial_pass={results['financial_passes']}, financial_fail={results['financial_failures']}, "
+            f"structural_fail={results['structural_failures']}, "
+            f"missing_semantic_columns={results['missing_semantic_columns']}, "
             f"semantic_mismatches={results['semantic_mismatches']}"
         )
         
