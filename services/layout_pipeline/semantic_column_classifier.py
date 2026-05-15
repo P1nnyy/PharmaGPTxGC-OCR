@@ -130,11 +130,14 @@ class SemanticColumnClassifier:
         """
         results = self.analyze_table_columns(region)
         
-        # ── TASK 3: HARD OWNERSHIP REJECTION CONSTRAINTS ──
+        # ── TASK 3: SEMANTIC OUTLIER QUARANTINE ──
+        # Do not destructively wipe OCR text. If a cell does not match the
+        # expected semantic shape for a numeric column, preserve the text and
+        # mark it as an outlier for downstream consumers to ignore safely.
         QTY_WHITELIST = r"^[ \d\+\*xX\.,\s\(\)-]+$"
         AMOUNT_WHITELIST = r"^[ \d\.,₹$RS]+$" # Strict finance whitelist
         
-        rejections = 0
+        quarantines = 0
         for cid, data in results.items():
             ctype = data["type"]
             if ctype in (ColumnSemantics.QUANTITY, ColumnSemantics.AMOUNT):
@@ -142,19 +145,25 @@ class SemanticColumnClassifier:
                 
                 q_cells = [c for c in region.cells if c.col_id == cid]
                 for c in q_cells:
-                    if not c.text: continue
+                    if not c.text:
+                        continue
                     clean_t = c.text.strip()
                     if not re.match(target_regex, clean_t, re.IGNORECASE):
-                        # Absolute Violation: Contains address/company noise!
-                        # Log explicit rejection event and WIPE mapping assignment.
-                        logger.info(f"[HARD REJECT] Dropping corrupt text from {ctype.upper()} column '{cid}': '{c.text[:15]}...'")
-                        c.text = ""
-                        c.mapped_block_ids = [] # Hard de-link tokens
-                        c.confidence = 0.0
-                        rejections += 1
+                        if not getattr(c, "original_text", None):
+                            setattr(c, "original_text", c.text)
+                        setattr(c, "semantic_outlier", True)
+                        setattr(c, "semantic_outlier_reason", "expected_numeric_column_but_text_found")
+                        logger.info(
+                            f"[QUARANTINE] Preserving non-numeric text in "
+                            f"{ctype.upper()} column '{cid}': '{c.text[:15]}...'"
+                        )
+                        quarantines += 1
                         
-        if rejections > 0:
-            logger.warning(f"[HARD CONSTRAINT] Rejected {rejections} non-conforming cell assignments from numeric columns.")
+        if quarantines > 0:
+            logger.warning(
+                f"[SEMANTIC QUARANTINE] Marked {quarantines} non-conforming cells "
+                f"as semantic_outlier without deleting OCR text."
+            )
 
         # Summarize final structure
         type_counts = {}

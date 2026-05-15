@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from typing import List
+from typing import List, Dict
 from core.logger import logger
 from models.layout_models import OCRBlock, TableRegion
 

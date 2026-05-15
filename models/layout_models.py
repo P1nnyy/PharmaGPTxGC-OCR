@@ -78,6 +78,9 @@ class TableCell(BaseModel):
     confidence: float = 1.0
     mapped_block_ids: List[str] = Field(default_factory=list)
     text: str = ""
+    original_text: Optional[str] = None
+    semantic_outlier: bool = False
+    semantic_outlier_reason: Optional[str] = None
     assignment_confidence: float = 1.0  # Composite confidence of token-to-cell assignment
     assignment_strategy: str = "unassigned"  # "row_scoped", "neighbor_row", "global_fallback"
 
