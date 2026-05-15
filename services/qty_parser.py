@@ -22,7 +22,7 @@ OCR noise handling:
 """
 
 import re
-from typing import Optional
+from typing import Optional, Tuple
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pydantic import BaseModel, Field
 from core.logger import logger
@@ -47,6 +47,8 @@ class ParsedQuantity(BaseModel):
     is_scheme: bool = False
     raw: str = ""
     parse_method: str = "none"
+    qty_parse_extracted_expression: Optional[str] = None
+    qty_parse_rejected_reason: Optional[str] = None
 
     model_config = {"json_encoders": {Decimal: str}}  # Pydantic v2 ConfigDict
 
@@ -119,6 +121,40 @@ def _safe_decimal(value: str) -> Decimal:
     return Decimal(cleaned)
 
 
+def _extract_quantity_expression(text: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Pull the most likely quantity expression out of a noisy OCR cell.
+
+    Preference is intentionally conservative:
+    1. Scheme quantities with a plus sign, e.g. 2.750+.250, 10+2.
+    2. Pack/multiply quantities, e.g. 1*15.
+    3. A lone small integer/trailing-dot quantity only when the whole cell is numeric.
+    """
+    scheme_match = re.search(r'(?<![\d.])(\d{1,4}(?:\.\d{1,4})?\+\d{1,4}(?:\.\d{1,4})?)(?![\d.])', text)
+    if scheme_match:
+        expr = scheme_match.group(1)
+        return expr, expr if expr != text else None, None
+
+    leading_dot_scheme = re.search(r'(?<![\d.])(\d{1,4}(?:\.\d{1,4})?\+\.?\d{1,4})(?![\d.])', text)
+    if leading_dot_scheme:
+        expr = leading_dot_scheme.group(1)
+        return expr, expr if expr != text else None, None
+
+    pack_match = re.search(r'(?<![\d.])(\d{1,4}(?:\.\d{1,3})?(?:\*\d{1,4}(?:\.\d{1,3})?)+)(?![\d.])', text)
+    if pack_match:
+        expr = pack_match.group(1)
+        return expr, expr if expr != text else None, None
+
+    if re.fullmatch(r'\d{1,4}\.?', text):
+        expr = text.rstrip(".")
+        return expr, expr if expr != text else None, None
+
+    if re.fullmatch(r'\d{1,4}(?:\.\d{1,3})?', text):
+        return text, None, None
+
+    return text, None, "no_quantity_expression_found"
+
+
 def parse_quantity(raw: str) -> ParsedQuantity:
     """Parse an Indian pharma quantity string into structured components.
 
@@ -160,10 +196,15 @@ def parse_quantity(raw: str) -> ParsedQuantity:
         (Decimal('1.84'), False)
     """
     if not raw or not raw.strip():
-        return ParsedQuantity(raw=raw or "", parse_method="empty")
+        return ParsedQuantity(
+            raw=raw or "",
+            parse_method="empty",
+            qty_parse_rejected_reason="empty",
+        )
 
     text = _normalize_ocr_noise(raw)
     original = raw.strip()
+    parse_text, extracted_expression, rejected_reason = _extract_quantity_expression(text)
 
     # ── PATTERN 1: Scheme notation (billed + free) ──
     # Matches: "2.750+.250", "4.50+0.50", "2+1", ".750+.250"
@@ -171,7 +212,7 @@ def parse_quantity(raw: str) -> ParsedQuantity:
     scheme_re = re.compile(
         r'^(\d*\.?\d+)\+(\d*\.?\d+)$'  # group1 + group2, both numeric
     )
-    m = scheme_re.match(text)
+    m = scheme_re.match(parse_text)
     if m:
         try:
             billed = _safe_decimal(m.group(1))
@@ -182,7 +223,8 @@ def parse_quantity(raw: str) -> ParsedQuantity:
                 total_qty=billed + free,
                 is_scheme=True,
                 raw=original,
-                parse_method="scheme_notation",
+                parse_method="scheme_notation_extracted" if extracted_expression else "scheme_notation",
+                qty_parse_extracted_expression=extracted_expression,
             )
         except InvalidOperation:
             logger.warning(f"qty_parser: scheme parse failed for '{original}'")
@@ -193,7 +235,7 @@ def parse_quantity(raw: str) -> ParsedQuantity:
         r'^(\d+\.?\d*)\s*'   # outer quantity (e.g., "2")
         r'\(([^)]+)\)$'      # parenthesized inner expression (e.g., "1*10")
     )
-    m = paren_re.match(text)
+    m = paren_re.match(parse_text)
     if m:
         try:
             outer_qty = _safe_decimal(m.group(1))
@@ -212,7 +254,8 @@ def parse_quantity(raw: str) -> ParsedQuantity:
                 pack_size=pack_sz,
                 is_scheme=False,
                 raw=original,
-                parse_method="parenthesized_pack",
+                parse_method="parenthesized_pack_extracted" if extracted_expression else "parenthesized_pack",
+                qty_parse_extracted_expression=extracted_expression,
             )
         except (InvalidOperation, ValueError):
             logger.warning(
@@ -221,8 +264,8 @@ def parse_quantity(raw: str) -> ParsedQuantity:
 
     # ── PATTERN 3: Multiply/pack notation — "1*15", "3*1*15" ──
     # All components multiplied together to get total dispatched units
-    if "*" in text:
-        parts = text.split("*")
+    if "*" in parse_text:
+        parts = parse_text.split("*")
         if all(re.match(r'^\d+\.?\d*$', p.strip()) for p in parts):
             try:
                 product = Decimal("1")
@@ -236,7 +279,8 @@ def parse_quantity(raw: str) -> ParsedQuantity:
                     pack_size=pack_sz,
                     is_scheme=False,
                     raw=original,
-                    parse_method="pack_multiply",
+                    parse_method="pack_multiply_extracted" if extracted_expression else "pack_multiply",
+                    qty_parse_extracted_expression=extracted_expression,
                 )
             except (InvalidOperation, ValueError):
                 logger.warning(
@@ -248,7 +292,7 @@ def parse_quantity(raw: str) -> ParsedQuantity:
     plain_re = re.compile(
         r'^(\d+\.?\d*)$'  # one numeric group, optional decimal
     )
-    m = plain_re.match(text)
+    m = plain_re.match(parse_text)
     if m:
         try:
             val = _safe_decimal(m.group(1))
@@ -258,14 +302,23 @@ def parse_quantity(raw: str) -> ParsedQuantity:
                 total_qty=val,
                 is_scheme=False,
                 raw=original,
-                parse_method="plain_numeric",
+                parse_method="plain_numeric_extracted" if extracted_expression else "plain_numeric",
+                qty_parse_extracted_expression=extracted_expression,
             )
         except InvalidOperation:
             pass
 
     # ── FALLBACK: Unparseable ──
-    logger.warning(f"qty_parser: could not parse quantity '{original}'")
-    return ParsedQuantity(raw=original, parse_method="unparsed")
+    logger.warning(
+        f"qty_parser: could not parse quantity '{original}' "
+        f"reason={rejected_reason or 'unparsed_quantity_expression'}"
+    )
+    return ParsedQuantity(
+        raw=original,
+        parse_method="unparsed",
+        qty_parse_extracted_expression=extracted_expression,
+        qty_parse_rejected_reason=rejected_reason or "unparsed_quantity_expression",
+    )
 
 
 def is_compound_quantity(text: str) -> bool:
@@ -283,14 +336,17 @@ def is_compound_quantity(text: str) -> bool:
     if not text:
         return False
     cleaned = _normalize_ocr_noise(text)
+    parse_text, extracted_expression, _ = _extract_quantity_expression(cleaned)
+    if extracted_expression:
+        return True
     # Scheme: digits+digits
-    if re.match(r'^\d*\.?\d+\+\d*\.?\d+$', cleaned):
+    if re.match(r'^\d*\.?\d+\+\d*\.?\d+$', parse_text):
         return True
     # Pack: digits*digits (with optional additional *digits)
-    if re.match(r'^\d+\.?\d*(\*\d+\.?\d*)+$', cleaned):
+    if re.match(r'^\d+\.?\d*(\*\d+\.?\d*)+$', parse_text):
         return True
     # Parenthesized: digits (expr)
-    if re.match(r'^\d+\.?\d*\s*\([^)]+\)$', cleaned):
+    if re.match(r'^\d+\.?\d*\s*\([^)]+\)$', parse_text):
         return True
     return False
 

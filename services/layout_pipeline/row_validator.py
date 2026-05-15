@@ -40,6 +40,10 @@ def _is_numeric_cell(text: str) -> bool:
     return bool(re.search(r'^\d+\.?\d*$', cleaned))
 
 
+def _quantity_parse_succeeded(parsed) -> bool:
+    return parsed.parse_method not in ("empty", "unparsed")
+
+
 class RowValidator:
     """
     Validates populated rows against structural, semantic, and financial expectations.
@@ -79,6 +83,10 @@ class RowValidator:
             "incomplete_rows": 0,
             "duplicate_suspects": 0,
             "semantic_mismatches": 0,
+            "qty_parse_success_count": 0,
+            "qty_parse_failure_count": 0,
+            "qty_parse_extracted_expression": [],
+            "qty_parse_rejected_reason": [],
             "row_diagnostics": []
         }
         
@@ -125,10 +133,19 @@ class RowValidator:
                 "populated_count": len(populated_cells),
                 "penalties": [],
                 "financial_check": None,
-                "structural_check": None
+                "structural_check": None,
+                "qty_parse_extracted_expression": [],
+                "qty_parse_rejected_reason": []
             }
             
             stability = 1.0
+            qty_parse_cache = {}
+
+            def _get_qty_parse(cell: TableCell):
+                key = id(cell)
+                if key not in qty_parse_cache:
+                    qty_parse_cache[key] = parse_quantity(cell.text)
+                return qty_parse_cache[key]
             
             # Completeness: a row with zero populated cells is degenerate
             if not populated_cells:
@@ -148,6 +165,8 @@ class RowValidator:
                 col_type = str(col_type).upper()
                 
                 cell_is_numeric = _is_numeric_cell(cell.text)
+                if col_type in ("QTY", "QUANTITY", "FREE_QUANTITY"):
+                    cell_is_numeric = cell_is_numeric or _quantity_parse_succeeded(_get_qty_parse(cell))
                 
                 # Numeric content in a text-only column
                 if col_type in ("DRUG_NAME", "PRODUCT", "TEXT") and cell_is_numeric:
@@ -203,8 +222,28 @@ class RowValidator:
                     col_type = col_meta.get("type", "").upper() if isinstance(col_meta, dict) else str(col_meta).upper()
 
                     if col_type == "QUANTITY" or col_type == "QTY":
-                        qty_parsed = parse_quantity(cell.text)
-                        qty_val = Decimal(str(qty_parsed.billed_qty))
+                        qty_parsed = _get_qty_parse(cell)
+                        if _quantity_parse_succeeded(qty_parsed):
+                            results["qty_parse_success_count"] += 1
+                            if qty_parsed.qty_parse_extracted_expression:
+                                diag["qty_parse_extracted_expression"].append(qty_parsed.qty_parse_extracted_expression)
+                                results["qty_parse_extracted_expression"].append({
+                                    "row_id": row.row_id,
+                                    "col_id": cell.col_id,
+                                    "raw": cell.text,
+                                    "expression": qty_parsed.qty_parse_extracted_expression,
+                                })
+                            qty_val = Decimal(str(qty_parsed.billed_qty))
+                        else:
+                            results["qty_parse_failure_count"] += 1
+                            rejected_reason = qty_parsed.qty_parse_rejected_reason or "unparsed_quantity"
+                            diag["qty_parse_rejected_reason"].append(rejected_reason)
+                            results["qty_parse_rejected_reason"].append({
+                                "row_id": row.row_id,
+                                "col_id": cell.col_id,
+                                "raw": cell.text,
+                                "reason": rejected_reason,
+                            })
                     elif col_type == "RATE":
                         parsed_num = _parse_numeric(cell.text)
                         rate_val = Decimal(str(parsed_num)) if parsed_num is not None else None
