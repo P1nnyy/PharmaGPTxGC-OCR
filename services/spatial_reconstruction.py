@@ -429,7 +429,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # ── Step 5.5: TABLE CLASSIFICATION & ROUTING (Failure Mode 4) ──
     classifier_engine = TableClassifier()
     classifications = classifier_engine.classify_region_list(table_regions)
-    table_bundle = route_tables(table_regions, classifications)
+    table_routing_diagnostics = getattr(classifier_engine, "last_routing_diagnostics", {})
+    table_bundle = route_tables(table_regions, classifications, diagnostics=table_routing_diagnostics)
 
     ignored_tables_count = len(table_regions) - (1 if table_bundle.main_table else 0)
 
@@ -688,6 +689,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "topology_stability": stability_metrics,
                 "topology_debug": topology_debug,
                 "semantic_debug": semantic_debug,
+                **table_routing_diagnostics,
                 "column_anchor_debug": column_anchor_debug,
                 "anchor_repair": anchor_repair,
                 "instrumentation": {
@@ -873,6 +875,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_stability": stability_metrics,
             "topology_debug": topology_debug,
             "semantic_debug": semantic_debug,
+            **table_routing_diagnostics,
             "column_anchor_debug": column_anchor_debug,
             "anchor_repair": anchor_repair,
             "column_semantic_cache": semantic_results,
