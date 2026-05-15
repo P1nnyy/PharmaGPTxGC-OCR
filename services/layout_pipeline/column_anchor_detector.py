@@ -172,6 +172,37 @@ def _undersegmentation_reason(table_region: TableRegion) -> Optional[str]:
     return None
 
 
+def _semantic_repair_trigger(
+    semantic_context: Optional[Dict[str, Any]],
+    missing_semantic_columns: Optional[List[str]],
+) -> bool:
+    missing = {str(col).lower() for col in (missing_semantic_columns or [])}
+    if missing.intersection({"quantity", "rate", "amount"}):
+        return True
+
+    if not semantic_context:
+        return False
+
+    inferred = semantic_context.get("_inference_summary", {})
+    final_semantics = inferred.get("final_column_semantics", {})
+    if not final_semantics:
+        final_semantics = {
+            col_id: data.get("type")
+            for col_id, data in semantic_context.items()
+            if isinstance(data, dict) and not str(col_id).startswith("_")
+        }
+
+    all_types = [str(value).lower() for value in final_semantics.values() if str(value).strip()]
+    known_types = {value for value in all_types if value != "unknown"}
+    if known_types == {"product", "amount"}:
+        return True
+    if known_types == {"product"} and "unknown" in all_types:
+        return True
+    if known_types == {"amount"}:
+        return True
+    return False
+
+
 def detect_column_anchors(
     table_region: TableRegion,
     ocr_blocks: List[OCRBlock],
@@ -285,6 +316,8 @@ def repair_undersegmented_table_with_anchors(
     table_region: TableRegion,
     ocr_blocks: List[OCRBlock],
     anchor_debug: Optional[Dict[str, Any]] = None,
+    semantic_context: Optional[Dict[str, Any]] = None,
+    missing_semantic_columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Split one-cell medicine rows into geometry-anchored cells. Mutates only on success.
@@ -292,10 +325,26 @@ def repair_undersegmented_table_with_anchors(
     before_column_count = len(table_region.columns)
     before_avg_len = _avg_populated_cell_text_len(table_region)
     reason = _undersegmentation_reason(table_region)
+    anchor_debug = anchor_debug or detect_column_anchors(table_region, ocr_blocks)
+    candidate_anchor_count = anchor_debug.get("candidate_anchor_count", 0)
+    final_anchor_count = anchor_debug.get("final_anchor_count", 0)
+    missing_semantic_trigger = _semantic_repair_trigger(semantic_context, missing_semantic_columns)
+    if (
+        not reason
+        and before_column_count <= 2
+        and final_anchor_count >= 4
+        and missing_semantic_trigger
+    ):
+        reason = "low_column_count_with_strong_anchors_and_missing_semantics"
 
     base_metrics = {
         "enabled": False,
+        "repair_attempted": False,
         "reason": reason or "not_under_segmented",
+        "undersegmentation_trigger_reason": reason,
+        "missing_semantic_columns_trigger": sorted({str(col).lower() for col in (missing_semantic_columns or [])}),
+        "candidate_anchor_count": candidate_anchor_count,
+        "final_anchor_count": final_anchor_count,
         "before_column_count": before_column_count,
         "after_column_count": before_column_count,
         "before_avg_cell_text_len": round(before_avg_len, 2),
@@ -307,7 +356,7 @@ def repair_undersegmented_table_with_anchors(
     if not reason:
         return base_metrics
 
-    anchor_debug = anchor_debug or detect_column_anchors(table_region, ocr_blocks)
+    base_metrics["repair_attempted"] = True
     anchors = _useful_anchor_columns(anchor_debug)
     if len(anchors) + 1 < 3:
         return {
@@ -396,7 +445,23 @@ def repair_undersegmented_table_with_anchors(
         if getattr(row, "row_role", "unknown_row") == "item_row" and populated_cols > 1:
             repaired_row_count += 1
 
-    if len(new_columns) < 3 or repaired_row_count == 0:
+    item_row_ids = {row.row_id for row in table_region.rows if getattr(row, "row_role", "unknown_row") == "item_row"}
+    meaningful_columns = {
+        cell.col_id
+        for cell in new_cells
+        if (cell.text or "").strip()
+        and (not item_row_ids or cell.row_id in item_row_ids)
+    }
+
+    if len(meaningful_columns) < 4:
+        return {
+            **base_metrics,
+            "reason": "anchor_repair_failed_insufficient_output_columns",
+            "after_column_count": len(meaningful_columns),
+            "anchor_columns_used": anchors,
+        }
+
+    if repaired_row_count == 0:
         return {
             **base_metrics,
             "reason": "anchor_repair_no_item_rows_split",
@@ -409,7 +474,12 @@ def repair_undersegmented_table_with_anchors(
     after_avg_len = _avg_populated_cell_text_len(table_region)
     return {
         "enabled": True,
+        "repair_attempted": True,
         "reason": reason,
+        "undersegmentation_trigger_reason": reason,
+        "missing_semantic_columns_trigger": sorted({str(col).lower() for col in (missing_semantic_columns or [])}),
+        "candidate_anchor_count": candidate_anchor_count,
+        "final_anchor_count": final_anchor_count,
         "before_column_count": before_column_count,
         "after_column_count": len(new_columns),
         "before_avg_cell_text_len": round(before_avg_len, 2),

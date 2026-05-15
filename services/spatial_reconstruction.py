@@ -471,7 +471,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     column_anchor_debug = {}
     anchor_repair = {
         "enabled": False,
+        "repair_attempted": False,
         "reason": "not_evaluated",
+        "undersegmentation_trigger_reason": None,
+        "missing_semantic_columns_trigger": [],
+        "candidate_anchor_count": 0,
+        "final_anchor_count": 0,
         "before_column_count": len(table_bundle.main_table.columns),
         "after_column_count": len(table_bundle.main_table.columns),
         "before_avg_cell_text_len": 0.0,
@@ -546,6 +551,72 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 7: Row-Level Validation (semantic + financial per-row)
     row_validator = RowValidator(semantic_column_cache=semantic_results)
     row_validation_results = row_validator.validate_all(analysis_targets)
+
+    if not anchor_repair.get("enabled"):
+        for tr in analysis_targets:
+            validation = row_validation_results.get(tr.table_id, {})
+            retry_metrics = repair_undersegmented_table_with_anchors(
+                tr,
+                ocr_blocks,
+                column_anchor_debug.get(tr.table_id),
+                semantic_context=semantic_results.get(tr.table_id),
+                missing_semantic_columns=validation.get("missing_semantic_columns", []),
+            )
+            if retry_metrics.get("repair_attempted"):
+                anchor_repair = retry_metrics
+            if retry_metrics.get("enabled"):
+                table_role_metrics = classify_row_roles(tr)
+                row_role_metrics = {
+                    "item_rows_count": table_role_metrics.get("item_rows_count", 0),
+                    "header_rows_count": table_role_metrics.get("header_rows_count", 0),
+                    "footer_rows_count": table_role_metrics.get("footer_rows_count", 0),
+                    "tax_rows_count": table_role_metrics.get("tax_rows_count", 0),
+                    "metadata_rows_count": table_role_metrics.get("metadata_rows_count", 0),
+                    "unknown_rows_count": table_role_metrics.get("unknown_rows_count", 0),
+                    "by_table": {tr.table_id: table_role_metrics},
+                }
+                column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
+
+                semantic_results = {}
+                semantic_rejection_total = 0
+                semantic_outlier_total = 0
+                hard_deleted_cells_total = 0
+                quarantined_cell_total = 0
+                columns_inferred_from_item_rows_only = True
+                semantic_column_scores_by_col = {}
+                final_column_semantics = {}
+                amount_column_candidates = {}
+                rejected_amount_candidates = {}
+                product_column_candidates = {}
+                expiry_column_candidates = {}
+                batch_column_candidates = {}
+                hsn_column_candidates = {}
+                gst_column_candidates = {}
+                for semantic_target in analysis_targets:
+                    semantic_results[semantic_target.table_id] = classifier.enrich_region_metadata(semantic_target)
+                    rejection_summary = semantic_results[semantic_target.table_id].get("_rejection_summary", {})
+                    inference_summary = semantic_results[semantic_target.table_id].get("_inference_summary", {})
+                    semantic_rejection_total += rejection_summary.get("semantic_rejection_count", 0)
+                    semantic_outlier_total += rejection_summary.get("semantic_outlier_count", 0)
+                    hard_deleted_cells_total += rejection_summary.get("hard_deleted_cells_count", 0)
+                    quarantined_cell_total += rejection_summary.get("quarantined_cell_count", 0)
+                    columns_inferred_from_item_rows_only = (
+                        columns_inferred_from_item_rows_only
+                        and inference_summary.get("columns_inferred_from_item_rows_only", False)
+                    )
+                    semantic_column_scores_by_col[semantic_target.table_id] = inference_summary.get("semantic_column_scores_by_col", {})
+                    final_column_semantics[semantic_target.table_id] = inference_summary.get("final_column_semantics", {})
+                    amount_column_candidates[semantic_target.table_id] = inference_summary.get("amount_column_candidates", [])
+                    rejected_amount_candidates[semantic_target.table_id] = inference_summary.get("rejected_amount_candidates", [])
+                    product_column_candidates[semantic_target.table_id] = inference_summary.get("product_column_candidates", [])
+                    expiry_column_candidates[semantic_target.table_id] = inference_summary.get("expiry_column_candidates", [])
+                    batch_column_candidates[semantic_target.table_id] = inference_summary.get("batch_column_candidates", [])
+                    hsn_column_candidates[semantic_target.table_id] = inference_summary.get("hsn_column_candidates", [])
+                    gst_column_candidates[semantic_target.table_id] = inference_summary.get("gst_column_candidates", [])
+
+                row_validator = RowValidator(semantic_column_cache=semantic_results)
+                row_validation_results = row_validator.validate_all(analysis_targets)
+                break
 
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
     # Note: We reconcile the MAIN table specifically
