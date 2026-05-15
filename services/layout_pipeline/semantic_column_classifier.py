@@ -56,6 +56,16 @@ class SemanticColumnClassifier:
         except ValueError:
             return None
 
+    def _has_compound_qty_pattern(self, compact: str) -> bool:
+        return bool(re.search(r"\d+(?:\.\d+)?[+*xX]\.?\d+", compact))
+
+    def _has_pharma_qty_pattern(self, raw: str, compact: str) -> bool:
+        if self._has_compound_qty_pattern(compact):
+            return True
+        if re.search(r"\b\d{1,2}\.\b", raw):
+            return True
+        return bool(re.fullmatch(r"\d{1,2}", compact))
+
     def _table_x_bounds(self, region: TableRegion) -> Tuple[float, float]:
         if region.geometry:
             return region.geometry.min_x, region.geometry.max_x
@@ -105,10 +115,11 @@ class SemanticColumnClassifier:
         )
         is_money = bool(re.fullmatch(r"[₹$]?\d[\d,]*\.\d{1,3}%?", compact))
         is_integer = bool(re.fullmatch(r"\d+", compact))
+        has_compound_qty = self._has_compound_qty_pattern(compact)
         is_qty = (
-            bool(re.fullmatch(r"\d+(?:[+*xX]\d+)?", compact))
-            and len(compact) <= 6
+            self._has_pharma_qty_pattern(raw, compact)
             and not is_hsn
+            and not is_expiry
         )
         is_gst = (
             "GST" in compact
@@ -133,6 +144,7 @@ class SemanticColumnClassifier:
             "is_money": is_money,
             "is_integer": is_integer,
             "is_qty": is_qty,
+            "is_compound_qty": has_compound_qty,
             "is_gst": is_gst,
             "is_discount": has_discount_token,
             "is_long_alpha_text": len(raw) >= 10 and alpha >= 4,
@@ -170,6 +182,7 @@ class SemanticColumnClassifier:
             "gst_pattern_count": sum(1 for f in features if f["is_gst"]),
             "money_pattern_count": sum(1 for f in features if f["is_money"]),
             "qty_pattern_count": sum(1 for f in features if f["is_qty"]),
+            "compound_qty_pattern_count": sum(1 for f in features if f["is_compound_qty"]),
             "integer_pattern_count": sum(1 for f in features if f["is_integer"]),
             "discount_pattern_count": sum(1 for f in features if f["is_discount"]),
             "long_alpha_text_count": sum(1 for f in features if f["is_long_alpha_text"]),
@@ -249,6 +262,27 @@ class SemanticColumnClassifier:
             reasons.append("gst_small_value_pattern")
         return not reasons, reasons
 
+    def _quantity_candidate_reason(self, profile: Dict[str, Any]) -> Tuple[bool, str]:
+        sample_size = max(1, profile["sample_size"])
+        qty_ratio = profile["qty_pattern_count"] / sample_size
+        compound_ratio = profile["compound_qty_pattern_count"] / sample_size
+        money_ratio = profile["money_pattern_count"] / sample_size
+        right_side = profile["right_side_score"]
+
+        if right_side >= 0.55:
+            return False, "right_of_expected_quantity_zone"
+        if money_ratio >= 0.45 and compound_ratio < 0.25:
+            return False, "money_like_column"
+        if profile["alpha_density"] > 0.5 and compound_ratio < 0.25:
+            return False, "alpha_density_too_high"
+        if self._strong_non_amount_signal(profile) and compound_ratio < 0.25:
+            return False, "strong_non_quantity_signal"
+        if compound_ratio >= 0.25:
+            return True, "compound_quantity_pattern"
+        if qty_ratio >= 0.45 and profile["alpha_density"] <= 0.25 and money_ratio < 0.35:
+            return True, "plain_quantity_pattern"
+        return False, "insufficient_quantity_pattern"
+
     def _ratio(self, profile: Dict[str, Any], key: str) -> float:
         return profile.get(key, 0) / max(1, profile.get("sample_size", 0))
 
@@ -286,6 +320,8 @@ class SemanticColumnClassifier:
         batch_column_candidates: List[str] = []
         hsn_column_candidates: List[str] = []
         gst_column_candidates: List[str] = []
+        quantity_column_candidates: List[Dict[str, Any]] = []
+        rejected_quantity_candidates: List[Dict[str, Any]] = []
 
         profiles: Dict[str, Dict[str, Any]] = {}
         scores_by_col: Dict[str, Dict[str, float]] = {}
@@ -326,7 +362,28 @@ class SemanticColumnClassifier:
             gst_ratio = self._ratio(profile, "gst_pattern_count")
             money_ratio = self._ratio(profile, "money_pattern_count")
             qty_ratio = self._ratio(profile, "qty_pattern_count")
+            compound_qty_ratio = self._ratio(profile, "compound_qty_pattern_count")
             gst_small_ratio = self._ratio(profile, "gst_small_value_count")
+            quantity_eligible, quantity_reason = self._quantity_candidate_reason(profile)
+            if quantity_eligible:
+                quantity_column_candidates.append({
+                    "col_id": col_id,
+                    "reason": quantity_reason,
+                    "right_side_score": round(profile["right_side_score"], 3),
+                    "qty_pattern_count": profile["qty_pattern_count"],
+                    "compound_qty_pattern_count": profile["compound_qty_pattern_count"],
+                    "sample_size": sample_size,
+                })
+            elif profile["qty_pattern_count"] > 0 or profile["compound_qty_pattern_count"] > 0:
+                rejected_quantity_candidates.append({
+                    "col_id": col_id,
+                    "reason": quantity_reason,
+                    "right_side_score": round(profile["right_side_score"], 3),
+                    "qty_pattern_count": profile["qty_pattern_count"],
+                    "compound_qty_pattern_count": profile["compound_qty_pattern_count"],
+                    "money_pattern_count": profile["money_pattern_count"],
+                    "alpha_density": round(profile["alpha_density"], 3),
+                })
 
             amount_eligible, amount_reasons = self._strict_amount_candidate(profile)
             if amount_eligible:
@@ -384,12 +441,17 @@ class SemanticColumnClassifier:
             elif profile["alpha_density"] >= 0.35 and profile["right_side_score"] <= 0.55:
                 hard_semantics[col_id] = ColumnSemantics.PRODUCT
             elif (
-                qty_ratio >= 0.45
-                and profile["alpha_density"] <= 0.2
-                and money_ratio < 0.35
-                and not self._strong_non_amount_signal(profile)
+                quantity_eligible
+                or (
+                    qty_ratio >= 0.45
+                    and profile["alpha_density"] <= 0.2
+                    and money_ratio < 0.35
+                    and not self._strong_non_amount_signal(profile)
+                )
             ):
                 quantity_candidates.append(col_id)
+                if compound_qty_ratio >= 0.25:
+                    scores[ColumnSemantics.QUANTITY] += compound_qty_ratio * 3.0
 
             analysis_results[col_id] = {
                 "type": ColumnSemantics.UNKNOWN,
@@ -487,6 +549,8 @@ class SemanticColumnClassifier:
             "batch_column_candidates": batch_column_candidates,
             "hsn_column_candidates": hsn_column_candidates,
             "gst_column_candidates": gst_column_candidates,
+            "quantity_column_candidates": quantity_column_candidates,
+            "rejected_quantity_candidates": rejected_quantity_candidates,
         }
         return analysis_results
 

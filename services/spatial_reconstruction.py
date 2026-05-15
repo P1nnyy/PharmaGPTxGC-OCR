@@ -521,6 +521,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     batch_column_candidates = {}
     hsn_column_candidates = {}
     gst_column_candidates = {}
+    quantity_column_candidates = {}
+    rejected_quantity_candidates = {}
     for tr in analysis_targets:
         semantic_results[tr.table_id] = classifier.enrich_region_metadata(tr)
         rejection_summary = semantic_results[tr.table_id].get("_rejection_summary", {})
@@ -542,6 +544,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         batch_column_candidates[tr.table_id] = inference_summary.get("batch_column_candidates", [])
         hsn_column_candidates[tr.table_id] = inference_summary.get("hsn_column_candidates", [])
         gst_column_candidates[tr.table_id] = inference_summary.get("gst_column_candidates", [])
+        quantity_column_candidates[tr.table_id] = inference_summary.get("quantity_column_candidates", [])
+        rejected_quantity_candidates[tr.table_id] = inference_summary.get("rejected_quantity_candidates", [])
 
     stability_engine = TopologyStabilityEngine()
     stability_metrics = stability_engine.compute_stability(analysis_targets)
@@ -592,6 +596,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 batch_column_candidates = {}
                 hsn_column_candidates = {}
                 gst_column_candidates = {}
+                quantity_column_candidates = {}
+                rejected_quantity_candidates = {}
                 for semantic_target in analysis_targets:
                     semantic_results[semantic_target.table_id] = classifier.enrich_region_metadata(semantic_target)
                     rejection_summary = semantic_results[semantic_target.table_id].get("_rejection_summary", {})
@@ -613,6 +619,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     batch_column_candidates[semantic_target.table_id] = inference_summary.get("batch_column_candidates", [])
                     hsn_column_candidates[semantic_target.table_id] = inference_summary.get("hsn_column_candidates", [])
                     gst_column_candidates[semantic_target.table_id] = inference_summary.get("gst_column_candidates", [])
+                    quantity_column_candidates[semantic_target.table_id] = inference_summary.get("quantity_column_candidates", [])
+                    rejected_quantity_candidates[semantic_target.table_id] = inference_summary.get("rejected_quantity_candidates", [])
 
                 row_validator = RowValidator(semantic_column_cache=semantic_results)
                 row_validation_results = row_validator.validate_all(analysis_targets)
@@ -657,6 +665,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "batch_column_candidates": batch_column_candidates,
         "hsn_column_candidates": hsn_column_candidates,
         "gst_column_candidates": gst_column_candidates,
+        "quantity_column_candidates": quantity_column_candidates,
+        "rejected_quantity_candidates": rejected_quantity_candidates,
         "quarantined_cell_count": quarantined_cell_total,
     }
 
@@ -880,6 +890,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "batch_column_candidates": batch_column_candidates,
             "hsn_column_candidates": hsn_column_candidates,
             "gst_column_candidates": gst_column_candidates,
+            "quantity_column_candidates": quantity_column_candidates,
+            "rejected_quantity_candidates": rejected_quantity_candidates,
             "item_rows_count": row_role_metrics["item_rows_count"],
             "footer_rows_count": row_role_metrics["footer_rows_count"],
             "tax_rows_count": row_role_metrics["tax_rows_count"],
