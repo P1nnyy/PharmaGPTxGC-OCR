@@ -39,9 +39,12 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         
         cached_result = cache_service.get_cached_result(invoice_id)
         if cached_result:
+            logger.info("OCR cache hit: reusing OCR blocks only")
             blocks = cached_result.get("blocks", [])
             metadata = {"blocks": blocks}
             if reconstruct or extract:
+                logger.info("Cached reconstruction response disabled")
+                logger.info("Running fresh reconstruction with current code")
                 image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
                 reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
                 logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
@@ -67,6 +70,8 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         blocks = ocr_result.get("blocks", [])
         metadata = {"blocks": blocks}
         if reconstruct or extract:
+            logger.info("Cached reconstruction response disabled")
+            logger.info("Running fresh reconstruction with current code")
             reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
             logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
             metadata.update(reconstruction_data)

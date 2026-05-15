@@ -13,6 +13,22 @@ _CACHE_STATUS_LOGGED = False
 _CACHE_WARNING_LOGGED = False
 _SAVE_DISABLED_FOR_PROCESS = False
 
+RECONSTRUCTION_RESPONSE_KEYS = {
+    "reconstructed_rows",
+    "detected_table_rows",
+    "structured_tables",
+    "columns_extracted",
+    "metrics",
+    "semantic_markdown",
+    "table_routing",
+    "invoice_confidence",
+    "financial_validation",
+    "auxiliary_tables",
+    "topology_source",
+    "fast_fail",
+    "fast_fail_reason",
+}
+
 def _cache_fix_suggestion(path: str) -> str:
     return f"Fix with: sudo chown -R $USER:$USER {path} && chmod -R u+rwX {path}"
 
@@ -77,6 +93,28 @@ def compute_md5(file_bytes: bytes) -> str:
     except TypeError:
         return hashlib.md5(file_bytes).hexdigest()
 
+def _ocr_only_payload(data: dict) -> dict:
+    """
+    Return only cached OCR primitives. Cached reconstruction output is intentionally
+    ignored so current code always rebuilds layout, routing, metrics, and validation.
+    """
+    if not isinstance(data, dict):
+        return {"text": "", "blocks": []}
+
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    blocks = data.get("blocks")
+    if blocks is None:
+        blocks = metadata.get("blocks", [])
+
+    text = data.get("text", "")
+    if not text and isinstance(metadata.get("text"), str):
+        text = metadata.get("text", "")
+
+    return {
+        "text": text,
+        "blocks": blocks or [],
+    }
+
 def get_cached_result(invoice_id: str) -> Optional[dict]:
     if not settings.ENABLE_CACHE:
         return None
@@ -87,7 +125,9 @@ def get_cached_result(invoice_id: str) -> Optional[dict]:
         logger.info(f"Cache hit for invoice_id: {invoice_id} (key: {cache_key})")
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cached_data = json.load(f)
+            logger.info("Cached reconstruction response disabled")
+            return _ocr_only_payload(cached_data)
         except Exception as e:
             logger.error(f"Failed to read cache for {cache_key}: {e}")
             return None
@@ -108,6 +148,7 @@ def save_result(invoice_id: str, data: dict):
     cache_key = _versioned_key(invoice_id)
     cache_path = os.path.join(settings.OCR_RESULTS_DIR, f"{cache_key}.json")
     try:
+        data = _ocr_only_payload(data)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved OCR result to cache for invoice_id: {invoice_id} (key: {cache_key})")
