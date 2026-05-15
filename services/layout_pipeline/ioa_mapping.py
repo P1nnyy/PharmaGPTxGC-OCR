@@ -94,7 +94,7 @@ def _compute_y_overlap(block_geom: GeometryBox, row_geom: GeometryBox) -> float:
     block_height = max(1.0, block_geom.max_y - block_geom.min_y)
     return overlap / block_height
 
-def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> None:
+def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debug: bool = False) -> None:
     """
     V4 Assignment Engine: Soft Row-Scoped Allocator.
     
@@ -338,21 +338,22 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion]) -> N
         import statistics
         metrics["right_edge_alignment_variance"] = round(statistics.variance(_right_edge_deltas) if len(_right_edge_deltas) > 1 else 0.0, 4)
     
-    # 8. Telemetry Persistence
-    try:
-        debug_dir = "datasets/debug"
-        os.makedirs(debug_dir, exist_ok=True)
-        with open(os.path.join(debug_dir, "ioa_hardened_metrics.json"), "w", encoding="utf-8") as f:
-            json.dump({
-                "engine_metrics": metrics,
-                "log": assignment_audit
-            }, f, indent=2)
-        logger.info(
-            f"V4 Row-Scoped Allocator: mapped={metrics['total_numeric_mapped']} nums, "
-            f"orphans={metrics['orphan_numeric_tokens']}, "
-            f"tier1={metrics['tier1_assignments']}, tier2={metrics['tier2_assignments']}, tier3={metrics['tier3_assignments']}, "
-            f"rejection_rate={metrics['assignment_rejection_rate']:.2%}, "
-            f"right_edge_variance={metrics['right_edge_alignment_variance']:.2f}px"
-        )
-    except Exception as e:
-        logger.error(f"Allocator telemetry write failure: {e}")
+    if debug:
+        try:
+            debug_dir = "datasets/debug"
+            os.makedirs(debug_dir, exist_ok=True)
+            with open(os.path.join(debug_dir, "ioa_hardened_metrics.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "engine_metrics": metrics,
+                    "log": assignment_audit
+                }, f, indent=2)
+        except Exception as e:
+            logger.error(f"Allocator telemetry write failure: {e}")
+
+    logger.info(
+        f"V4 Row-Scoped Allocator: mapped={metrics['total_numeric_mapped']} nums, "
+        f"orphans={metrics['orphan_numeric_tokens']}, "
+        f"tier1={metrics['tier1_assignments']}, tier2={metrics['tier2_assignments']}, tier3={metrics['tier3_assignments']}, "
+        f"rejection_rate={metrics['assignment_rejection_rate']:.2%}, "
+        f"right_edge_variance={metrics['right_edge_alignment_variance']:.2f}px"
+    )

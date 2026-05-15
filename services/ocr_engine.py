@@ -1,4 +1,5 @@
 import os
+import threading
 from PIL import Image, ImageOps
 import numpy as np
 from typing import List, Dict, Any
@@ -11,23 +12,28 @@ from surya.detection import DetectionPredictor
 _foundation_predictor = None
 _detection_predictor = None
 _recognition_predictor = None
+_model_load_lock = threading.Lock()
 
 def load_models_if_needed():
     global _foundation_predictor, _detection_predictor, _recognition_predictor
-    if _foundation_predictor is None:
-        logger.info("Lazy loading Surya Foundation Predictor...")
-        _foundation_predictor = FoundationPredictor()
-        logger.info("Foundation Predictor loaded.")
-        
-    if _detection_predictor is None:
-        logger.info("Lazy loading Surya Detection Predictor...")
-        _detection_predictor = DetectionPredictor()
-        logger.info("Detection Predictor loaded.")
-    
-    if _recognition_predictor is None:
-        logger.info("Lazy loading Surya Recognition Predictor...")
-        _recognition_predictor = RecognitionPredictor(_foundation_predictor)
-        logger.info("Recognition Predictor loaded.")
+    if _foundation_predictor is not None and _detection_predictor is not None and _recognition_predictor is not None:
+        return
+
+    with _model_load_lock:
+        if _foundation_predictor is None:
+            logger.info("Lazy loading Surya Foundation Predictor...")
+            _foundation_predictor = FoundationPredictor()
+            logger.info("Foundation Predictor loaded.")
+
+        if _detection_predictor is None:
+            logger.info("Lazy loading Surya Detection Predictor...")
+            _detection_predictor = DetectionPredictor()
+            logger.info("Detection Predictor loaded.")
+
+        if _recognition_predictor is None:
+            logger.info("Lazy loading Surya Recognition Predictor...")
+            _recognition_predictor = RecognitionPredictor(_foundation_predictor)
+            logger.info("Recognition Predictor loaded.")
 
 def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, Any]:
     load_models_if_needed()

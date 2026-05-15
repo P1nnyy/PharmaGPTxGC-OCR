@@ -156,7 +156,7 @@ class PPStructure_TSREngine(BaseTSREngine):
             )
         return self._engine
 
-    def detect_tables(self, blocks: List[OCRBlock], image: Image.Image = None) -> Tuple[List[TableRegion], Dict[str, Any]]:
+    def detect_tables(self, blocks: List[OCRBlock], image: Image.Image = None, debug: bool = False) -> Tuple[List[TableRegion], Dict[str, Any]]:
         if image is None:
             return [], {
                 "tsr_engine": "ppstructure",
@@ -174,8 +174,9 @@ class PPStructure_TSREngine(BaseTSREngine):
                 "tsr_error": str(e)
             }
 
-        debug_dir = "datasets/debug"
-        os.makedirs(debug_dir, exist_ok=True)
+        debug_dir = "datasets/debug" if debug else None
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
 
         img_np = np.array(image.convert("RGB"))
         img_cv = img_np[:, :, ::-1]
@@ -200,8 +201,8 @@ class PPStructure_TSREngine(BaseTSREngine):
         for angle, filename in candidate_orientations:
             norm_img, M_total = get_full_affine_transform(img_cv, angle)
 
-            # Save candidate to debug folder
-            cv2.imwrite(os.path.join(debug_dir, filename), norm_img)
+            if debug_dir:
+                cv2.imwrite(os.path.join(debug_dir, filename), norm_img)
 
             logger.info(f"Running PP-Structure inference on {angle}-degree candidate...")
             try:
@@ -302,27 +303,27 @@ class PPStructure_TSREngine(BaseTSREngine):
                 "multi_orientation_enabled": bool(settings.ENABLE_PPSTRUCTURE_MULTI_ORIENTATION)
             }
 
-        # Save selected final output debug image
-        cv2.imwrite(os.path.join(debug_dir, "tsr_selected_orientation.png"), winner['image'])
+        if debug_dir:
+            cv2.imwrite(os.path.join(debug_dir, "tsr_selected_orientation.png"), winner['image'])
 
         try:
             M_inv = np.linalg.inv(winner['matrix'])
         except:
             M_inv = np.eye(3)
 
-        # --- NEW Diagnostic Artifact Persistence ---
-        import json
-        def numpy_sanitizer(obj):
-            if isinstance(obj, (np.ndarray, np.generic)):
-                return obj.tolist()
-            return str(obj)
+        if debug_dir:
+            import json
 
-        # 1. Dump original AI model output before coordinate realignment
-        with open(os.path.join(debug_dir, "raw_ppstructure_response.json"), "w", encoding="utf-8") as f:
-            json.dump(winner['results'], f, default=numpy_sanitizer, indent=2)
+            def numpy_sanitizer(obj):
+                if isinstance(obj, (np.ndarray, np.generic)):
+                    return obj.tolist()
+                return str(obj)
+
+            with open(os.path.join(debug_dir, "raw_ppstructure_response.json"), "w", encoding="utf-8") as f:
+                json.dump(winner['results'], f, default=numpy_sanitizer, indent=2)
 
         # Overlay visual diagnostic copy
-        overlay_img = winner['image'].copy()
+        overlay_img = winner['image'].copy() if debug_dir else None
 
         final_regions = []
         table_counter = 0
@@ -334,7 +335,8 @@ class PPStructure_TSREngine(BaseTSREngine):
                 cell_bboxes = res_data.get('cell_bbox', [])
 
                 if bbox:
-                    cv2.rectangle(overlay_img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 3)
+                    if overlay_img is not None:
+                        cv2.rectangle(overlay_img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 3)
 
                 # --- TOPOLOGY CLEANUP STAGE INJECTED ---
                 # Refines noise, merges phantom fragments BEFORE canonical banding.
@@ -342,7 +344,8 @@ class PPStructure_TSREngine(BaseTSREngine):
                 final_cell_bboxes = cleaner.clean_cell_boxes(cell_bboxes)
 
                 for cb in final_cell_bboxes:
-                    cv2.rectangle(overlay_img, (int(cb[0]), int(cb[1])), (int(cb[2]), int(cb[3])), (255, 0, 0), 1)
+                    if overlay_img is not None:
+                        cv2.rectangle(overlay_img, (int(cb[0]), int(cb[1])), (int(cb[2]), int(cb[3])), (255, 0, 0), 1)
 
                 t_geom_orig = build_geom_from_bbox(bbox, M_inv)
                 t_geom_norm = build_geom_from_bbox(bbox, None)
@@ -453,22 +456,24 @@ class PPStructure_TSREngine(BaseTSREngine):
                 final_regions.append(region)
                 table_counter += 1
 
-        cv2.imwrite(os.path.join(debug_dir, "tsr_ppstructure_overlay.png"), overlay_img)
+        if debug_dir:
+            cv2.imwrite(os.path.join(debug_dir, "tsr_ppstructure_overlay.png"), overlay_img)
 
-        # 2. Dump structured geometry grid audit
-        cell_grid_audit = []
-        for tr in final_regions:
-            t_data = {"table_id": tr.table_id, "cells": []}
-            for cl in tr.cells:
-                t_data["cells"].append({
-                    "row": cl.row_id, "col": cl.col_id,
-                    "normalized_bbox": [cl.normalized_geometry.min_x, cl.normalized_geometry.min_y,
-                                       cl.normalized_geometry.max_x, cl.normalized_geometry.max_y] if cl.normalized_geometry else []
-                })
-            cell_grid_audit.append(t_data)
+            import json
 
-        with open(os.path.join(debug_dir, "normalized_cell_grid.json"), "w", encoding="utf-8") as f:
-            json.dump(cell_grid_audit, f, indent=2)
+            cell_grid_audit = []
+            for tr in final_regions:
+                t_data = {"table_id": tr.table_id, "cells": []}
+                for cl in tr.cells:
+                    t_data["cells"].append({
+                        "row": cl.row_id, "col": cl.col_id,
+                        "normalized_bbox": [cl.normalized_geometry.min_x, cl.normalized_geometry.min_y,
+                                           cl.normalized_geometry.max_x, cl.normalized_geometry.max_y] if cl.normalized_geometry else []
+                    })
+                cell_grid_audit.append(t_data)
+
+            with open(os.path.join(debug_dir, "normalized_cell_grid.json"), "w", encoding="utf-8") as f:
+                json.dump(cell_grid_audit, f, indent=2)
 
         meta = {
             "tsr_engine": "ppstructure",

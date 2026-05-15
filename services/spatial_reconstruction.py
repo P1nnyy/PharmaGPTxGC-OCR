@@ -285,7 +285,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         heuristic_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
         if ppstructure_enabled:
             pp_engine = PPStructure_TSREngine()
-            pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
+            pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image, debug=(debug and not benchmark_mode))
             ppstructure_regions_attempted = len(pp_regions)
             ppstructure_cells_attempted = sum(len(tr.cells) for tr in pp_regions)
             logger.info(f"[COMPARE] PP-Structure detected {len(pp_regions)} tables.")
@@ -319,7 +319,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     else:
         # PRIMARY PATH: PPStructure with confidence-gated fallback
         pp_engine = PPStructure_TSREngine()
-        table_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image)
+        table_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image, debug=(debug and not benchmark_mode))
         ppstructure_regions_attempted = len(table_regions)
         ppstructure_cells_attempted = sum(len(tr.cells) for tr in table_regions)
 
@@ -406,7 +406,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             repair_metrics_total[k] += v
 
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
-    map_tokens_to_cells(ocr_blocks, table_regions)
+    map_tokens_to_cells(ocr_blocks, table_regions, debug=(debug and not benchmark_mode))
 
     # ── NEW: HIERARCHICAL ROW GRAPH STAGE ──
     # Before applying destruction, snapshot Visual Row definitions for debug rendering

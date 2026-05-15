@@ -1,10 +1,23 @@
 import os
 import cv2
 import numpy as np
-from typing import List
+from typing import Any, Dict, List
 from core.logger import logger
 from models.layout_models import OCRBlock, TableRegion
-from services.layout_pipeline.column_projection import get_anchor_x
+
+def _safe_anchor_x(block: OCRBlock) -> float:
+    """Debug-only numeric marker; avoid importing optional anchor internals at module import."""
+    anchor = getattr(block, "anchor_x", None)
+    if anchor is not None:
+        return float(anchor)
+    if block.normalized_geometry:
+        return float(block.normalized_geometry.max_x)
+    return 0.0
+
+def _ensure_output_dir(output_path: str) -> None:
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
 def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion], image_width: float, image_height: float, output_path: str):
     """
@@ -60,7 +73,7 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
                 
                 # Draw numeric anchors
                 if block.is_numeric:
-                    anchor_x = int(get_anchor_x(block))
+                    anchor_x = int(_safe_anchor_x(block))
                     anchor_y = int(geom.center_y)
                     cv2.circle(canvas, (anchor_x, anchor_y), 3, COLOR_ANCHOR, -1)
                     
@@ -95,7 +108,7 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
                     cv2.putText(canvas, text_label, (int(cg.min_x) + 2, int(cg.min_y) + 12), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, COLOR_CELL, 1)
                     
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        _ensure_output_dir(output_path)
         
         # 5. Check cv2.imwrite success
         success = cv2.imwrite(output_path, canvas)
@@ -106,11 +119,9 @@ def draw_debug_visualization(blocks: List[OCRBlock], regions: List[TableRegion],
         logger.info(f"Saved visualization to {output_path}")
         
     except Exception as e:
-        # 1. REMOVE silent exception swallowing, use logger.exception and re-raise
         logger.exception(f"Failed to generate debug visualization: {e}")
-        raise
 
-def draw_debug_visualization_v2(blocks: List[OCRBlock], regions: List[TableRegion], image_width: float, image_height: float, output_path: str, visual_rows: List[Dict] = None, merge_audit: List[Dict] = None):
+def draw_debug_visualization_v2(blocks: List[OCRBlock], regions: List[TableRegion], image_width: float, image_height: float, output_path: str, visual_rows: List[Dict[str, Any]] = None, merge_audit: List[Dict[str, Any]] = None):
     """
     TASK 4: Advanced Visualizer rendering visual vs semantic layers and fusion connectors.
     """
@@ -182,7 +193,7 @@ def draw_debug_visualization_v2(blocks: List[OCRBlock], regions: List[TableRegio
                  g = b.normalized_geometry
                  cv2.putText(canvas, b.text[:8], (int(g.min_x), int(g.center_y)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_TEXT, 1)
                  
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        _ensure_output_dir(output_path)
         cv2.imwrite(output_path, canvas)
         logger.info(f"Saved v2 visualization showing multiline graph to {output_path}")
         

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from core.config import settings
 from core.logger import logger
 from models.schemas import HealthResponse, OCRResponse
 from services import cache_service, ocr_engine, spatial_reconstruction
@@ -23,11 +24,15 @@ def health_check():
 
 @router.post("/upload-invoice", response_model=OCRResponse)
 async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure", extract: bool = False, benchmark_mode: bool = False):
-    if not file.content_type.startswith("image/"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
+    if file.size is not None and file.size > settings.MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum upload size is {settings.MAX_UPLOAD_SIZE_BYTES} bytes.")
         
     try:
         file_bytes = await file.read()
+        if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(status_code=413, detail=f"File too large. Maximum upload size is {settings.MAX_UPLOAD_SIZE_BYTES} bytes.")
         invoice_id = cache_service.compute_md5(file_bytes)
         
         logger.info(f"Received file: {file.filename}, computed invoice_id: {invoice_id}")
@@ -79,5 +84,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         )
         
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         logger.error(f"Error processing upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))

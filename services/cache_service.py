@@ -13,10 +13,8 @@ _CACHE_STATUS_LOGGED = False
 _CACHE_WARNING_LOGGED = False
 _SAVE_DISABLED_FOR_PROCESS = False
 
-_CACHE_FIX_SUGGESTION = (
-    "Fix with: sudo chown -R $USER:$USER datasets && "
-    "chmod -R u+rwX datasets && mkdir -p datasets/ocr_results"
-)
+def _cache_fix_suggestion(path: str) -> str:
+    return f"Fix with: sudo chown -R $USER:$USER {path} && chmod -R u+rwX {path}"
 
 def _versioned_key(invoice_id: str) -> str:
     """Generate a cache key incorporating pipeline version to prevent stale reuse."""
@@ -28,7 +26,7 @@ def _log_cache_warning_once(path: str, reason: str):
         return
     logger.warning(
         f"[CACHE STATUS] Cache disabled due to unwritable path. "
-        f"path={path} reason={reason}. {_CACHE_FIX_SUGGESTION}"
+        f"path={path} reason={reason}. {_cache_fix_suggestion(path)}"
     )
     _CACHE_WARNING_LOGGED = True
 
@@ -74,7 +72,10 @@ def check_cache_status(log_status: bool = True) -> bool:
     return writable
 
 def compute_md5(file_bytes: bytes) -> str:
-    return hashlib.md5(file_bytes).hexdigest()
+    try:
+        return hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()
+    except TypeError:
+        return hashlib.md5(file_bytes).hexdigest()
 
 def get_cached_result(invoice_id: str) -> Optional[dict]:
     if not settings.ENABLE_CACHE:
