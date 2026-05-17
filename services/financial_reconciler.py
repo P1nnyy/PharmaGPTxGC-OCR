@@ -205,6 +205,7 @@ class ReconciliationResultV2(BaseModel):
     status: ValidationStatus = ValidationStatus.FAIL
     sub_scores: Dict[str, SubScore] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
+    item_amount_sources: List[Dict[str, Any]] = Field(default_factory=list)
 
     def to_legacy_dict(self) -> Dict[str, Any]:
         """Maintains backward compatibility with legacy dashboard keys."""
@@ -220,6 +221,7 @@ class ReconciliationResultV2(BaseModel):
             "grand_total_discrepancy": float(self.grand_total_discrepancy),
             "confidence": float(self.integrity_score / 100.0),
             "warnings": self.warnings,
+            "item_amount_sources": self.item_amount_sources,
             "status": self.status.value
         }
 
@@ -266,6 +268,7 @@ class FinancialReconciler:
         math_fail_count = 0
         rows_valid_total = 0
         low_stability_item_rows = 0
+        item_amount_sources = []
         
         verifier = DiscountAwareVerifier()
         footer_row_pattern = re.compile(
@@ -294,14 +297,40 @@ class FinancialReconciler:
             
             # Extract candidate numeric values
             r_amt = r_qty_obj = r_rate = r_disc = None
-            
+            selected_amount_cell = None
+            amount_selection_reason = "no_semantic_amount_column"
+
+            if amt_cols:
+                for c in row_cells:
+                    if c.col_id not in amt_cols:
+                        continue
+                    amount_values = [val for val in _decimal_candidates(c.text) if val > 0]
+                    if amount_values:
+                        r_amt = amount_values[-1]
+                        selected_amount_cell = c
+                        amount_selection_reason = "semantic_amount_column"
+                        if getattr(c, "semantic_outlier", False):
+                            amount_selection_reason = "semantic_amount_column_with_outlier_flag"
+                        break
+
             for c in row_cells:
                 if getattr(c, "semantic_outlier", False):
                     continue
-                if c.col_id in amt_cols: r_amt = _to_decimal(c.text)
                 if c.col_id in qty_cols: r_qty_obj = parse_quantity(c.text)
                 if c.col_id in rate_cols: r_rate = _to_decimal(c.text)
                 if c.col_id in disc_cols: r_disc = _to_decimal(c.text)
+
+            if not amt_cols:
+                numeric_cells = []
+                for c in row_cells:
+                    if getattr(c, "semantic_outlier", False):
+                        continue
+                    amount_values = [val for val in _decimal_candidates(c.text) if val > 0]
+                    if amount_values:
+                        numeric_cells.append((c.geometry.center_x if c.geometry else 0, c, amount_values[-1]))
+                if numeric_cells:
+                    _, selected_amount_cell, r_amt = sorted(numeric_cells, key=lambda item: item[0])[-1]
+                    amount_selection_reason = "fallback_rightmost_numeric_no_semantic_amount_column"
             
             # Standard extraction fallback if rate explicitly isn't tagged yet (Rate acts like Amount)
             if r_rate is None and len(amt_cols) >= 2 and r_amt is not None:
@@ -313,6 +342,13 @@ class FinancialReconciler:
             if r_amt is not None and r_amt > 0:
                 derived_subtotal += r_amt
                 rows_valid_total += 1
+                item_amount_sources.append({
+                    "row_id": row.row_id,
+                    "selected_amount_col_id": selected_amount_cell.col_id if selected_amount_cell else None,
+                    "selected_amount_text": selected_amount_cell.text if selected_amount_cell else None,
+                    "parsed_amount": float(r_amt),
+                    "selection_reason": amount_selection_reason,
+                })
                 
                 # If we have necessary variables, run verification
                 if r_qty_obj is not None and r_rate is not None:
@@ -404,7 +440,8 @@ class FinancialReconciler:
             parsed_grand_total=parsed_gt,
             total_rows=rows_valid_total,
             rows_math_passed=math_pass_count,
-            rows_math_failed=math_fail_count
+            rows_math_failed=math_fail_count,
+            item_amount_sources=item_amount_sources
         )
         if low_stability_item_rows:
             res.warnings.append(f"included_low_stability_item_rows:{low_stability_item_rows}")
@@ -453,8 +490,11 @@ _INVOICE_LABEL_PATTERNS = {
 
 def _decimal_candidates(text: str) -> List[Decimal]:
     values = []
-    for match in re.findall(r"-?\d[\d,]*\.\d{1,3}", text or ""):
-        values.append(_to_decimal(match))
+    for match in re.findall(r"-?\d[\d,]*[\.,]\d{1,3}", text or ""):
+        if "," in match and "." not in match:
+            values.append(_to_decimal(match.replace(",", ".")))
+        else:
+            values.append(_to_decimal(match))
     return values
 
 
