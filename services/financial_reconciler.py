@@ -265,6 +265,7 @@ class FinancialReconciler:
         math_pass_count = 0
         math_fail_count = 0
         rows_valid_total = 0
+        low_stability_item_rows = 0
         
         verifier = DiscountAwareVerifier()
         footer_row_pattern = re.compile(
@@ -274,15 +275,15 @@ class FinancialReconciler:
         )
         
         for row in region.rows:
-            # Skip highly unstable or header rows
-            if row.stability < 0.4:
-                continue
-            
             row_cells = cells_by_row.get(row.row_id, [])
             row_role = getattr(row, "row_role", "unknown_row")
             if row_role in ("header_row", "footer_summary_row", "tax_summary_row", "metadata_row"):
                 logger.debug(f"[RECONCILE ROW SKIP] Skipping row '{row.row_id}' role={row_role}")
                 continue
+            if row.stability < 0.4 and row_role != "item_row":
+                continue
+            if row.stability < 0.4:
+                low_stability_item_rows += 1
             row_text = " ".join(c.text for c in row_cells if c.text).strip()
             if footer_row_pattern.search(row_text):
                 logger.debug(
@@ -405,6 +406,8 @@ class FinancialReconciler:
             rows_math_passed=math_pass_count,
             rows_math_failed=math_fail_count
         )
+        if low_stability_item_rows:
+            res.warnings.append(f"included_low_stability_item_rows:{low_stability_item_rows}")
         
         # Compute Expected & Match states
         active_sub = parsed_st or derived_subtotal

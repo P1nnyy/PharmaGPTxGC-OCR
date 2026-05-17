@@ -23,7 +23,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = "ppstructure", extract: bool = False, benchmark_mode: bool = False):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE, extract: bool = False, benchmark_mode: bool = False):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
     if file.size is not None and file.size > settings.MAX_UPLOAD_SIZE_BYTES:
