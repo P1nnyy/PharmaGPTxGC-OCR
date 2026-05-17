@@ -13,8 +13,12 @@ FOOTER_RE = re.compile(
 )
 TAX_RE = re.compile(r"\b(CGST|SGST|IGST|GST|CESS|TAXABLE|TAX)\b", re.I)
 METADATA_RE = re.compile(r"\b(GSTIN|GST\s+NO|INVOICE\s+NO|D\.?L\.?\s*NO|TRANSPORT|TERMS|CONDITIONS|ADDRESS|PHONE)\b", re.I)
-MONEY_RE = re.compile(r"\b\d+[\d,]*\.\d{2}\b")
+MONEY_RE = re.compile(r"\b\d+[\d,]*[\.,]\d{2}\b")
 ALPHA_RE = re.compile(r"[A-Za-z]{3,}")
+HSN_RE = re.compile(r"\b\d{6,8}\b")
+EXPIRY_RE = re.compile(r"\b\d{1,2}[/-]\d{2,4}\b")
+BATCH_RE = re.compile(r"\b(?=[A-Z0-9-]{5,20}\b)(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9-]+\b", re.I)
+QTY_RE = re.compile(r"\b\d+(?:\.\d+)?(?:\+\d+(?:\.\d+)?)?\s*(?:S|PCS?|STRIPS?|TAB|CAP|ML|MG)?\b", re.I)
 
 
 def _row_text(cells: List[TableCell]) -> str:
@@ -42,12 +46,27 @@ def classify_row_roles(region: TableRegion) -> Dict[str, Any]:
         upper = text.upper()
         money_count = len(MONEY_RE.findall(text))
         alpha_count = len(ALPHA_RE.findall(text))
+        header_label_count = len(HEADER_RE.findall(upper))
+        has_product_text = alpha_count >= 2
+        table_evidence_count = sum(
+            bool(signal)
+            for signal in (
+                money_count >= 1,
+                HSN_RE.search(upper),
+                EXPIRY_RE.search(upper),
+                BATCH_RE.search(upper),
+                QTY_RE.search(upper),
+                TAX_RE.search(upper),
+            )
+        )
         populated_count = len([c for c in cells if c.text.strip()])
 
-        if HEADER_RE.search(upper) and populated_count >= 3:
-            role = "header_row"
-        elif FOOTER_RE.search(upper):
+        if FOOTER_RE.search(upper):
             role = "footer_summary_row"
+        elif has_product_text and money_count >= 1 and table_evidence_count >= 2:
+            role = "item_row"
+        elif HEADER_RE.search(upper) and header_label_count >= 2 and money_count == 0 and populated_count >= 3:
+            role = "header_row"
         elif TAX_RE.search(upper):
             role = "tax_summary_row"
         elif METADATA_RE.search(upper) and money_count < 2:
