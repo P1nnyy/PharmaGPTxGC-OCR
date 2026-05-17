@@ -632,6 +632,7 @@ def reconcile_invoice_financials(
         status = ValidationStatus.FAIL
 
     return {
+        "item_derived_subtotal": _money_float(derived_subtotal),
         "derived_subtotal": _money_float(derived_subtotal),
         "parsed_subtotal": _money_float(parsed_subtotal),
         "discount": _money_float(discount),
