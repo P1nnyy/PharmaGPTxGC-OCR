@@ -438,6 +438,221 @@ class FinancialReconciler:
             final_dict[region.table_id] = res.to_legacy_dict()
         return final_dict
 
+
+_INVOICE_LABEL_PATTERNS = {
+    "parsed_subtotal": re.compile(r"\bSUB\s*TOTAL\b|\bSUBTOTAL\b", re.IGNORECASE),
+    "discount": re.compile(r"\bDISCOUNT\b|\bLESS\s+DIS", re.IGNORECASE),
+    "sgst": re.compile(r"\bSGST\b", re.IGNORECASE),
+    "cgst": re.compile(r"\bCGST\b", re.IGNORECASE),
+    "igst": re.compile(r"\bIGST\b", re.IGNORECASE),
+    "roundoff": re.compile(r"\bROUND\s*OFF\b|\bROUNDOFF\b", re.IGNORECASE),
+    "cr_dr_note": re.compile(r"\bCR\s*/?\s*DR\s+NOTE\b|\bCR\s+NOTE\b|\bDR\s+NOTE\b", re.IGNORECASE),
+    "parsed_grand_total": re.compile(r"\bGRAND\s+TOTAL\b|\bNET\s+(?:PAYABLE|AMOUNT|AMT)\b", re.IGNORECASE),
+}
+
+
+def _decimal_candidates(text: str) -> List[Decimal]:
+    values = []
+    for match in re.findall(r"-?\d[\d,]*\.\d{1,3}", text or ""):
+        values.append(_to_decimal(match))
+    return values
+
+
+def _money_float(value: Optional[Decimal]) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _source_dict(table: TableRegion, row: RowRegion, cell: Optional[TableCell], value: Decimal, label: str) -> Dict[str, Any]:
+    return {
+        "table_id": table.table_id,
+        "row_id": row.row_id,
+        "col_id": cell.col_id if cell else None,
+        "label": label,
+        "text": cell.text if cell else "",
+        "value": _money_float(value),
+    }
+
+
+def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kind: str) -> Optional[Decimal]:
+    right_values = []
+    for cell in cells[label_idx + 1:]:
+        right_values.extend(_decimal_candidates(cell.text))
+    if right_values:
+        return right_values[-1]
+
+    same_cell_values = _decimal_candidates(cells[label_idx].text)
+    if not same_cell_values:
+        return None
+    if label_kind in {"sgst", "cgst", "igst"} and len(same_cell_values) == 1:
+        return None
+    return same_cell_values[-1]
+
+
+def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, List[Dict[str, Any]]]:
+    candidates: Dict[str, List[Dict[str, Any]]] = {key: [] for key in _INVOICE_LABEL_PATTERNS}
+
+    for table in tables:
+        cells_by_row: Dict[str, List[TableCell]] = {}
+        for cell in table.cells:
+            cells_by_row.setdefault(cell.row_id, []).append(cell)
+
+        for row in table.rows:
+            row_cells = sorted(
+                cells_by_row.get(row.row_id, []),
+                key=lambda c: c.geometry.center_x if c.geometry else 0,
+            )
+            row_text = " ".join(c.text for c in row_cells if c.text).strip()
+            if not row_text:
+                continue
+
+            row_labels = [
+                label
+                for label, pattern in _INVOICE_LABEL_PATTERNS.items()
+                if pattern.search(row_text)
+            ]
+            if "parsed_subtotal" in row_labels and "parsed_grand_total" in row_labels:
+                row_labels.remove("parsed_subtotal")
+            if not row_labels:
+                continue
+
+            for label in row_labels:
+                pattern = _INVOICE_LABEL_PATTERNS[label]
+                label_idx = next(
+                    (idx for idx, cell in enumerate(row_cells) if pattern.search(cell.text or "")),
+                    None,
+                )
+                if label_idx is None:
+                    continue
+                value = _candidate_value_for_label(row_cells, label_idx, label)
+                if value is None:
+                    continue
+
+                label_cell = row_cells[label_idx]
+                labels_in_cell = sum(
+                    1 for pattern in _INVOICE_LABEL_PATTERNS.values()
+                    if pattern.search(label_cell.text or "")
+                )
+                candidates[label].append({
+                    "value": value,
+                    "source": _source_dict(table, row, label_cell, value, label),
+                    "ambiguity": len(row_labels),
+                    "cell_ambiguity": labels_in_cell,
+                    "center_y": row.geometry.center_y if row.geometry else 0,
+                })
+
+    return candidates
+
+
+def _select_invoice_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda c: (c["ambiguity"], c["cell_ambiguity"], c["center_y"]))[0]
+
+
+def reconcile_invoice_financials(
+    main_reconciliation: Dict[str, Any],
+    footer_tables: List[TableRegion],
+) -> Dict[str, Any]:
+    """
+    Invoice-level reconciliation over non-main routed tables.
+
+    Main item subtotal remains owned by table-level reconciliation; this only
+    reads footer/tax/summary regions that routing already isolated.
+    """
+    candidates = _collect_invoice_total_candidates(footer_tables)
+    selected = {
+        label: _select_invoice_candidate(label_candidates)
+        for label, label_candidates in candidates.items()
+    }
+
+    values = {
+        label: selected[label]["value"] if selected[label] else None
+        for label in selected
+    }
+    sources = {
+        label: selected[label]["source"] if selected[label] else None
+        for label in selected
+    }
+
+    derived_subtotal = _to_decimal(main_reconciliation.get("derived_subtotal"))
+    parsed_subtotal = values["parsed_subtotal"]
+    discount = values["discount"] or Decimal("0")
+    sgst = values["sgst"] or Decimal("0")
+    cgst = values["cgst"] or Decimal("0")
+    igst = values["igst"] or Decimal("0")
+    roundoff = values["roundoff"] or Decimal("0")
+    cr_dr_note = values["cr_dr_note"] or Decimal("0")
+    parsed_grand_total = values["parsed_grand_total"]
+
+    subtotal_base = parsed_subtotal or derived_subtotal
+    cr_dr_effect = cr_dr_note
+    cr_dr_label = (sources.get("cr_dr_note") or {}).get("text", "").upper()
+    if "CR" in cr_dr_label and "DR" not in cr_dr_label:
+        cr_dr_effect = -abs(cr_dr_note)
+    elif "DR" in cr_dr_label and "CR" not in cr_dr_label:
+        cr_dr_effect = abs(cr_dr_note)
+
+    before_roundoff = subtotal_base - discount + sgst + cgst + igst + cr_dr_effect
+    expected_minus_roundoff = before_roundoff - roundoff
+    expected_plus_roundoff = before_roundoff + roundoff
+    roundoff_effect = -roundoff
+    expected_grand_total = expected_minus_roundoff
+
+    if parsed_grand_total is not None:
+        minus_delta = abs(expected_minus_roundoff - parsed_grand_total)
+        plus_delta = abs(expected_plus_roundoff - parsed_grand_total)
+        if plus_delta < minus_delta:
+            expected_grand_total = expected_plus_roundoff
+            roundoff_effect = roundoff
+
+    subtotal_match = False
+    if parsed_subtotal is not None:
+        subtotal_match = abs(parsed_subtotal - derived_subtotal) <= FinancialConfig.MATCH_TOLERANCE
+
+    grand_total_match = False
+    grand_total_discrepancy = Decimal("0")
+    if parsed_grand_total is not None:
+        grand_total_discrepancy = abs(expected_grand_total - parsed_grand_total)
+        grand_total_match = grand_total_discrepancy <= FinancialConfig.MATCH_TOLERANCE
+
+    warnings = []
+    if parsed_subtotal is None:
+        warnings.append("missing_parsed_subtotal")
+    if parsed_grand_total is None:
+        warnings.append("missing_parsed_grand_total")
+    if sgst == 0 and cgst == 0 and igst == 0:
+        warnings.append("missing_tax_components")
+
+    status = ValidationStatus.PASS
+    if warnings:
+        status = ValidationStatus.WARN
+    if parsed_grand_total is not None and not grand_total_match:
+        status = ValidationStatus.FAIL
+
+    return {
+        "derived_subtotal": _money_float(derived_subtotal),
+        "parsed_subtotal": _money_float(parsed_subtotal),
+        "discount": _money_float(discount),
+        "sgst": _money_float(sgst),
+        "cgst": _money_float(cgst),
+        "igst": _money_float(igst),
+        "parsed_gst": _money_float(sgst + cgst + igst),
+        "roundoff": _money_float(roundoff),
+        "roundoff_effect": _money_float(roundoff_effect),
+        "cr_dr_note": _money_float(cr_dr_note),
+        "cr_dr_note_effect": _money_float(cr_dr_effect),
+        "parsed_grand_total": _money_float(parsed_grand_total),
+        "expected_grand_total": _money_float(expected_grand_total),
+        "subtotal_match": subtotal_match,
+        "grand_total_match": grand_total_match,
+        "grand_total_discrepancy": _money_float(grand_total_discrepancy),
+        "status": status.value,
+        "warnings": warnings,
+        "sources": sources,
+    }
+
 # --- New Multi-Dimensional Scoring Logic ---
 
 def _compute_v2_scoring(res: ReconciliationResultV2) -> ReconciliationResultV2:

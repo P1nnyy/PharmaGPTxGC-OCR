@@ -13,7 +13,7 @@ from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.layout_pipeline.row_roles import classify_row_roles
 from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
 from services.topology.column_stabilizer import ColumnStabilizer
-from services.financial_reconciler import FinancialReconciler
+from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
 from services.table_classifier import TableClassifier, route_tables, TableType
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
@@ -633,6 +633,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     reconciler = FinancialReconciler(semantic_column_cache=semantic_results)
     reconciliation_results = reconciler.reconcile_all(target_reconcile)
+    main_table_id = table_bundle.main_table.table_id
+    footer_reconcile_tables = [
+        tr for tr in table_regions
+        if tr.table_id != main_table_id
+    ]
+    invoice_reconciliation_result = reconcile_invoice_financials(
+        reconciliation_results.get(main_table_id, {}),
+        footer_reconcile_tables,
+    )
 
     # Step 9: Hierarchical Confidence Composition (token→cell→row→table→invoice)
     compositor = ConfidenceCompositor()
@@ -902,6 +911,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_repairs": repair_metrics_total,
             "row_validation": row_validation_results,
             "financial_reconciliation": reconciliation_results,
+            "invoice_financial_reconciliation": invoice_reconciliation_result,
             "confidence_hierarchy": confidence_hierarchy,
             "instrumentation": {
                 "tsr_contribution_percent": tsr_contribution_percent,
