@@ -478,7 +478,10 @@ class FinancialReconciler:
 
 _INVOICE_LABEL_PATTERNS = {
     "parsed_subtotal": re.compile(r"\bSUB\s*TOTAL\b|\bSUBTOTAL\b", re.IGNORECASE),
-    "discount": re.compile(r"\bDISCOUNT\b|\bLESS\s+DIS", re.IGNORECASE),
+    "discount": re.compile(
+        r"\bDISCOUNT\b|\bLESS\s+DIS|\bLESS\s+TD\b|\bTD\b|\bTRADE\s+DISCOUNT\b|\bLESS\s+TRADE\s+DISCOUNT\b",
+        re.IGNORECASE,
+    ),
     "sgst": re.compile(r"\bSGST\b", re.IGNORECASE),
     "cgst": re.compile(r"\bCGST\b", re.IGNORECASE),
     "igst": re.compile(r"\bIGST\b", re.IGNORECASE),
@@ -504,13 +507,14 @@ def _money_float(value: Optional[Decimal]) -> Optional[float]:
     return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _source_dict(table: TableRegion, row: RowRegion, cell: Optional[TableCell], value: Decimal, label: str) -> Dict[str, Any]:
+def _source_dict(table: TableRegion, row: RowRegion, cell: Optional[TableCell], value: Decimal, label: str, row_text: str = "") -> Dict[str, Any]:
     return {
         "table_id": table.table_id,
         "row_id": row.row_id,
         "col_id": cell.col_id if cell else None,
         "label": label,
         "text": cell.text if cell else "",
+        "row_text": row_text,
         "value": _money_float(value),
     }
 
@@ -576,7 +580,7 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                 )
                 candidates[label].append({
                     "value": value,
-                    "source": _source_dict(table, row, label_cell, value, label),
+                    "source": _source_dict(table, row, label_cell, value, label, row_text),
                     "ambiguity": len(row_labels),
                     "cell_ambiguity": labels_in_cell,
                     "center_y": row.geometry.center_y if row.geometry else 0,
@@ -589,6 +593,21 @@ def _select_invoice_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict
     if not candidates:
         return None
     return sorted(candidates, key=lambda c: (c["ambiguity"], c["cell_ambiguity"], c["center_y"]))[0]
+
+
+def _is_igst_summary_noise(source: Optional[Dict[str, Any]]) -> bool:
+    if not source:
+        return False
+    source_text = f"{source.get('text', '')} {source.get('row_text', '')}".upper()
+    if "IGST" not in source_text:
+        return False
+
+    gst_label_count = len(re.findall(r"\b(?:SGST|CGST|IGST|GST)\b", source_text))
+    decimal_count = len(_decimal_candidates(source_text))
+    percent_count = len(re.findall(r"\b\d+(?:[\.,]\d+)?\s*%", source_text))
+    has_summary_terms = bool(re.search(r"\b(?:TAX|GST|RATE|SUMMARY|TAXABLE)\b", source_text))
+
+    return has_summary_terms and gst_label_count >= 3 and (decimal_count >= 3 or percent_count >= 2)
 
 
 def reconcile_invoice_financials(
@@ -615,13 +634,19 @@ def reconcile_invoice_financials(
         label: selected[label]["source"] if selected[label] else None
         for label in selected
     }
+    ignored_sources: Dict[str, Dict[str, Any]] = {}
 
     derived_subtotal = _to_decimal(main_reconciliation.get("derived_subtotal"))
     parsed_subtotal = values["parsed_subtotal"]
-    discount = values["discount"] or Decimal("0")
+    discount = abs(values["discount"]) if values["discount"] is not None else Decimal("0")
     sgst = values["sgst"] or Decimal("0")
     cgst = values["cgst"] or Decimal("0")
     igst = values["igst"] or Decimal("0")
+    if sgst and cgst and igst and _is_igst_summary_noise(sources.get("igst")):
+        ignored_sources["igst"] = sources["igst"]
+        sources["igst"] = None
+        values["igst"] = None
+        igst = Decimal("0")
     roundoff = values["roundoff"] or Decimal("0")
     cr_dr_note = values["cr_dr_note"] or Decimal("0")
     parsed_grand_total = values["parsed_grand_total"]
@@ -664,6 +689,8 @@ def reconcile_invoice_financials(
         warnings.append("missing_parsed_grand_total")
     if sgst == 0 and cgst == 0 and igst == 0:
         warnings.append("missing_tax_components")
+    if "igst" in ignored_sources:
+        warnings.append("ignored_igst_summary_noise")
 
     status = ValidationStatus.PASS
     if warnings:
@@ -692,6 +719,7 @@ def reconcile_invoice_financials(
         "status": status.value,
         "warnings": warnings,
         "sources": sources,
+        "ignored_sources": ignored_sources,
     }
 
 # --- New Multi-Dimensional Scoring Logic ---
