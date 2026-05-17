@@ -642,6 +642,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         reconciliation_results.get(main_table_id, {}),
         footer_reconcile_tables,
     )
+    logger.info(
+        "[INVOICE RECONCILIATION] "
+        f"status={invoice_reconciliation_result.get('status')} "
+        f"item_subtotal={invoice_reconciliation_result.get('item_derived_subtotal')} "
+        f"parsed_subtotal={invoice_reconciliation_result.get('parsed_subtotal')} "
+        f"expected_grand_total={invoice_reconciliation_result.get('expected_grand_total')} "
+        f"parsed_grand_total={invoice_reconciliation_result.get('parsed_grand_total')} "
+        f"match={invoice_reconciliation_result.get('grand_total_match')}"
+    )
 
     # Step 9: Hierarchical Confidence Composition (token→cell→row→table→invoice)
     compositor = ConfidenceCompositor()
