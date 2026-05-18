@@ -12,6 +12,7 @@ from services.layout_pipeline.multiline_merging import merge_multiline_table_row
 from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.layout_pipeline.row_roles import classify_row_roles
 from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
+from services.layout_pipeline.column_band_rescue import build_column_band_rescue_candidate
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
 from services.table_classifier import TableClassifier, route_tables, TableType
@@ -73,6 +74,9 @@ def _summarize_column_projection_debug(tsr_metadata: Dict[str, Any]) -> Dict[str
             default=0,
         ),
     }
+
+def _dominance_score_confidence(score: float) -> float:
+    return max(0.0, min(0.99, (float(score) + 200.0) / 700.0))
 
 def _box_to_dict(geom) -> Dict[str, Any]:
     if not geom:
@@ -490,6 +494,69 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "unknown_rows_count",
         ):
             row_role_metrics[key] += table_role_metrics.get(key, 0)
+
+    column_band_rescue_candidate, column_band_rescue_metrics = build_column_band_rescue_candidate(
+        ocr_blocks=ocr_blocks,
+        table_regions=table_regions,
+        selected_main_table=table_bundle.main_table,
+        selected_main_item_rows_count=row_role_metrics["item_rows_count"],
+        max_final_column_count=int(tsr_metadata.get("max_final_column_count", 0) or 0),
+    )
+    if column_band_rescue_candidate is not None:
+        candidate_score_details = classifier_engine.score_region_for_main_table(column_band_rescue_candidate)
+        current_score_details = classifier_engine.score_region_for_main_table(table_bundle.main_table)
+        candidate_score = float(candidate_score_details.get("score", 0.0))
+        current_score = float(current_score_details.get("score", 0.0))
+        current_confidence = _dominance_score_confidence(current_score)
+        candidate_confidence = float(column_band_rescue_metrics.get("column_band_rescue_confidence", 0.0) or 0.0)
+
+        column_band_rescue_metrics["column_band_rescue_candidate_score"] = round(candidate_score, 3)
+        column_band_rescue_metrics["column_band_rescue_current_main_score"] = round(current_score, 3)
+        column_band_rescue_metrics["column_band_rescue_current_main_confidence"] = round(current_confidence, 3)
+
+        if candidate_score > current_score and candidate_confidence > current_confidence:
+            table_regions.append(column_band_rescue_candidate)
+            classifications = classifier_engine.classify_region_list(table_regions)
+            table_routing_diagnostics = getattr(classifier_engine, "last_routing_diagnostics", {})
+            table_bundle = route_tables(table_regions, classifications, diagnostics=table_routing_diagnostics)
+            if table_bundle.main_table and table_bundle.main_table.table_id == column_band_rescue_candidate.table_id:
+                table_bundle.main_table.source_engine = "column_band_rescue"
+                column_band_rescue_metrics["column_band_rescue_selected"] = True
+                logger.info(
+                    "[COLUMN BAND RESCUE] selected rows=%s subtotal_preview=%s confidence=%s",
+                    column_band_rescue_metrics.get("column_band_rescued_rows_count"),
+                    column_band_rescue_metrics.get("column_band_rescue_item_subtotal_preview"),
+                    column_band_rescue_metrics.get("column_band_rescue_confidence"),
+                )
+            else:
+                column_band_rescue_metrics["column_band_rescue_rejected_reason"] = "rescue_candidate_not_selected_by_routing"
+        else:
+            column_band_rescue_metrics["column_band_rescue_rejected_reason"] = "candidate_did_not_beat_current_main_confidence"
+
+        analysis_targets = [table_bundle.main_table]
+        row_role_metrics = {
+            "item_rows_count": 0,
+            "header_rows_count": 0,
+            "footer_rows_count": 0,
+            "tax_rows_count": 0,
+            "metadata_rows_count": 0,
+            "unknown_rows_count": 0,
+            "by_table": {},
+        }
+        for tr in analysis_targets:
+            table_role_metrics = classify_row_roles(tr)
+            row_role_metrics["by_table"][tr.table_id] = table_role_metrics
+            for key in (
+                "item_rows_count",
+                "header_rows_count",
+                "footer_rows_count",
+                "tax_rows_count",
+                "metadata_rows_count",
+                "unknown_rows_count",
+            ):
+                row_role_metrics[key] += table_role_metrics.get(key, 0)
+
+    tsr_metadata.update(column_band_rescue_metrics)
 
     column_anchor_debug = {}
     anchor_repair = {

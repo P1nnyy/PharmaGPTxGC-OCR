@@ -60,6 +60,7 @@ class RowRegion(BaseModel):
     stability: float = 1.0  # Row-level stability score (0.0-1.0). Values < 0.5 = isolated row.
     assigned_token_count: int = 0  # Number of OCR tokens assigned to cells in this row
     row_role: str = "unknown_row"
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 class ColumnRegion(BaseModel):
     col_id: str
