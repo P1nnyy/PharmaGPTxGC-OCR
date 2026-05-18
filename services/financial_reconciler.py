@@ -490,6 +490,12 @@ _INVOICE_LABEL_PATTERNS = {
     "parsed_grand_total": re.compile(r"\bGRAND\s+TOTAL\b|\bNET\s+(?:PAYABLE|AMOUNT|AMT)\b", re.IGNORECASE),
 }
 
+_FOOTER_METADATA_RE = re.compile(
+    r"\b(PHONE|PH\.?\s*NO|GSTIN|GST\s+NO|DL\s+NO|D\.?L\.?\s*NO|LICEN[CS]E|EMAIL|E-?MAIL|IFSC|BANK|ADDRESS)\b",
+    re.IGNORECASE,
+)
+_GST_RATE_VALUES = {Decimal("2.5"), Decimal("5.0"), Decimal("12.0"), Decimal("18.0"), Decimal("28.0")}
+
 
 def _decimal_candidates(text: str) -> List[Decimal]:
     values = []
@@ -519,19 +525,135 @@ def _source_dict(table: TableRegion, row: RowRegion, cell: Optional[TableCell], 
     }
 
 
-def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kind: str) -> Optional[Decimal]:
+def _values_after_label(text: str, pattern: re.Pattern) -> List[Decimal]:
+    match = pattern.search(text or "")
+    if not match:
+        return []
+    return _decimal_candidates((text or "")[match.end():])
+
+
+def _prefer_label_value(values: List[Decimal], label_kind: str) -> Decimal:
+    if label_kind in {"sgst", "cgst", "igst"} and len(values) > 1:
+        for value in values:
+            rate_value = value.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            if rate_value not in _GST_RATE_VALUES:
+                return value
+    return values[0]
+
+
+def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kind: str, pattern: re.Pattern) -> Tuple[Optional[Decimal], str]:
+    same_cell_after_label = _values_after_label(cells[label_idx].text, pattern)
     right_values = []
     for cell in cells[label_idx + 1:]:
         right_values.extend(_decimal_candidates(cell.text))
+
+    if same_cell_after_label:
+        if (
+            label_kind in {"sgst", "cgst", "igst"}
+            and right_values
+            and (
+                len(same_cell_after_label) > 2
+                or all(
+                    value.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP) in _GST_RATE_VALUES
+                    for value in same_cell_after_label
+                )
+            )
+        ):
+            return _prefer_label_value(right_values, label_kind), "right_cell_after_tax_rate"
+        return _prefer_label_value(same_cell_after_label, label_kind), "same_cell_after_label"
+
     if right_values:
-        return right_values[-1]
+        return right_values[0], "right_cell"
 
     same_cell_values = _decimal_candidates(cells[label_idx].text)
     if not same_cell_values:
-        return None
+        return None, "none"
     if label_kind in {"sgst", "cgst", "igst"} and len(same_cell_values) == 1:
-        return None
-    return same_cell_values[-1]
+        return None, "single_tax_label_value"
+    return same_cell_values[0], "same_cell_fallback"
+
+
+def _is_metadata_polluted_candidate(source: Dict[str, Any]) -> bool:
+    text = f"{source.get('text', '')} {source.get('row_text', '')}"
+    if not _FOOTER_METADATA_RE.search(text):
+        return False
+    label_text = source.get("text", "") or ""
+    return bool(_FOOTER_METADATA_RE.search(label_text) or len((source.get("row_text", "") or "").split()) > 14)
+
+
+def _is_repeated_gst_rate_candidate(source: Dict[str, Any], value: Decimal) -> bool:
+    text = f"{source.get('text', '')} {source.get('row_text', '')}"
+    if value.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP) not in _GST_RATE_VALUES:
+        return False
+    rates = [
+        val.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        for val in _decimal_candidates(text)
+    ]
+    gst_rate_hits = sum(1 for val in rates if val in _GST_RATE_VALUES)
+    return gst_rate_hits >= 3 or bool(re.search(r"(?:2[.,]?50){3,}|(?:5[.,]?00){3,}", re.sub(r"\s+", "", text)))
+
+
+def _is_implausible_footer_value(label: str, value: Decimal, source: Dict[str, Any], item_subtotal: Optional[Decimal]) -> bool:
+    if item_subtotal is None or item_subtotal <= 0:
+        return False
+    abs_value = value.copy_abs()
+    row_text = source.get("row_text", "") or ""
+    row_decimal_count = len(_decimal_candidates(row_text))
+    if (
+        label == "parsed_grand_total"
+        and source.get("extraction_strategy") != "same_cell_after_label"
+        and (row_decimal_count > 2 or abs_value < item_subtotal * Decimal("0.30"))
+    ):
+        return True
+    if label in {"sgst", "cgst", "igst"} and abs_value > (item_subtotal * Decimal("0.20")):
+        return True
+    if label == "discount" and abs_value > item_subtotal:
+        clean_discount_row = (
+            not _FOOTER_METADATA_RE.search(row_text)
+            and len(row_text.split()) <= 10
+            and _INVOICE_LABEL_PATTERNS["discount"].search(row_text)
+        )
+        return not clean_discount_row
+    return False
+
+
+def _reject_candidate(
+    candidate: Dict[str, Any],
+    reason: str,
+    ignored_sources: Dict[str, Any],
+) -> None:
+    label = candidate["source"].get("label", "unknown")
+    candidate["source"]["rejection_reason"] = reason
+    ignored_sources.setdefault(label, []).append(candidate["source"])
+
+
+def _filter_invoice_candidates(
+    candidates: Dict[str, List[Dict[str, Any]]],
+    item_subtotal: Optional[Decimal],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Any], List[str]]:
+    filtered: Dict[str, List[Dict[str, Any]]] = {key: [] for key in candidates}
+    ignored_sources: Dict[str, Any] = {}
+    warnings = set()
+
+    for label, label_candidates in candidates.items():
+        for candidate in label_candidates:
+            value = candidate["value"]
+            source = candidate["source"]
+            if _is_metadata_polluted_candidate(source):
+                _reject_candidate(candidate, "rejected_metadata_polluted_footer_candidate", ignored_sources)
+                warnings.add("rejected_metadata_polluted_footer_candidate")
+                continue
+            if label in {"sgst", "cgst", "igst"} and _is_repeated_gst_rate_candidate(source, value):
+                _reject_candidate(candidate, "rejected_repeated_gst_rate_candidate", ignored_sources)
+                warnings.add("rejected_repeated_gst_rate_candidate")
+                continue
+            if _is_implausible_footer_value(label, value, source, item_subtotal):
+                _reject_candidate(candidate, "rejected_implausible_footer_value", ignored_sources)
+                warnings.add("rejected_implausible_footer_value")
+                continue
+            filtered[label].append(candidate)
+
+    return filtered, ignored_sources, sorted(warnings)
 
 
 def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, List[Dict[str, Any]]]:
@@ -569,7 +691,7 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                 )
                 if label_idx is None:
                     continue
-                value = _candidate_value_for_label(row_cells, label_idx, label)
+                value, extraction_strategy = _candidate_value_for_label(row_cells, label_idx, label, pattern)
                 if value is None:
                     continue
 
@@ -580,7 +702,10 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                 )
                 candidates[label].append({
                     "value": value,
-                    "source": _source_dict(table, row, label_cell, value, label, row_text),
+                    "source": {
+                        **_source_dict(table, row, label_cell, value, label, row_text),
+                        "extraction_strategy": extraction_strategy,
+                    },
                     "ambiguity": len(row_labels),
                     "cell_ambiguity": labels_in_cell,
                     "center_y": row.geometry.center_y if row.geometry else 0,
@@ -620,7 +745,9 @@ def reconcile_invoice_financials(
     Main item subtotal remains owned by table-level reconciliation; this only
     reads footer/tax/summary regions that routing already isolated.
     """
+    derived_subtotal = _to_decimal(main_reconciliation.get("derived_subtotal"))
     candidates = _collect_invoice_total_candidates(footer_tables)
+    candidates, ignored_sources, source_warnings = _filter_invoice_candidates(candidates, derived_subtotal)
     selected = {
         label: _select_invoice_candidate(label_candidates)
         for label, label_candidates in candidates.items()
@@ -634,16 +761,14 @@ def reconcile_invoice_financials(
         label: selected[label]["source"] if selected[label] else None
         for label in selected
     }
-    ignored_sources: Dict[str, Dict[str, Any]] = {}
 
-    derived_subtotal = _to_decimal(main_reconciliation.get("derived_subtotal"))
     parsed_subtotal = values["parsed_subtotal"]
     discount = abs(values["discount"]) if values["discount"] is not None else Decimal("0")
     sgst = values["sgst"] or Decimal("0")
     cgst = values["cgst"] or Decimal("0")
     igst = values["igst"] or Decimal("0")
     if sgst and cgst and igst and _is_igst_summary_noise(sources.get("igst")):
-        ignored_sources["igst"] = sources["igst"]
+        ignored_sources.setdefault("igst", []).append(sources["igst"])
         sources["igst"] = None
         values["igst"] = None
         igst = Decimal("0")
@@ -682,7 +807,7 @@ def reconcile_invoice_financials(
         grand_total_discrepancy = abs(expected_grand_total - parsed_grand_total)
         grand_total_match = grand_total_discrepancy <= FinancialConfig.MATCH_TOLERANCE
 
-    warnings = []
+    warnings = list(source_warnings)
     if parsed_subtotal is None:
         warnings.append("missing_parsed_subtotal")
     if parsed_grand_total is None:
