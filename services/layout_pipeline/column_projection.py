@@ -10,9 +10,9 @@ from typing import List, Tuple, Dict, Any
 from models.layout_models import OCRBlock
 
 # Hard constraints for robust topology reconstruction
-MAX_REASONABLE_COLUMNS = 12
-MIN_COLUMN_WIDTH_PX = 40
-MIN_COLUMN_GAP_PX = 25
+MAX_REASONABLE_COLUMNS = 22
+MIN_COLUMN_WIDTH_PX = 18
+MIN_COLUMN_GAP_PX = 12
 
 # Set up logger explicitly requested
 log = structlog.get_logger()
@@ -74,6 +74,7 @@ def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float
     
     # 6. Hard constraint loop: Collapse recovery if explosion occurred
     final_columns = _enforce_hard_limits(stabilized_columns, blocks)
+    hard_limit_merge_count = max(0, len(stabilized_columns) - len(final_columns))
     
     # Convert list of (min, max) into final boundary pairs
     # Ensuring explicit mapping from boundary to boundary
@@ -109,9 +110,12 @@ def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float
     # Mandatory detailed debug logging using structlog only
     log.debug("column_projection_finalized",
               raw_peaks_count=len(raw_peaks),
+              raw_projected_column_count=len(raw_columns),
               smoothed_peaks_ranges_count=len(smoothed_peak_ranges),
               stabilized_column_count=len(stabilized_columns),
+              final_column_count=len(final_columns),
               final_stabilized_count=len(derived_boundaries),
+              hard_limit_merge_count=hard_limit_merge_count,
               columns_data=[{"min": float(c[0]), "max": float(c[1])} for c in final_columns]
     )
     
