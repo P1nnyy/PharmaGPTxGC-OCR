@@ -740,8 +740,10 @@ def _compute_v2_scoring(res: ReconciliationResultV2) -> ReconciliationResultV2:
              math_base = (res.rows_math_passed / measurable) * 100
              reason_math = f"{res.rows_math_passed}/{measurable} rows verified math."
         else:
-             math_base = 80.0 # Assume baseline good if populated but missing vars
-             reason_math = "Row items present but insufficient numeric pairs for inline math check."
+             math_base = 40.0
+             reason_math = "unverified_row_math: row items present but no measurable inline math checks."
+             if "row_math_unverified" not in res.warnings:
+                 res.warnings.append("row_math_unverified")
              
     sub_scores["row_math"] = SubScore(name="Row Math Consistency", score=math_base, weight=0.30, reasoning=reason_math)
     
@@ -794,6 +796,9 @@ def _compute_v2_scoring(res: ReconciliationResultV2) -> ReconciliationResultV2:
         res.status = ValidationStatus.WARN
     else:
         res.status = ValidationStatus.FAIL
+
+    if "row_math_unverified" in res.warnings and res.status == ValidationStatus.PASS:
+        res.status = ValidationStatus.WARN
         
     return res
 

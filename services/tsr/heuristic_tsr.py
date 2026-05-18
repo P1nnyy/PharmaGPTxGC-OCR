@@ -8,7 +8,7 @@ from models.layout_models import (
 # Import internal layout primitives
 from services.layout_pipeline.row_clustering import cluster_into_rows
 from services.layout_pipeline.row_classification import classify_rows
-from services.layout_pipeline.column_projection import project_column_boundaries
+from services.layout_pipeline.column_projection import get_last_projection_debug, project_column_boundaries
 from services.layout_pipeline.multiline_merging import merge_multiline_rows
 
 class HeuristicTSREngine(BaseTSREngine):
@@ -44,6 +44,7 @@ class HeuristicTSREngine(BaseTSREngine):
                 
         # 3. Process Each Segment as an independent TableRegion
         table_regions = []
+        column_projection_debug = {}
         global_row_counter = 0
         
         for region_idx, (classification, region_rows) in enumerate(segmented_regions):
@@ -56,6 +57,11 @@ class HeuristicTSREngine(BaseTSREngine):
                 
             # Local Column boundaries
             col_bounds = project_column_boundaries(region_blocks)
+            table_id = f"heuristic_region_{region_idx}"
+            column_projection_debug[table_id] = {
+                **get_last_projection_debug(),
+                "table_id": table_id,
+            }
             col_regions = []
             for i, (min_x, max_x) in enumerate(col_bounds):
                 col_id = f"col_{i}"
@@ -139,7 +145,7 @@ class HeuristicTSREngine(BaseTSREngine):
                 region_type = RegionType.TOTALS
                 
             region = TableRegion(
-                table_id=f"heuristic_region_{region_idx}",
+                table_id=table_id,
                 region_type=region_type,
                 geometry=reg_geom,
                 rows=table_rows,
@@ -150,4 +156,4 @@ class HeuristicTSREngine(BaseTSREngine):
             )
             table_regions.append(region)
             
-        return table_regions, {}
+        return table_regions, {"column_projection_debug": column_projection_debug}

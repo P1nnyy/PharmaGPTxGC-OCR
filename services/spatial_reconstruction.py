@@ -55,6 +55,25 @@ def _compute_tsr_confidence(table_regions) -> float:
 
     return round(avg_confidence, 3)
 
+
+def _summarize_column_projection_debug(tsr_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    column_projection_debug = tsr_metadata.get("column_projection_debug") or {}
+    projection_values = list(column_projection_debug.values())
+    return {
+        "column_projection_debug": column_projection_debug,
+        "max_final_column_count": max(
+            [int(item.get("final_column_count", 0) or 0) for item in projection_values],
+            default=0,
+        ),
+        "total_hard_limit_merge_count": sum(
+            int(item.get("hard_limit_merge_count", 0) or 0) for item in projection_values
+        ),
+        "max_raw_projected_column_count": max(
+            [int(item.get("raw_projected_column_count", 0) or 0) for item in projection_values],
+            default=0,
+        ),
+    }
+
 def _box_to_dict(geom) -> Dict[str, Any]:
     if not geom:
         return {
@@ -282,7 +301,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     if reconstruct_mode == "compare":
         logger.info("Running in compare mode. Executing multiple engines.")
         heuristic_engine = HeuristicTSREngine()
-        heuristic_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
+        heuristic_regions, heuristic_metadata = heuristic_engine.detect_tables(ocr_blocks)
         if ppstructure_enabled:
             pp_engine = PPStructure_TSREngine()
             pp_regions, tsr_metadata = pp_engine.detect_tables(ocr_blocks, image=image, debug=(debug and not benchmark_mode))
@@ -296,6 +315,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             topology_source = "heuristic_anchor"
             heuristic_fallback_used = True
             tsr_metadata = {
+                **heuristic_metadata,
                 "tsr_engine": "heuristic_anchor",
                 "tsr_disabled_reason": "disabled_by_config",
             }
@@ -339,7 +359,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 f"Falling back to heuristic topology."
             )
             heuristic_engine = HeuristicTSREngine()
-            table_regions, _ = heuristic_engine.detect_tables(ocr_blocks)
+            table_regions, heuristic_metadata = heuristic_engine.detect_tables(ocr_blocks)
+            tsr_metadata.update(heuristic_metadata)
             topology_source = "heuristic_fallback"
             heuristic_fallback_used = True
             tsr_status_metric["fallback_used"] = True
@@ -349,6 +370,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     canonical_cell_count = sum(len(tr.cells) for tr in table_regions)
     tsr_contribution_percent = 100.0 if topology_source == "ppstructure" and canonical_cell_count else 0.0
     tsr_metadata.update({
+        **_summarize_column_projection_debug(tsr_metadata),
         "ppstructure_regions_attempted": ppstructure_regions_attempted,
         "ppstructure_cells_attempted": ppstructure_cells_attempted,
         "canonical_region_count": len(table_regions),

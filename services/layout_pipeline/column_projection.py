@@ -17,18 +17,38 @@ MIN_COLUMN_GAP_PX = 12
 # Set up logger explicitly requested
 log = structlog.get_logger()
 
+LAST_PROJECTION_DEBUG: Dict[str, Any] = {}
+
+
+def get_last_projection_debug() -> Dict[str, Any]:
+    return dict(LAST_PROJECTION_DEBUG)
+
 def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float]]:
     """
     Orchestrates hard column stabilization.
     Maps token geometries into smoothed intensity histograms to detect robust boundaries.
     """
+    global LAST_PROJECTION_DEBUG
+
     if not blocks:
+        LAST_PROJECTION_DEBUG = {
+            "raw_projected_column_count": 0,
+            "stabilized_column_count": 0,
+            "final_column_count": 0,
+            "hard_limit_merge_count": 0,
+        }
         log.debug("column_projection_empty_input")
         return []
 
     # 1. Define workspace dimensions
     valid_blocks = [b for b in blocks if b.normalized_geometry]
     if not valid_blocks:
+        LAST_PROJECTION_DEBUG = {
+            "raw_projected_column_count": 0,
+            "stabilized_column_count": 0,
+            "final_column_count": 0,
+            "hard_limit_merge_count": 0,
+        }
         return []
         
     max_x = int(max(b.normalized_geometry.max_x for b in valid_blocks)) + 50
@@ -107,15 +127,22 @@ def project_column_boundaries(blocks: List[OCRBlock]) -> List[Tuple[float, float
             
         derived_boundaries.append((b_left, b_right))
 
+    LAST_PROJECTION_DEBUG = {
+        "raw_projected_column_count": len(raw_columns),
+        "stabilized_column_count": len(stabilized_columns),
+        "final_column_count": len(final_columns),
+        "hard_limit_merge_count": hard_limit_merge_count,
+    }
+
     # Mandatory detailed debug logging using structlog only
     log.debug("column_projection_finalized",
               raw_peaks_count=len(raw_peaks),
-              raw_projected_column_count=len(raw_columns),
+              raw_projected_column_count=LAST_PROJECTION_DEBUG["raw_projected_column_count"],
               smoothed_peaks_ranges_count=len(smoothed_peak_ranges),
-              stabilized_column_count=len(stabilized_columns),
-              final_column_count=len(final_columns),
+              stabilized_column_count=LAST_PROJECTION_DEBUG["stabilized_column_count"],
+              final_column_count=LAST_PROJECTION_DEBUG["final_column_count"],
               final_stabilized_count=len(derived_boundaries),
-              hard_limit_merge_count=hard_limit_merge_count,
+              hard_limit_merge_count=LAST_PROJECTION_DEBUG["hard_limit_merge_count"],
               columns_data=[{"min": float(c[0]), "max": float(c[1])} for c in final_columns]
     )
     
