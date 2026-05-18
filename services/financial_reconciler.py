@@ -495,6 +495,13 @@ _FOOTER_METADATA_RE = re.compile(
     re.IGNORECASE,
 )
 _GST_RATE_VALUES = {Decimal("2.5"), Decimal("5.0"), Decimal("12.0"), Decimal("18.0"), Decimal("28.0")}
+_FOOTER_LABEL_BOUNDARY_RE = re.compile(
+    r"\b(?:SUB\s*TOTAL|SUBTOTAL|DISCOUNT|LESS\s+DIS|LESS\s+TD|TRADE\s+DISCOUNT|"
+    r"LESS\s+TRADE\s+DISCOUNT|SGST|CGST|IGST|ROUND\s*OFF|ROUNDOFF|"
+    r"CR\s*/?\s*DR\s+NOTE|CR\s+NOTE|DR\s+NOTE|GRAND\s+TOTAL|NET\s+(?:PAYABLE|AMOUNT|AMT))\b",
+    re.IGNORECASE,
+)
+_IMMEDIATE_MONEY_RE = re.compile(r"^[\s:()@\[\]\-/%]*(?:RS\.?\s*)?(-?\d[\d,]*[\.,]\d{1,3})", re.IGNORECASE)
 
 
 def _decimal_candidates(text: str) -> List[Decimal]:
@@ -532,6 +539,25 @@ def _values_after_label(text: str, pattern: re.Pattern) -> List[Decimal]:
     return _decimal_candidates((text or "")[match.end():])
 
 
+def _local_label_segment(text: str, pattern: re.Pattern) -> str:
+    match = pattern.search(text or "")
+    if not match:
+        return ""
+    next_match = _FOOTER_LABEL_BOUNDARY_RE.search(text or "", match.end())
+    end = next_match.start() if next_match else len(text or "")
+    return (text or "")[match.start():end].strip()
+
+
+def _immediate_value_after_label(text: str, pattern: re.Pattern) -> Optional[Decimal]:
+    match = pattern.search(text or "")
+    if not match:
+        return None
+    immediate_match = _IMMEDIATE_MONEY_RE.search((text or "")[match.end():])
+    if not immediate_match:
+        return None
+    return _to_decimal(immediate_match.group(1))
+
+
 def _prefer_label_value(values: List[Decimal], label_kind: str) -> Decimal:
     if label_kind in {"sgst", "cgst", "igst"} and len(values) > 1:
         for value in values:
@@ -541,8 +567,15 @@ def _prefer_label_value(values: List[Decimal], label_kind: str) -> Decimal:
     return values[0]
 
 
-def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kind: str, pattern: re.Pattern) -> Tuple[Optional[Decimal], str]:
-    same_cell_after_label = _values_after_label(cells[label_idx].text, pattern)
+def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kind: str, pattern: re.Pattern) -> Tuple[Optional[Decimal], str, Dict[str, Any]]:
+    label_text = cells[label_idx].text or ""
+    same_cell_after_label = _values_after_label(label_text, pattern)
+    local_segment = _local_label_segment(label_text, pattern)
+    immediate_value = _immediate_value_after_label(label_text, pattern)
+    metadata = {
+        "local_segment": local_segment,
+        "local_value_adjacent": immediate_value is not None,
+    }
     right_values = []
     for cell in cells[label_idx + 1:]:
         right_values.extend(_decimal_candidates(cell.text))
@@ -559,23 +592,65 @@ def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kin
                 )
             )
         ):
-            return _prefer_label_value(right_values, label_kind), "right_cell_after_tax_rate"
-        return _prefer_label_value(same_cell_after_label, label_kind), "same_cell_after_label"
+            metadata["local_rate_before_value"] = _money_float(immediate_value)
+            return _prefer_label_value(right_values, label_kind), "right_cell_after_tax_rate", metadata
+        return _prefer_label_value(same_cell_after_label, label_kind), "same_cell_after_label", metadata
 
     if right_values:
-        return right_values[0], "right_cell"
+        metadata["local_value_adjacent"] = True
+        return right_values[0], "right_cell", metadata
 
-    same_cell_values = _decimal_candidates(cells[label_idx].text)
+    same_cell_values = _decimal_candidates(label_text)
     if not same_cell_values:
-        return None, "none"
+        return None, "none", metadata
     if label_kind in {"sgst", "cgst", "igst"} and len(same_cell_values) == 1:
-        return None, "single_tax_label_value"
-    return same_cell_values[0], "same_cell_fallback"
+        return None, "single_tax_label_value", metadata
+    return same_cell_values[0], "same_cell_fallback", metadata
+
+
+def _has_repeated_gst_rate_band(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if re.search(r"(?:2[.,]?50){3,}|(?:5[.,]?00){3,}", compact):
+        return True
+    rates = [
+        val.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        for val in _decimal_candidates(text)
+    ]
+    return sum(1 for val in rates if val in _GST_RATE_VALUES) >= 4
+
+
+def _has_clean_local_tax_segment(source: Dict[str, Any]) -> bool:
+    if source.get("label") not in {"sgst", "cgst", "igst"}:
+        return False
+    segment = source.get("local_segment", "") or ""
+    if not segment or _FOOTER_METADATA_RE.search(segment):
+        return False
+    if not source.get("local_value_adjacent"):
+        return False
+    if _has_repeated_gst_rate_band(segment):
+        return False
+    segment_values = _decimal_candidates(segment)
+    if not segment_values:
+        return False
+    selected_value = _to_decimal(source.get("value"))
+    return abs(segment_values[0] - selected_value) <= FinancialConfig.MATCH_TOLERANCE
+
+
+def _has_adjacent_tax_value(source: Dict[str, Any]) -> bool:
+    if source.get("label") not in {"sgst", "cgst", "igst"}:
+        return False
+    if _has_clean_local_tax_segment(source):
+        return True
+    if source.get("extraction_strategy") in {"right_cell", "right_cell_after_tax_rate"}:
+        return bool(source.get("local_value_adjacent"))
+    return False
 
 
 def _is_metadata_polluted_candidate(source: Dict[str, Any]) -> bool:
     text = f"{source.get('text', '')} {source.get('row_text', '')}"
     if not _FOOTER_METADATA_RE.search(text):
+        return False
+    if _has_clean_local_tax_segment(source):
         return False
     label_text = source.get("text", "") or ""
     return bool(_FOOTER_METADATA_RE.search(label_text) or len((source.get("row_text", "") or "").split()) > 14)
@@ -583,6 +658,8 @@ def _is_metadata_polluted_candidate(source: Dict[str, Any]) -> bool:
 
 def _is_repeated_gst_rate_candidate(source: Dict[str, Any], value: Decimal) -> bool:
     text = f"{source.get('text', '')} {source.get('row_text', '')}"
+    if _has_repeated_gst_rate_band(source.get("local_segment", "")) or _has_repeated_gst_rate_band(text):
+        return True
     if value.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP) not in _GST_RATE_VALUES:
         return False
     rates = [
@@ -590,7 +667,7 @@ def _is_repeated_gst_rate_candidate(source: Dict[str, Any], value: Decimal) -> b
         for val in _decimal_candidates(text)
     ]
     gst_rate_hits = sum(1 for val in rates if val in _GST_RATE_VALUES)
-    return gst_rate_hits >= 3 or bool(re.search(r"(?:2[.,]?50){3,}|(?:5[.,]?00){3,}", re.sub(r"\s+", "", text)))
+    return gst_rate_hits >= 3
 
 
 def _is_implausible_footer_value(label: str, value: Decimal, source: Dict[str, Any], item_subtotal: Optional[Decimal]) -> bool:
@@ -647,6 +724,14 @@ def _filter_invoice_candidates(
                 _reject_candidate(candidate, "rejected_repeated_gst_rate_candidate", ignored_sources)
                 warnings.add("rejected_repeated_gst_rate_candidate")
                 continue
+            if (
+                label in {"sgst", "cgst", "igst"}
+                and source.get("extraction_strategy") != "right_cell_after_tax_rate"
+                and not _has_adjacent_tax_value(source)
+            ):
+                _reject_candidate(candidate, "rejected_implausible_footer_value", ignored_sources)
+                warnings.add("rejected_implausible_footer_value")
+                continue
             if _is_implausible_footer_value(label, value, source, item_subtotal):
                 _reject_candidate(candidate, "rejected_implausible_footer_value", ignored_sources)
                 warnings.add("rejected_implausible_footer_value")
@@ -691,7 +776,7 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                 )
                 if label_idx is None:
                     continue
-                value, extraction_strategy = _candidate_value_for_label(row_cells, label_idx, label, pattern)
+                value, extraction_strategy, source_metadata = _candidate_value_for_label(row_cells, label_idx, label, pattern)
                 if value is None:
                     continue
 
@@ -705,6 +790,7 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                     "source": {
                         **_source_dict(table, row, label_cell, value, label, row_text),
                         "extraction_strategy": extraction_strategy,
+                        **source_metadata,
                     },
                     "ambiguity": len(row_labels),
                     "cell_ambiguity": labels_in_cell,
@@ -718,6 +804,38 @@ def _select_invoice_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict
     if not candidates:
         return None
     return sorted(candidates, key=lambda c: (c["ambiguity"], c["cell_ambiguity"], c["center_y"]))[0]
+
+
+def _select_symmetric_tax_pair(candidates: Dict[str, List[Dict[str, Any]]]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    pairs = []
+    for sgst_candidate in candidates.get("sgst", []):
+        for cgst_candidate in candidates.get("cgst", []):
+            delta = abs(sgst_candidate["value"] - cgst_candidate["value"])
+            if delta > FinancialConfig.MATCH_TOLERANCE:
+                continue
+            sgst_source = sgst_candidate["source"]
+            cgst_source = cgst_candidate["source"]
+            same_row = (
+                sgst_source.get("table_id") == cgst_source.get("table_id")
+                and sgst_source.get("row_id") == cgst_source.get("row_id")
+            )
+            local_count = int(_has_clean_local_tax_segment(sgst_source)) + int(_has_clean_local_tax_segment(cgst_source))
+            pairs.append((
+                (
+                    0 if same_row else 1,
+                    -local_count,
+                    delta,
+                    sgst_candidate["ambiguity"] + cgst_candidate["ambiguity"],
+                    sgst_candidate["cell_ambiguity"] + cgst_candidate["cell_ambiguity"],
+                    max(sgst_candidate["center_y"], cgst_candidate["center_y"]),
+                ),
+                sgst_candidate,
+                cgst_candidate,
+            ))
+    if not pairs:
+        return None, None
+    _, sgst_candidate, cgst_candidate = sorted(pairs, key=lambda item: item[0])[0]
+    return sgst_candidate, cgst_candidate
 
 
 def _is_igst_summary_noise(source: Optional[Dict[str, Any]]) -> bool:
@@ -752,6 +870,10 @@ def reconcile_invoice_financials(
         label: _select_invoice_candidate(label_candidates)
         for label, label_candidates in candidates.items()
     }
+    paired_sgst, paired_cgst = _select_symmetric_tax_pair(candidates)
+    if paired_sgst and paired_cgst:
+        selected["sgst"] = paired_sgst
+        selected["cgst"] = paired_cgst
 
     values = {
         label: selected[label]["value"] if selected[label] else None
