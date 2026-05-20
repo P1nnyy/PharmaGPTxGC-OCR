@@ -94,7 +94,7 @@ class ConfidenceCompositor:
         # Factor in pre-computed stability (from row_validator penalties)
         row_conf *= row.stability
         
-        return round(max(0.05, min(1.0, row_conf)), 3)
+        return round(max(0.0, min(1.0, row_conf)), 3)
     
     def compute_table_confidence(self, region: TableRegion,
                                   row_confidences: Dict[str, float]) -> float:
@@ -115,12 +115,19 @@ class ConfidenceCompositor:
         ]
         
         if not stable_confs:
-            return round(region.topology_confidence * 0.1, 3)
+            return 0.0
         
         median_rows = statistics.median(stable_confs)
         table_conf = region.topology_confidence * median_rows
         
-        return round(max(0.05, min(1.0, table_conf)), 3)
+        return round(max(0.0, min(1.0, table_conf)), 3)
+
+    def operational_gate(self, confidence: float) -> str:
+        if confidence >= 0.75:
+            return "accept"
+        if confidence >= 0.45:
+            return "repair_candidate"
+        return "quarantine"
     
     def compute_invoice_confidence(self, table_confidences: List[float],
                                     reconciliation_confidence: float = 1.0) -> float:
@@ -206,6 +213,7 @@ class ConfidenceCompositor:
             
             result["tables"][region.table_id] = {
                 "table_confidence": table_conf,
+                "operational_gate": self.operational_gate(table_conf),
                 "topology_confidence": region.topology_confidence,
                 "row_confidences": row_confs,
                 "isolated_count": sum(1 for r in region.rows if r.stability < self.ISOLATION_THRESHOLD)
@@ -220,6 +228,7 @@ class ConfidenceCompositor:
                 recon_confidence = sum(recon_vals) / len(recon_vals)
         
         result["invoice_confidence"] = self.compute_invoice_confidence(table_confidences, recon_confidence)
+        result["operational_gate"] = self.operational_gate(result["invoice_confidence"])
         if len(table_confidences) > 1:
             result["confidence_variance"]["table_confidence_variance"] = round(statistics.variance(table_confidences), 6)
         if len(all_row_confidences) > 1:

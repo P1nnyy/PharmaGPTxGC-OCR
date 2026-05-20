@@ -53,6 +53,22 @@ def _sum_row_validation(row_validation: Dict[str, Any]) -> Dict[str, int]:
         totals["math_failed_rows"] += int(value.get("financial_failures", 0) or 0)
     return totals
 
+def _row_math_status(passed: int, failed: int, item_count: int) -> str:
+    if passed > 0 and failed == 0:
+        return "passed"
+    if failed > 0:
+        return "failed"
+    if item_count > 0:
+        return "unmeasurable"
+    return "no_items"
+
+def _subscore_value(rec: Dict[str, Any], key: str) -> Optional[float]:
+    sub_scores = rec.get("sub_scores") or rec.get("subscores") or {}
+    value = sub_scores.get(key)
+    if isinstance(value, dict):
+        return _safe_float(value.get("score"), None)
+    return _safe_float(value, None)
+
 def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
     try:
         if value is None:
@@ -74,6 +90,40 @@ def _metric(metrics: Dict[str, Any], key: str, default: Any = None) -> Any:
         return metrics.get(key)
     instrumentation = metrics.get("instrumentation") or {}
     return instrumentation.get(key, default)
+
+def _invoice_footer_tax_row_counts(invoice_rec: Dict[str, Any]) -> Dict[str, int]:
+    footer_labels = {
+        "parsed_subtotal",
+        "discount",
+        "roundoff",
+        "cr_dr_note",
+        "parsed_grand_total",
+    }
+    tax_labels = {"sgst", "cgst", "igst"}
+    footer_rows = set()
+    tax_rows = set()
+
+    for source_map in (
+        invoice_rec.get("sources") or {},
+        invoice_rec.get("ignored_sources") or {},
+    ):
+        for label, source_or_sources in source_map.items():
+            sources = source_or_sources if isinstance(source_or_sources, list) else [source_or_sources]
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                row_key = (source.get("table_id"), source.get("row_id"))
+                if not row_key[0] or not row_key[1]:
+                    continue
+                if label in tax_labels:
+                    tax_rows.add(row_key)
+                elif label in footer_labels:
+                    footer_rows.add(row_key)
+
+    return {
+        "footer_rows_count": len(footer_rows),
+        "tax_rows_count": len(tax_rows),
+    }
 
 def _extract_type_map(data: Dict[str, Any]) -> Dict[str, str]:
     type_map = {}
@@ -330,6 +380,8 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
 
     row_totals = _sum_row_validation(row_validation)
     rec = _first_dict_value(reconciliation)
+    invoice_rec = metrics.get("invoice_financial_reconciliation") or {}
+    invoice_source_role_counts = _invoice_footer_tax_row_counts(invoice_rec)
     confidence = rec.get("confidence")
     score = _safe_float(rec.get("integrity_score"), None)
     if score is None:
@@ -340,12 +392,21 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
     confidence_variance = instrumentation.get("confidence_variance") or (metrics.get("confidence_hierarchy") or {}).get("confidence_variance") or {}
     topology_fields = _extract_topology_fields(filepath, data, row_validation, reconciliation)
 
+    items_source_path = "metadata.metrics.row_validation.*.total_rows" if row_validation else None
+    item_count = row_totals["items"] if items_source_path else None
     result = {
         "filename": os.path.basename(filepath),
         "integrity_score": round(score, 1),
         "passed": passed,
-        "items": row_totals["items"] or rec.get("total_rows", 0),
+        "items": item_count,
+        "items_source_path": items_source_path,
         "math_confirmed_rows": row_totals["math_confirmed_rows"],
+        "math_failed_rows": row_totals["math_failed_rows"],
+        "row_math_status": _row_math_status(row_totals["math_confirmed_rows"], row_totals["math_failed_rows"], item_count or 0),
+        "row_math_subscore": _subscore_value(rec, "row_math"),
+        "total_detection_subscore": _subscore_value(rec, "total_detection"),
+        "completeness_subscore": _subscore_value(rec, "completeness"),
+        "structural_integrity_subscore": _subscore_value(rec, "structural_integrity"),
         "merged_column_warnings": metrics.get("numeric_merge_suspicions", 0),
         "derived_subtotal": float(rec.get("derived_subtotal", 0) or 0),
         "parsed_grand_total": float(rec.get("parsed_grand_total", 0) or 0),
@@ -358,12 +419,26 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
         "confidence_variance": confidence_variance,
         "financial_status": status or ("PASS" if passed else "FAIL"),
         "financial_score": round(score, 1),
+        "invoice_financial_status": invoice_rec.get("status"),
+        "invoice_grand_total_match": invoice_rec.get("grand_total_match"),
+        "invoice_subtotal_match": invoice_rec.get("subtotal_match"),
+        "invoice_expected_grand_total": invoice_rec.get("expected_grand_total"),
+        "invoice_parsed_grand_total": invoice_rec.get("parsed_grand_total"),
+        "footer_rows_count": max(
+            _safe_int(_metric(metrics, "footer_rows_count"), 0),
+            invoice_source_role_counts["footer_rows_count"],
+        ),
+        "tax_rows_count": max(
+            _safe_int(_metric(metrics, "tax_rows_count"), 0),
+            invoice_source_role_counts["tax_rows_count"],
+        ),
     }
     result.update(topology_fields)
     return result
 
 def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     metadata = data.get("metadata", {})
+    metrics = metadata.get("metrics") or {}
     rows = metadata.get("detected_table_rows") or [
         row for row in metadata.get("reconstructed_rows", [])
         if row.get("classification") in ("table", "medicine_table")
@@ -376,8 +451,15 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
         "filename": os.path.basename(filepath),
         "integrity_score": 0.0,
         "passed": False,
-        "items": len(rows),
+        "items": None,
+        "items_source_path": None,
         "math_confirmed_rows": 0,
+        "math_failed_rows": 0,
+        "row_math_status": "schema_missing",
+        "row_math_subscore": None,
+        "total_detection_subscore": None,
+        "completeness_subscore": None,
+        "structural_integrity_subscore": None,
         "merged_column_warnings": 0,
         "derived_subtotal": 0.0,
         "parsed_grand_total": 0.0,
@@ -390,6 +472,13 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
         "confidence_variance": {},
         "financial_status": "MISSING",
         "financial_score": 0.0,
+        "invoice_financial_status": None,
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
+        "footer_rows_count": _safe_int(_metric(metrics, "footer_rows_count"), 0),
+        "tax_rows_count": _safe_int(_metric(metrics, "tax_rows_count"), 0),
     }
     result.update(topology_fields)
     return result
@@ -403,7 +492,14 @@ def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any
         "integrity_score": round(integrity_score, 1),
         "passed": integrity_score >= 70.0,
         "items": live_result.get("total_rows", 0),
+        "items_source_path": "metadata.llm_extraction.items",
         "math_confirmed_rows": live_result.get("rows_math_passed", 0),
+        "math_failed_rows": live_result.get("rows_math_failed", 0),
+        "row_math_status": _row_math_status(live_result.get("rows_math_passed", 0), live_result.get("rows_math_failed", 0), live_result.get("total_rows", 0)),
+        "row_math_subscore": _subscore_value(live_result, "row_math"),
+        "total_detection_subscore": _subscore_value(live_result, "total_detection"),
+        "completeness_subscore": _subscore_value(live_result, "completeness"),
+        "structural_integrity_subscore": _subscore_value(live_result, "structural_integrity"),
         "merged_column_warnings": 0,
         "derived_subtotal": float(live_result.get("derived_subtotal", 0)),
         "parsed_grand_total": float(live_result.get("parsed_grand_total", 0)),
@@ -416,6 +512,13 @@ def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any
         "confidence_variance": {},
         "financial_status": str(live_result.get("status", "")).upper() or "UNKNOWN",
         "financial_score": round(integrity_score, 1),
+        "invoice_financial_status": None,
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
+        "footer_rows_count": 0,
+        "tax_rows_count": 0,
         **_extract_topology_fields(filepath, {}),
     }
 
@@ -424,8 +527,15 @@ def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
         "filename": os.path.basename(filepath),
         "integrity_score": 0.0,
         "passed": False,
-        "items": 0,
+        "items": None,
+        "items_source_path": None,
         "math_confirmed_rows": 0,
+        "math_failed_rows": 0,
+        "row_math_status": "schema_missing",
+        "row_math_subscore": None,
+        "total_detection_subscore": None,
+        "completeness_subscore": None,
+        "structural_integrity_subscore": None,
         "merged_column_warnings": 0,
         "derived_subtotal": 0.0,
         "parsed_grand_total": 0.0,
@@ -438,6 +548,13 @@ def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
         "confidence_variance": {},
         "financial_status": "UNSUPPORTED",
         "financial_score": 0.0,
+        "invoice_financial_status": None,
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
+        "footer_rows_count": 0,
+        "tax_rows_count": 0,
         **_extract_topology_fields(filepath, {}),
     }
 
@@ -492,8 +609,8 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
     md = [
         "# Topology-First Benchmark Dashboard\n",
         "Reads live runtime topology metrics first, then includes financial reconciliation as a downstream signal.\n",
-        "| Filename | Topology Source | Invoice Confidence | Raw Tokens | Tables | Main Table | Main Rows | Main Cols | Avg Cells / Item Row | One-Cell Item Rows | Anchor Repair | Before Cols | After Cols | Final Semantic Breakdown | Product | Batch | Expiry | Qty | Rate | Amount | Quarantined Cells | Missing Semantic Cols | Financial Status | Financial Score |",
-        "| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        "| Filename | Schema Source | Items Source | Items | Topology Source | TSR % | Fallback | Invoice Confidence | Raw Tokens | Tables | Main Table | Main Rows | Main Cols | Footer Rows | Tax Rows | Semantic Rejects | Avg Cells / Item Row | One-Cell Item Rows | Anchor Repair | Before Cols | After Cols | Final Semantic Breakdown | Product | Batch | Expiry | Qty | Rate | Amount | Quarantined Cells | Missing Semantic Cols | Row Math | Row Math Score | Total Detection | Completeness | Structural | Table Financial | Table Score | Invoice Financial | Grand Match | Subtotal Match |",
+        "| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
 
     for f in files:
@@ -504,15 +621,24 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
             continue
 
         results.append(res)
+        item_display = res.get("items") if res.get("items_source_path") else "n/a"
         md.append(
             f"| {res['filename']} "
+            f"| `{res.get('schema_source_path', 'missing')}` "
+            f"| `{res.get('items_source_path') or 'missing'}` "
+            f"| {item_display} "
             f"| {res.get('topology_source', 'unknown')} "
+            f"| {_safe_float(res.get('tsr_contribution_percent'), 0.0) or 0.0:.1f} "
+            f"| {bool(res.get('heuristic_fallback_used'))} "
             f"| {res.get('invoice_confidence', 0):.3f} "
             f"| {res.get('raw_token_count', 0)} "
             f"| {res.get('table_count', 0)} "
             f"| `{res.get('main_table_id', 'unknown')}` "
             f"| {res.get('main_table_row_count', 0)} "
             f"| {res.get('main_table_column_count', 0)} "
+            f"| {res.get('footer_rows_count', 0)} "
+            f"| {res.get('tax_rows_count', 0)} "
+            f"| {res.get('semantic_rejection_count', 0)} "
             f"| {res.get('avg_cells_per_item_row', 0):.2f} "
             f"| {res.get('one_cell_item_rows_count', 0)} "
             f"| {bool(res.get('anchor_repair_enabled'))} "
@@ -527,8 +653,16 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
             f"| {bool(res.get('has_amount_column'))} "
             f"| {res.get('quarantined_cell_count', 0)} "
             f"| {res.get('missing_semantic_columns_count', 0)} "
+            f"| {res.get('row_math_status', 'unknown')} "
+            f"| {res.get('row_math_subscore') if res.get('row_math_subscore') is not None else 'n/a'} "
+            f"| {res.get('total_detection_subscore') if res.get('total_detection_subscore') is not None else 'n/a'} "
+            f"| {res.get('completeness_subscore') if res.get('completeness_subscore') is not None else 'n/a'} "
+            f"| {res.get('structural_integrity_subscore') if res.get('structural_integrity_subscore') is not None else 'n/a'} "
             f"| {res.get('financial_status', 'UNKNOWN')} "
-            f"| {res.get('financial_score', res.get('integrity_score', 0)):.1f} |"
+            f"| {res.get('financial_score', res.get('integrity_score', 0)):.1f} "
+            f"| {res.get('invoice_financial_status') or 'n/a'} "
+            f"| {res.get('invoice_grand_total_match')} "
+            f"| {res.get('invoice_subtotal_match')} |"
         )
 
         schema_sources[res["schema_source_path"]] = schema_sources.get(res["schema_source_path"], 0) + 1
@@ -573,7 +707,14 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
         )
     )
     heuristic_anchor_count = sum(1 for res in invoice_results if res.get("topology_source") == "heuristic_anchor")
-    financial_pass_count = sum(1 for res in invoice_results if str(res.get("financial_status")).upper() == "PASS")
+    invoice_financial_pass_count = sum(
+        1 for res in invoice_results
+        if str(res.get("invoice_financial_status") or res.get("financial_status")).upper() == "PASS"
+    )
+    table_financial_pass_count = sum(
+        1 for res in invoice_results
+        if str(res.get("financial_status")).upper() == "PASS"
+    )
     avg_financial_score = (
         sum(_safe_float(res.get("financial_score"), 0.0) or 0.0 for res in invoice_results) / processed
         if processed else 0.0
@@ -588,7 +729,8 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
     md.append(f"- **ppstructure_success_count:** {ppstructure_success_count}")
     md.append(f"- **heuristic_fallback_count:** {heuristic_fallback_count}")
     md.append(f"- **heuristic_anchor_count:** {heuristic_anchor_count}")
-    md.append(f"- **Financial PASS Count:** {financial_pass_count}")
+    md.append(f"- **Financial PASS Count:** {invoice_financial_pass_count}")
+    md.append(f"- **Table Financial PASS Count:** {table_financial_pass_count}")
     md.append(f"- **Average Financial Score:** {avg_financial_score:.1f} / 100")
     md.append(f"- **Validator Schema Sources:** `{schema_sources}`")
     if confidence_variances:

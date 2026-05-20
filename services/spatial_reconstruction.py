@@ -13,6 +13,8 @@ from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.layout_pipeline.row_roles import classify_row_roles
 from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
 from services.layout_pipeline.column_band_rescue import build_column_band_rescue_candidate
+from services.layout_pipeline.document_graph import build_document_graph
+from services.layout_pipeline.vendor_priors import build_vendor_template_prior
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
 from services.table_classifier import TableClassifier, route_tables, TableType
@@ -75,6 +77,40 @@ def _summarize_column_projection_debug(tsr_metadata: Dict[str, Any]) -> Dict[str
         ),
     }
 
+def _invoice_footer_tax_source_counts(invoice_reconciliation: Dict[str, Any]) -> Dict[str, int]:
+    footer_labels = {
+        "parsed_subtotal",
+        "discount",
+        "roundoff",
+        "cr_dr_note",
+        "parsed_grand_total",
+    }
+    tax_labels = {"sgst", "cgst", "igst"}
+    footer_rows = set()
+    tax_rows = set()
+
+    for source_map in (
+        invoice_reconciliation.get("sources") or {},
+        invoice_reconciliation.get("ignored_sources") or {},
+    ):
+        for label, source_or_sources in source_map.items():
+            sources = source_or_sources if isinstance(source_or_sources, list) else [source_or_sources]
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                row_key = (source.get("table_id"), source.get("row_id"))
+                if not row_key[0] or not row_key[1]:
+                    continue
+                if label in tax_labels:
+                    tax_rows.add(row_key)
+                elif label in footer_labels:
+                    footer_rows.add(row_key)
+
+    return {
+        "footer_rows_count": len(footer_rows),
+        "tax_rows_count": len(tax_rows),
+    }
+
 def _dominance_score_confidence(score: float) -> float:
     return max(0.0, min(0.99, (float(score) + 200.0) / 700.0))
 
@@ -107,7 +143,7 @@ def _token_flags(text: str) -> Dict[str, bool]:
         "is_hsn_like": bool(re.fullmatch(r"\d{6,8}", compact)),
     }
 
-def _build_topology_debug(ocr_blocks, table_regions, main_tables=None, semantic_results=None) -> Dict[str, Any]:
+def _build_topology_debug(ocr_blocks, table_regions, main_tables=None, semantic_results=None, document_graph=None) -> Dict[str, Any]:
     """
     Non-mutating topology inspection artifact for debugging token→row→cell→column failures.
     """
@@ -221,6 +257,7 @@ def _build_topology_debug(ocr_blocks, table_regions, main_tables=None, semantic_
 
     return {
         "raw_token_graph": raw_token_graph,
+        "document_graph": document_graph or {},
         "main_tables": debug_tables,
     }
 
@@ -283,6 +320,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     # Step 2: Skew Normalization
     ocr_blocks = apply_skew_normalization(ocr_blocks)
+    document_graph = build_document_graph(ocr_blocks)
 
     # Step 3: TSR Table Region Detection with Confidence-Gated Fallback
     table_regions = []
@@ -300,6 +338,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "ppstructure_enabled": ppstructure_enabled,
         "ppstructure_skipped_reason": None,
         "fallback_used": False,
+        "ppstructure_success": False,
+        "ppstructure_zero_output": False,
+        "tsr_contribution_percent": 0.0,
     }
 
     if reconstruct_mode == "compare":
@@ -356,6 +397,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
         if ppstructure_regions_attempted == 0 and ppstructure_cells_attempted == 0:
             logger.warning("[PPSTRUCTURE] tables=0 cells=0; falling back to heuristic topology.")
+            tsr_status_metric["ppstructure_zero_output"] = True
 
         if tsr_confidence < ppstructure_threshold:
             logger.warning(
@@ -373,6 +415,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     canonical_cell_count = sum(len(tr.cells) for tr in table_regions)
     tsr_contribution_percent = 100.0 if topology_source == "ppstructure" and canonical_cell_count else 0.0
+    tsr_status_metric.update({
+        "topology_source": topology_source,
+        "ppstructure_regions_attempted": ppstructure_regions_attempted,
+        "ppstructure_cells_attempted": ppstructure_cells_attempted,
+        "ppstructure_success": bool(topology_source == "ppstructure" and ppstructure_regions_attempted > 0 and ppstructure_cells_attempted > 0),
+        "tsr_contribution_percent": tsr_contribution_percent,
+    })
     tsr_metadata.update({
         **_summarize_column_projection_debug(tsr_metadata),
         "ppstructure_regions_attempted": ppstructure_regions_attempted,
@@ -390,7 +439,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # --- FAST-FAIL: No topology at all (both engines failed) ---
     if not table_regions:
         logger.warning("[FAST FAIL] Zero table regions from selected topology path.")
-        topology_debug = _build_topology_debug(ocr_blocks, [], [], {})
+        topology_debug = _build_topology_debug(ocr_blocks, [], [], {}, document_graph=document_graph)
         return {
             "reconstructed_rows": [],
             "detected_table_rows": [],
@@ -414,6 +463,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                         "table_confidence_variance": 0.0,
                         "row_confidence_variance": 0.0
                     },
+                    "document_graph_metrics": document_graph.get("metrics", {}),
                 },
                 "fast_fail": True,
                 **tsr_metadata,
@@ -731,6 +781,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         reconciliation_results.get(main_table_id, {}),
         footer_reconcile_tables,
     )
+    document_role_metrics = {
+        "footer_rows_count": row_role_metrics["footer_rows_count"],
+        "tax_rows_count": row_role_metrics["tax_rows_count"],
+        "by_table": dict(row_role_metrics.get("by_table", {})),
+    }
+    for tr in footer_reconcile_tables:
+        table_role_metrics = classify_row_roles(tr)
+        document_role_metrics["by_table"][tr.table_id] = table_role_metrics
+        document_role_metrics["footer_rows_count"] += table_role_metrics.get("footer_rows_count", 0)
+        document_role_metrics["tax_rows_count"] += table_role_metrics.get("tax_rows_count", 0)
+
+    invoice_source_role_counts = _invoice_footer_tax_source_counts(invoice_reconciliation_result)
+    document_footer_rows_count = max(
+        document_role_metrics["footer_rows_count"],
+        invoice_source_role_counts["footer_rows_count"],
+    )
+    document_tax_rows_count = max(
+        document_role_metrics["tax_rows_count"],
+        invoice_source_role_counts["tax_rows_count"],
+    )
+    vendor_template_prior = build_vendor_template_prior(ocr_blocks, table_bundle.main_table, table_regions)
     logger.info(
         "[INVOICE RECONCILIATION] "
         f"status={invoice_reconciliation_result.get('status')} "
@@ -762,6 +833,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         table_regions,
         analysis_targets,
         semantic_results,
+        document_graph=document_graph,
     )
     semantic_debug = {
         "semantic_column_scores_by_col": semantic_column_scores_by_col,
@@ -813,7 +885,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "tax_rows_count": row_role_metrics["tax_rows_count"],
                     "row_role_metrics": row_role_metrics,
                     "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
+                    "document_graph_metrics": document_graph.get("metrics", {}),
                 },
+                "document_graph_metrics": document_graph.get("metrics", {}),
+                "vendor_template_prior": vendor_template_prior,
                 "fast_fail": True,
                 **tsr_metadata,
                 "tsr_status": tsr_status_metric
@@ -1003,14 +1078,23 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "quantity_column_candidates": quantity_column_candidates,
             "rejected_quantity_candidates": rejected_quantity_candidates,
             "item_rows_count": row_role_metrics["item_rows_count"],
-            "footer_rows_count": row_role_metrics["footer_rows_count"],
-            "tax_rows_count": row_role_metrics["tax_rows_count"],
-            "row_role_metrics": row_role_metrics,
+            "footer_rows_count": document_footer_rows_count,
+            "tax_rows_count": document_tax_rows_count,
+            "row_role_metrics": {
+                **row_role_metrics,
+                "document_footer_rows_count": document_footer_rows_count,
+                "document_tax_rows_count": document_tax_rows_count,
+                "document_by_table": document_role_metrics["by_table"],
+                "invoice_source_footer_rows_count": invoice_source_role_counts["footer_rows_count"],
+                "invoice_source_tax_rows_count": invoice_source_role_counts["tax_rows_count"],
+            },
             "topology_repairs": repair_metrics_total,
             "row_validation": row_validation_results,
             "financial_reconciliation": reconciliation_results,
             "invoice_financial_reconciliation": invoice_reconciliation_result,
             "confidence_hierarchy": confidence_hierarchy,
+            "document_graph_metrics": document_graph.get("metrics", {}),
+            "vendor_template_prior": vendor_template_prior,
             "instrumentation": {
                 "tsr_contribution_percent": tsr_contribution_percent,
                 "heuristic_fallback_used": heuristic_fallback_used,
@@ -1021,10 +1105,18 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "quarantined_cell_count": quarantined_cell_total,
                 "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
                 "item_rows_count": row_role_metrics["item_rows_count"],
-                "footer_rows_count": row_role_metrics["footer_rows_count"],
-                "tax_rows_count": row_role_metrics["tax_rows_count"],
-                "row_role_metrics": row_role_metrics,
+                "footer_rows_count": document_footer_rows_count,
+                "tax_rows_count": document_tax_rows_count,
+                "row_role_metrics": {
+                    **row_role_metrics,
+                    "document_footer_rows_count": document_footer_rows_count,
+                    "document_tax_rows_count": document_tax_rows_count,
+                    "document_by_table": document_role_metrics["by_table"],
+                    "invoice_source_footer_rows_count": invoice_source_role_counts["footer_rows_count"],
+                    "invoice_source_tax_rows_count": invoice_source_role_counts["tax_rows_count"],
+                },
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
+                "document_graph_metrics": document_graph.get("metrics", {}),
             },
             "fast_fail": False,
             **tsr_metadata,
