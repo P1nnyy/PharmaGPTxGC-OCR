@@ -289,6 +289,37 @@ def _useful_anchor_columns(anchor_debug: Dict[str, Any]) -> List[Dict[str, Any]]
     return sorted(useful, key=lambda a: a["center_x"])
 
 
+def _strong_semantic_anchor_repair_reason(
+    before_column_count: int,
+    candidate_anchor_count: int,
+    final_anchor_count: int,
+    anchors: List[Dict[str, Any]],
+    missing_semantic_trigger: bool,
+) -> Optional[str]:
+    if not missing_semantic_trigger or before_column_count < 2 or before_column_count > 4:
+        return None
+    if final_anchor_count < max(4, before_column_count + 3):
+        return None
+    if candidate_anchor_count < max(12, before_column_count * 4):
+        return None
+    if len(anchors) < before_column_count + 2:
+        return None
+
+    numeric_anchors = [
+        anchor for anchor in anchors
+        if sum((anchor.get("feature_votes") or {}).get(k, 0) for k in ("money", "qty")) > 0
+    ]
+    if len(numeric_anchors) < 2:
+        return None
+
+    centers = sorted(float(anchor["center_x"]) for anchor in numeric_anchors)
+    distinct_gaps = [right - left for left, right in zip(centers, centers[1:])]
+    if not distinct_gaps or max(distinct_gaps) < 18.0:
+        return None
+
+    return "columns_2_to_4_with_strong_anchors_missing_semantics"
+
+
 def _assign_feature_to_column(
     feature: Dict[str, Any],
     anchors: List[Dict[str, Any]],
@@ -329,6 +360,7 @@ def repair_undersegmented_table_with_anchors(
     candidate_anchor_count = anchor_debug.get("candidate_anchor_count", 0)
     final_anchor_count = anchor_debug.get("final_anchor_count", 0)
     missing_semantic_trigger = _semantic_repair_trigger(semantic_context, missing_semantic_columns)
+    anchors = _useful_anchor_columns(anchor_debug)
     if (
         not reason
         and before_column_count <= 2
@@ -336,6 +368,14 @@ def repair_undersegmented_table_with_anchors(
         and missing_semantic_trigger
     ):
         reason = "low_column_count_with_strong_anchors_and_missing_semantics"
+    if not reason:
+        reason = _strong_semantic_anchor_repair_reason(
+            before_column_count,
+            candidate_anchor_count,
+            final_anchor_count,
+            anchors,
+            missing_semantic_trigger,
+        )
 
     base_metrics = {
         "enabled": False,
@@ -357,7 +397,6 @@ def repair_undersegmented_table_with_anchors(
         return base_metrics
 
     base_metrics["repair_attempted"] = True
-    anchors = _useful_anchor_columns(anchor_debug)
     if len(anchors) + 1 < 3:
         return {
             **base_metrics,

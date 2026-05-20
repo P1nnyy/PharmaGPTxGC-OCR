@@ -119,6 +119,60 @@ def _format_breakdown(breakdown: Dict[str, int]) -> str:
         return "n/a"
     return ", ".join(f"{key}:{breakdown[key]}" for key in sorted(breakdown))
 
+def _format_bool(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return "true" if bool(value) else "false"
+
+def _derive_row_math_status(passed: int, failed: int, total_rows: int) -> str:
+    measurable = passed + failed
+    if total_rows <= 0:
+        return "none"
+    if measurable == 0:
+        return "unmeasurable"
+    if failed > 0:
+        return "failed"
+    return "passed"
+
+def _derive_table_subscores(rec: Dict[str, Any], table_row_validation: Dict[str, Any]) -> Dict[str, float]:
+    total_rows = _safe_int(
+        rec.get("total_rows"),
+        _safe_int(table_row_validation.get("total_rows"), 0),
+    )
+    rows_math_passed = _safe_int(
+        rec.get("rows_math_passed"),
+        _safe_int(table_row_validation.get("financial_passes"), 0),
+    )
+    rows_math_failed = _safe_int(
+        rec.get("rows_math_failed"),
+        _safe_int(table_row_validation.get("financial_failures"), 0),
+    )
+    measurable = rows_math_passed + rows_math_failed
+    if total_rows == 0:
+        row_math = 50.0
+    elif measurable > 0:
+        row_math = (rows_math_passed / measurable) * 100.0
+    else:
+        row_math = 40.0
+
+    if rec.get("grand_total_match"):
+        total_detection = 100.0
+    elif rec.get("parsed_grand_total") is not None:
+        total_detection = 40.0
+    elif rec.get("parsed_subtotal") is not None:
+        total_detection = 60.0
+    else:
+        total_detection = 10.0
+
+    structural_integrity = 90.0
+    completeness = 100.0 if total_rows > 0 else 0.0
+    return {
+        "row_math_subscore": round(row_math, 1),
+        "total_detection_subscore": round(total_detection, 1),
+        "structural_integrity_subscore": structural_integrity,
+        "completeness_subscore": completeness,
+    }
+
 def _select_main_table_id(
     metadata: Dict[str, Any],
     metrics: Dict[str, Any],
@@ -339,6 +393,24 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
     instrumentation = metrics.get("instrumentation") or {}
     confidence_variance = instrumentation.get("confidence_variance") or (metrics.get("confidence_hierarchy") or {}).get("confidence_variance") or {}
     topology_fields = _extract_topology_fields(filepath, data, row_validation, reconciliation)
+    main_table_id = topology_fields.get("main_table_id")
+    table_row_validation = _row_validation_for_table(row_validation, main_table_id)
+    rows_math_passed = _safe_int(
+        rec.get("rows_math_passed"),
+        _safe_int(table_row_validation.get("financial_passes"), 0),
+    )
+    rows_math_failed = _safe_int(
+        rec.get("rows_math_failed"),
+        _safe_int(table_row_validation.get("financial_failures"), 0),
+    )
+    table_total_rows = _safe_int(
+        rec.get("total_rows"),
+        _safe_int(table_row_validation.get("total_rows"), row_totals["items"]),
+    )
+    rows_math_unmeasurable = max(0, table_total_rows - rows_math_passed - rows_math_failed)
+    table_subscores = _derive_table_subscores(rec, table_row_validation)
+    row_math_status = _derive_row_math_status(rows_math_passed, rows_math_failed, table_total_rows)
+    invoice_rec = metrics.get("invoice_financial_reconciliation") or {}
 
     result = {
         "filename": os.path.basename(filepath),
@@ -358,6 +430,18 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
         "confidence_variance": confidence_variance,
         "financial_status": status or ("PASS" if passed else "FAIL"),
         "financial_score": round(score, 1),
+        "table_financial_status": status or ("PASS" if passed else "FAIL"),
+        "table_financial_score": round(score, 1),
+        "table_row_math_status": row_math_status,
+        "table_rows_math_passed": rows_math_passed,
+        "table_rows_math_failed": rows_math_failed,
+        "table_rows_math_unmeasurable": rows_math_unmeasurable,
+        **table_subscores,
+        "invoice_financial_status": str(invoice_rec.get("status", "MISSING")).upper(),
+        "invoice_grand_total_match": invoice_rec.get("grand_total_match"),
+        "invoice_subtotal_match": invoice_rec.get("subtotal_match"),
+        "invoice_expected_grand_total": _safe_float(invoice_rec.get("expected_grand_total"), None),
+        "invoice_parsed_grand_total": _safe_float(invoice_rec.get("parsed_grand_total"), None),
     }
     result.update(topology_fields)
     return result
@@ -390,6 +474,21 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
         "confidence_variance": {},
         "financial_status": "MISSING",
         "financial_score": 0.0,
+        "table_financial_status": "MISSING",
+        "table_financial_score": 0.0,
+        "table_row_math_status": "none",
+        "table_rows_math_passed": 0,
+        "table_rows_math_failed": 0,
+        "table_rows_math_unmeasurable": 0,
+        "row_math_subscore": 0.0,
+        "total_detection_subscore": 0.0,
+        "structural_integrity_subscore": 0.0,
+        "completeness_subscore": 0.0,
+        "invoice_financial_status": "MISSING",
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
     }
     result.update(topology_fields)
     return result
@@ -416,6 +515,27 @@ def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any
         "confidence_variance": {},
         "financial_status": str(live_result.get("status", "")).upper() or "UNKNOWN",
         "financial_score": round(integrity_score, 1),
+        "table_financial_status": str(live_result.get("status", "")).upper() or "UNKNOWN",
+        "table_financial_score": round(integrity_score, 1),
+        "table_row_math_status": _derive_row_math_status(
+            _safe_int(live_result.get("rows_math_passed"), 0),
+            _safe_int(live_result.get("rows_math_failed"), 0),
+            _safe_int(live_result.get("total_rows"), 0),
+        ),
+        "table_rows_math_passed": _safe_int(live_result.get("rows_math_passed"), 0),
+        "table_rows_math_failed": _safe_int(live_result.get("rows_math_failed"), 0),
+        "table_rows_math_unmeasurable": max(
+            0,
+            _safe_int(live_result.get("total_rows"), 0)
+            - _safe_int(live_result.get("rows_math_passed"), 0)
+            - _safe_int(live_result.get("rows_math_failed"), 0),
+        ),
+        **_derive_table_subscores(live_result, {}),
+        "invoice_financial_status": "MISSING",
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
         **_extract_topology_fields(filepath, {}),
     }
 
@@ -438,6 +558,21 @@ def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
         "confidence_variance": {},
         "financial_status": "UNSUPPORTED",
         "financial_score": 0.0,
+        "table_financial_status": "UNSUPPORTED",
+        "table_financial_score": 0.0,
+        "table_row_math_status": "none",
+        "table_rows_math_passed": 0,
+        "table_rows_math_failed": 0,
+        "table_rows_math_unmeasurable": 0,
+        "row_math_subscore": 0.0,
+        "total_detection_subscore": 0.0,
+        "structural_integrity_subscore": 0.0,
+        "completeness_subscore": 0.0,
+        "invoice_financial_status": "MISSING",
+        "invoice_grand_total_match": None,
+        "invoice_subtotal_match": None,
+        "invoice_expected_grand_total": None,
+        "invoice_parsed_grand_total": None,
         **_extract_topology_fields(filepath, {}),
     }
 
@@ -492,8 +627,8 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
     md = [
         "# Topology-First Benchmark Dashboard\n",
         "Reads live runtime topology metrics first, then includes financial reconciliation as a downstream signal.\n",
-        "| Filename | Topology Source | Invoice Confidence | Raw Tokens | Tables | Main Table | Main Rows | Main Cols | Avg Cells / Item Row | One-Cell Item Rows | Anchor Repair | Before Cols | After Cols | Final Semantic Breakdown | Product | Batch | Expiry | Qty | Rate | Amount | Quarantined Cells | Missing Semantic Cols | Financial Status | Financial Score |",
-        "| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        "| Filename | Topology Source | Invoice Confidence | Raw Tokens | Tables | Main Table | Main Rows | Main Cols | Avg Cells / Item Row | One-Cell Item Rows | Anchor Repair | Before Cols | After Cols | Final Semantic Breakdown | Product | Batch | Expiry | Qty | Rate | Amount | Quarantined Cells | Missing Semantic Cols | Table Financial Status | Table Financial Score | Row Math Status | Row Math P/F/U | Row Math Score | Total Detection Score | Structural Score | Completeness Score | Invoice Recon Status | Invoice Grand Match | Invoice Subtotal Match | Invoice Expected GT | Invoice Parsed GT |",
+        "| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
 
     for f in files:
@@ -527,8 +662,19 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
             f"| {bool(res.get('has_amount_column'))} "
             f"| {res.get('quarantined_cell_count', 0)} "
             f"| {res.get('missing_semantic_columns_count', 0)} "
-            f"| {res.get('financial_status', 'UNKNOWN')} "
-            f"| {res.get('financial_score', res.get('integrity_score', 0)):.1f} |"
+            f"| {res.get('table_financial_status', res.get('financial_status', 'UNKNOWN'))} "
+            f"| {res.get('table_financial_score', res.get('financial_score', res.get('integrity_score', 0))):.1f} "
+            f"| {res.get('table_row_math_status', 'unknown')} "
+            f"| {res.get('table_rows_math_passed', 0)}/{res.get('table_rows_math_failed', 0)}/{res.get('table_rows_math_unmeasurable', 0)} "
+            f"| {res.get('row_math_subscore', 0):.1f} "
+            f"| {res.get('total_detection_subscore', 0):.1f} "
+            f"| {res.get('structural_integrity_subscore', 0):.1f} "
+            f"| {res.get('completeness_subscore', 0):.1f} "
+            f"| {res.get('invoice_financial_status', 'MISSING')} "
+            f"| {_format_bool(res.get('invoice_grand_total_match'))} "
+            f"| {_format_bool(res.get('invoice_subtotal_match'))} "
+            f"| {res.get('invoice_expected_grand_total') if res.get('invoice_expected_grand_total') is not None else 'n/a'} "
+            f"| {res.get('invoice_parsed_grand_total') if res.get('invoice_parsed_grand_total') is not None else 'n/a'} |"
         )
 
         schema_sources[res["schema_source_path"]] = schema_sources.get(res["schema_source_path"], 0) + 1
@@ -573,9 +719,12 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
         )
     )
     heuristic_anchor_count = sum(1 for res in invoice_results if res.get("topology_source") == "heuristic_anchor")
-    financial_pass_count = sum(1 for res in invoice_results if str(res.get("financial_status")).upper() == "PASS")
+    table_financial_pass_count = sum(1 for res in invoice_results if str(res.get("table_financial_status")).upper() == "PASS")
+    invoice_financial_pass_count = sum(1 for res in invoice_results if str(res.get("invoice_financial_status")).upper() == "PASS")
+    invoice_grand_total_match_count = sum(1 for res in invoice_results if res.get("invoice_grand_total_match") is True)
+    unmeasurable_row_math_count = sum(1 for res in invoice_results if res.get("table_row_math_status") == "unmeasurable")
     avg_financial_score = (
-        sum(_safe_float(res.get("financial_score"), 0.0) or 0.0 for res in invoice_results) / processed
+        sum(_safe_float(res.get("table_financial_score"), 0.0) or 0.0 for res in invoice_results) / processed
         if processed else 0.0
     )
 
@@ -588,8 +737,11 @@ def generate_validation_dashboard(results_dir: str, report_out: str):
     md.append(f"- **ppstructure_success_count:** {ppstructure_success_count}")
     md.append(f"- **heuristic_fallback_count:** {heuristic_fallback_count}")
     md.append(f"- **heuristic_anchor_count:** {heuristic_anchor_count}")
-    md.append(f"- **Financial PASS Count:** {financial_pass_count}")
-    md.append(f"- **Average Financial Score:** {avg_financial_score:.1f} / 100")
+    md.append(f"- **Table Financial PASS Count:** {table_financial_pass_count}")
+    md.append(f"- **Invoice Financial PASS Count:** {invoice_financial_pass_count}")
+    md.append(f"- **Invoice Grand Total Match Count:** {invoice_grand_total_match_count}")
+    md.append(f"- **Unmeasurable Row Math Count:** {unmeasurable_row_math_count}")
+    md.append(f"- **Average Table Financial Score:** {avg_financial_score:.1f} / 100")
     md.append(f"- **Validator Schema Sources:** `{schema_sources}`")
     if confidence_variances:
         avg_var = sum(confidence_variances) / len(confidence_variances)
