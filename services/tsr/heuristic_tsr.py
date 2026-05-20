@@ -137,7 +137,7 @@ class HeuristicTSREngine(BaseTSREngine):
                 )
                 
             region_type = RegionType.UNKNOWN
-            if classification == "Header":
+            if classification == "Header" or classification == "Column Header":
                 region_type = RegionType.HEADER
             elif classification == "Medicine Table Row":
                 region_type = RegionType.MEDICINE_TABLE

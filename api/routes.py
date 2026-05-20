@@ -23,7 +23,7 @@ def health_check():
     return response
 
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE, extract: bool = False, benchmark_mode: bool = False):
+async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE, extract: bool = False, benchmark_mode: bool = False, bypass_cache: bool = False):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
     if file.size is not None and file.size > settings.MAX_UPLOAD_SIZE_BYTES:
@@ -37,7 +37,8 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         
         logger.info(f"Received file: {file.filename}, computed invoice_id: {invoice_id}")
         
-        cached_result = cache_service.get_cached_result(invoice_id)
+        # Skip checking the cache if bypass_cache is explicitly requested (forces fresh OCR invocation)
+        cached_result = None if bypass_cache else cache_service.get_cached_result(invoice_id)
         if cached_result:
             logger.info("OCR cache hit: reusing OCR blocks only")
             blocks = cached_result.get("blocks", [])

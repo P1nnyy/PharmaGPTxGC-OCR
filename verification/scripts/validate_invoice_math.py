@@ -182,7 +182,7 @@ def _select_main_table_id(
     for source in (row_validation, reconciliation):
         if isinstance(source, dict):
             for key, value in source.items():
-                if isinstance(value, dict) and not str(key).startswith("_"):
+                if isinstance(value, dict) and not str(key).startswith("_") and str(key) != "invoice_level":
                     return str(key)
 
     semantic_debug = metrics.get("semantic_debug") or {}
@@ -383,18 +383,86 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
         return None
 
     row_totals = _sum_row_validation(row_validation)
-    rec = _first_dict_value(reconciliation)
+
+    # Prioritize invoice_level reconciliation
+    rec = reconciliation.get("invoice_level")
+    if rec and isinstance(rec, dict):
+        schema_source_path = "metadata.metrics.financial_reconciliation.invoice_level"
+    else:
+        # Fall back to table-level reconciliation
+        table_id = None
+        for k, v in reconciliation.items():
+            if isinstance(v, dict) and not str(k).startswith("_") and str(k) != "invoice_level":
+                table_id = k
+                rec = v
+                break
+        if rec and isinstance(rec, dict):
+            schema_source_path = f"metadata.metrics.financial_reconciliation.{table_id}"
+        else:
+            rec = {}
+            schema_source_path = "metadata.metrics.financial_reconciliation"
+
     confidence = rec.get("confidence")
     score = _safe_float(rec.get("integrity_score"), None)
     if score is None:
         score = float(confidence) * 100.0 if confidence is not None else float(metadata.get("invoice_confidence") or 0) * 100.0
     status = str(rec.get("status", "")).upper()
     passed = status == "PASS" if status else score >= 70.0
+
     instrumentation = metrics.get("instrumentation") or {}
+
+    # Telemetry Extraction
+    tsr_contribution_percent = metrics.get("tsr_contribution_percent")
+    if tsr_contribution_percent is None:
+        tsr_contribution_percent = instrumentation.get("tsr_contribution_percent")
+
+    heuristic_fallback_used = metrics.get("heuristic_fallback_used")
+    if heuristic_fallback_used is None:
+        heuristic_fallback_used = instrumentation.get("heuristic_fallback_used")
+
+    heuristic_fallback_count = metrics.get("heuristic_fallback_count")
+    if heuristic_fallback_count is None:
+        heuristic_fallback_count = instrumentation.get("heuristic_fallback_count")
+    if heuristic_fallback_count is None and heuristic_fallback_used is not None:
+        heuristic_fallback_count = 1 if bool(heuristic_fallback_used) else 0
+
+    semantic_rejection_count = metrics.get("semantic_rejection_count")
+    if semantic_rejection_count is None:
+        semantic_rejection_count = instrumentation.get("semantic_rejection_count", 0)
+
     confidence_variance = instrumentation.get("confidence_variance") or (metrics.get("confidence_hierarchy") or {}).get("confidence_variance") or {}
+
     topology_fields = _extract_topology_fields(filepath, data, row_validation, reconciliation)
     main_table_id = topology_fields.get("main_table_id")
     table_row_validation = _row_validation_for_table(row_validation, main_table_id)
+
+    # Detect if a footer exists in the layout
+    footer_exists = False
+    structured_tables = metadata.get("structured_tables") or []
+    if main_table_id and len(structured_tables) > 1:
+        other_tables = [t for t in structured_tables if t.get("table_id") != main_table_id]
+        if other_tables:
+            footer_exists = True
+
+    row_role_metrics = metrics.get("row_role_metrics") or (metrics.get("instrumentation") or {}).get("row_role_metrics") or {}
+    if row_role_metrics.get("footer_rows_count", 0) > 0 or row_role_metrics.get("tax_rows_count", 0) > 0:
+        footer_exists = True
+
+    reconstructed_rows = metadata.get("reconstructed_rows") or []
+    for r in reconstructed_rows:
+        if isinstance(r, dict) and r.get("row_role") in ("footer_summary_row", "tax_summary_row"):
+            footer_exists = True
+            break
+
+    warnings_log = list(rec.get("warnings", []))
+
+    # Emit warning if footer exists but invoice-level reconciliation is missing
+    if footer_exists and ("invoice_level" not in reconciliation or not reconciliation.get("invoice_level")):
+        warn_msg = "Footer exists but invoice-level reconciliation is missing."
+        log.warning("invoice_level_reconciliation_missing_with_footer", filepath=filepath)
+        if warn_msg not in warnings_log:
+            warnings_log.append(warn_msg)
+
     rows_math_passed = _safe_int(
         rec.get("rows_math_passed"),
         _safe_int(table_row_validation.get("financial_passes"), 0),
@@ -422,11 +490,12 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
         "derived_subtotal": float(rec.get("derived_subtotal", 0) or 0),
         "parsed_grand_total": float(rec.get("parsed_grand_total", 0) or 0),
         "discrepancy": float(rec.get("grand_total_discrepancy", 0) or 0),
-        "warnings_log": rec.get("warnings", []),
-        "schema_source_path": "metadata.metrics.financial_reconciliation",
-        "tsr_contribution_percent": instrumentation.get("tsr_contribution_percent", metrics.get("tsr_contribution_percent")),
-        "heuristic_fallback_used": instrumentation.get("heuristic_fallback_used", metrics.get("heuristic_fallback_used")),
-        "semantic_rejection_count": instrumentation.get("semantic_rejection_count", metrics.get("semantic_rejection_count", 0)),
+        "warnings_log": warnings_log,
+        "schema_source_path": schema_source_path,
+        "tsr_contribution_percent": tsr_contribution_percent,
+        "heuristic_fallback_used": heuristic_fallback_used,
+        "heuristic_fallback_count": heuristic_fallback_count,
+        "semantic_rejection_count": semantic_rejection_count,
         "confidence_variance": confidence_variance,
         "financial_status": status or ("PASS" if passed else "FAIL"),
         "financial_score": round(score, 1),
@@ -446,6 +515,7 @@ def _runtime_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict
     result.update(topology_fields)
     return result
 
+
 def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     metadata = data.get("metadata", {})
     rows = metadata.get("detected_table_rows") or [
@@ -454,6 +524,29 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
     ]
     if not rows and not metadata.get("structured_tables"):
         return None
+
+    metrics = metadata.get("metrics") or {}
+    instrumentation = metrics.get("instrumentation") or {}
+
+    tsr_contribution = metrics.get("tsr_contribution_percent")
+    if tsr_contribution is None:
+        tsr_contribution = instrumentation.get("tsr_contribution_percent")
+
+    fallback_used = metrics.get("heuristic_fallback_used")
+    if fallback_used is None:
+        fallback_used = instrumentation.get("heuristic_fallback_used")
+
+    fallback_count = metrics.get("heuristic_fallback_count")
+    if fallback_count is None:
+        fallback_count = instrumentation.get("heuristic_fallback_count")
+    if fallback_count is None and fallback_used is not None:
+        fallback_count = 1 if bool(fallback_used) else 0
+
+    rejections = metrics.get("semantic_rejection_count")
+    if rejections is None:
+        rejections = instrumentation.get("semantic_rejection_count")
+
+    conf_variance = instrumentation.get("confidence_variance") or (metrics.get("confidence_hierarchy") or {}).get("confidence_variance") or {}
 
     topology_fields = _extract_topology_fields(filepath, data)
     result = {
@@ -468,10 +561,11 @@ def _reconstruction_schema_result(filepath: str, data: Dict[str, Any]) -> Option
         "discrepancy": 0.0,
         "warnings_log": ["Runtime metrics missing; counted reconstructed table rows only."],
         "schema_source_path": "metadata.detected_table_rows",
-        "tsr_contribution_percent": None,
-        "heuristic_fallback_used": None,
-        "semantic_rejection_count": None,
-        "confidence_variance": {},
+        "tsr_contribution_percent": tsr_contribution,
+        "heuristic_fallback_used": fallback_used,
+        "heuristic_fallback_count": fallback_count,
+        "semantic_rejection_count": rejections,
+        "confidence_variance": conf_variance,
         "financial_status": "MISSING",
         "financial_score": 0.0,
         "table_financial_status": "MISSING",
@@ -511,6 +605,7 @@ def _llm_schema_result(filepath: str, llm_data: Dict[str, Any]) -> Dict[str, Any
         "schema_source_path": "metadata.llm_extraction",
         "tsr_contribution_percent": None,
         "heuristic_fallback_used": None,
+        "heuristic_fallback_count": None,
         "semantic_rejection_count": None,
         "confidence_variance": {},
         "financial_status": str(live_result.get("status", "")).upper() or "UNKNOWN",
@@ -554,6 +649,7 @@ def _unsupported_schema_result(filepath: str) -> Dict[str, Any]:
         "schema_source_path": "unsupported_schema",
         "tsr_contribution_percent": None,
         "heuristic_fallback_used": None,
+        "heuristic_fallback_count": None,
         "semantic_rejection_count": None,
         "confidence_variance": {},
         "financial_status": "UNSUPPORTED",

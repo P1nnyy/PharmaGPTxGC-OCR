@@ -731,6 +731,59 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         reconciliation_results.get(main_table_id, {}),
         footer_reconcile_tables,
     )
+
+    # Map the unified invoice-level reconciliation result to its canonical structure
+    # to fulfill both explicit user-requested fields and downstream metadata schemas.
+    main_rec = reconciliation_results.get(main_table_id, {})
+    invoice_level = {
+        # Unique identifier of the primary medicine table region
+        "item_table_region_id": main_table_id,
+        # List of IDs of the table regions identified as footer/tax/summary structures
+        "footer_source_region_ids": [t.table_id for t in footer_reconcile_tables],
+        # Math subtotal computed directly from row-by-row item additions
+        "item_derived_subtotal": invoice_reconciliation_result.get("item_derived_subtotal"),
+        # Subtotal literally parsed from footer text boxes/cells
+        "footer_subtotal": invoice_reconciliation_result.get("parsed_subtotal"),
+        # Consolidated trade/cash/scheme discount total parsed from footer
+        "discount_total": invoice_reconciliation_result.get("discount"),
+        # State GST total amount parsed from footer rows
+        "sgst_total": invoice_reconciliation_result.get("sgst"),
+        # Central GST total amount parsed from footer rows
+        "cgst_total": invoice_reconciliation_result.get("cgst"),
+        # Integrated GST total amount parsed from footer rows
+        "igst_total": invoice_reconciliation_result.get("igst"),
+        # Total GST tax sum (SGST + CGST + IGST)
+        "gst_total": invoice_reconciliation_result.get("parsed_gst"),
+        # Exact roundoff adjustment applied, preserving standard mathematical sign
+        "roundoff": invoice_reconciliation_result.get("roundoff_effect"),
+        # Mathematically derived grand total: subtotal - discount + taxes + roundoff
+        "expected_grand_total": invoice_reconciliation_result.get("expected_grand_total"),
+        # Grand total literally parsed from footer text boxes
+        "parsed_grand_total": invoice_reconciliation_result.get("parsed_grand_total"),
+        # Verification flag indicating if parsed and derived subtotals match within tolerance
+        "subtotal_match": invoice_reconciliation_result.get("subtotal_match"),
+        # Verification flag indicating if parsed and expected grand totals match within tolerance
+        "grand_total_match": invoice_reconciliation_result.get("grand_total_match"),
+        # Reconciliation status (PASS, WARN, FAIL)
+        "status": invoice_reconciliation_result.get("status"),
+        # List of validation warning codes or flags encountered during the run
+        "warnings": invoice_reconciliation_result.get("warnings"),
+        # Nested dictionary mapping labels/keys to the exact text sources and bounding boxes
+        "source rows/cells used": invoice_reconciliation_result.get("sources"),
+
+        # Compatibility shims to allow validation/reporting engines to treat invoice_level
+        # seamlessly as a standard table-level reconciliation output where required.
+        "parsed_subtotal": invoice_reconciliation_result.get("parsed_subtotal"),
+        "derived_subtotal": invoice_reconciliation_result.get("item_derived_subtotal"),
+        "grand_total_discrepancy": invoice_reconciliation_result.get("grand_total_discrepancy"),
+        "integrity_score": 100.0 if invoice_reconciliation_result.get("status") in ["PASS", "WARN"] else 50.0,
+        "confidence": 1.0 if invoice_reconciliation_result.get("status") in ["PASS", "WARN"] else 0.5,
+        "total_rows": main_rec.get("total_rows"),
+        "rows_math_passed": main_rec.get("rows_math_passed"),
+        "rows_math_failed": main_rec.get("rows_math_failed"),
+    }
+    # Store invoice_level in the main reconciliation results dictionary
+    reconciliation_results["invoice_level"] = invoice_level
     logger.info(
         "[INVOICE RECONCILIATION] "
         f"status={invoice_reconciliation_result.get('status')} "
