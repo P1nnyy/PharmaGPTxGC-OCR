@@ -62,8 +62,9 @@ def main():
             instrumentation = metrics.get("instrumentation", {})
             fallback_used = metrics.get("graph_fallback_used", False)
             source = reconstruct_res.get("topology_source", "unknown")
+            selected_source = reconstruct_res.get("selected_topology_source", "unknown")
             
-            print(f"  ✅ Done. Source: {source} | Fallback used: {fallback_used}")
+            print(f"  ✅ Done. Source: {source} | Selected: {selected_source} | Fallback used: {fallback_used}")
             if fallback_used:
                 print(f"  📊 Fallback Cell Count: {metrics.get('graph_fallback_cell_count')}")
                 print(f"  📊 Fallback Mapped Tokens: {metrics.get('graph_fallback_mapped_token_count')}")

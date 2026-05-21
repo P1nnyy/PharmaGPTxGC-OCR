@@ -363,6 +363,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     )
     ppstructure_threshold = float(settings.PPSTRUCTURE_CONFIDENCE_THRESHOLD)
     topology_source = "ppstructure" if ppstructure_enabled else "heuristic_anchor"
+    selected_topology_source = "heuristic_anchor"
     heuristic_fallback_used = False
     ppstructure_regions_attempted = 0
     ppstructure_cells_attempted = 0
@@ -481,6 +482,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "fast_fail": True,
             "fast_fail_reason": "zero_tables",
             "topology_source": topology_source,
+            "selected_topology_source": selected_topology_source,
             "graph_candidate_rows": document_graph.get("graph_candidate_rows", []),
             "graph_candidate_columns": document_graph.get("graph_candidate_columns", []),
             "graph_table_region": document_graph.get("graph_table_region", {}),
@@ -572,7 +574,152 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         f"Ignored tables: {ignored_tables_count}"
     )
 
-    # --- GRAPH FALLBACK DETECTION ENGINE ---
+    # --- GRAPH FALLBACK & RANKED TOPOLOGY ENGINE ---
+    # Retrieve graph candidate rows/cols
+    graph_rows = document_graph.get("graph_candidate_rows", [])
+    graph_cols = document_graph.get("graph_candidate_columns", [])
+
+    # Helper function to evaluate and score table candidates
+    def evaluate_candidate_table(tr, is_graph=False):
+        if not tr:
+            return 0.0, {
+                "row_count": 0,
+                "column_stability": 0.0,
+                "mapped_token_count": 0,
+                "non_empty_cell_ratio": 0.0,
+                "has_amount_col": 0.0,
+                "math_score": 0.0
+            }
+        
+        row_count = len(tr.rows)
+        if row_count == 0:
+            return 0.0, {
+                "row_count": 0,
+                "column_stability": 0.0,
+                "mapped_token_count": 0,
+                "non_empty_cell_ratio": 0.0,
+                "has_amount_col": 0.0,
+                "math_score": 0.0
+            }
+
+        # For graph candidate, we perform mapping, multiline merging, and stability scores first
+        if is_graph:
+            map_tokens_to_cells(ocr_blocks, [tr], debug=False)
+            tr, _ = merge_multiline_table_rows(tr, ocr_blocks)
+            tr = update_row_stability_scores(tr, ocr_blocks)
+            
+        # 1. Row Count & 2. Column stability (average row stability)
+        avg_row_stability = sum(getattr(r, "stability", 1.0) for r in tr.rows) / row_count
+        
+        # 3. Mapped token count & 4. Non-empty cell ratio
+        mapped_tokens = set()
+        total_cells = len(tr.cells)
+        empty_cells = 0
+        for cell in tr.cells:
+            if cell.mapped_block_ids:
+                mapped_tokens.update(cell.mapped_block_ids)
+            else:
+                empty_cells += 1
+        mapped_token_count = len(mapped_tokens)
+        non_empty_cell_ratio = (total_cells - empty_cells) / total_cells if total_cells > 0 else 0.0
+
+        # 5. Semantic amount column detection
+        temp_classifier = SemanticColumnClassifier()
+        temp_semantic_res = temp_classifier.enrich_region_metadata(tr)
+        inference_summary = temp_semantic_res.get("_inference_summary", {})
+        final_semantics = inference_summary.get("final_column_semantics", {})
+        has_amount_col = 1.0 if 'amount' in final_semantics.values() else 0.0
+
+        # 6. Invoice math score (using temp FinancialReconciler)
+        temp_reconciler = FinancialReconciler(semantic_column_cache={tr.table_id: temp_semantic_res})
+        temp_reconciliation_results = temp_reconciler.reconcile_all([tr])
+        
+        footer_reconcile_tables = [
+            other_tr for other_tr in table_regions
+            if other_tr.table_id != tr.table_id
+        ]
+        temp_invoice_recon = reconcile_invoice_financials(
+            temp_reconciliation_results.get(tr.table_id, {}),
+            footer_reconcile_tables,
+        )
+        
+        status = temp_invoice_recon.get("status", "FAIL")
+        math_score = 0.0
+        if status == "PASS":
+            math_score = 100.0
+        elif status == "WARN":
+            math_score = 75.0
+        else:
+            math_score = temp_invoice_recon.get("integrity_score", 0.0)
+
+        # Unified ranking score formula
+        rank_score = (
+            math_score +
+            (30.0 if has_amount_col else 0.0) +
+            (row_count * 1.5) +
+            (mapped_token_count * 0.2) +
+            (non_empty_cell_ratio * 20.0) +
+            (avg_row_stability * 10.0)
+        )
+        
+        metrics = {
+            "row_count": row_count,
+            "column_stability": round(avg_row_stability, 4),
+            "mapped_token_count": mapped_token_count,
+            "non_empty_cell_ratio": round(non_empty_cell_ratio, 4),
+            "has_amount_col": has_amount_col,
+            "math_score": math_score
+        }
+        return rank_score, metrics
+
+    # Score heuristic candidate
+    heuristic_candidate = table_bundle.main_table
+    heuristic_score, heuristic_metrics = evaluate_candidate_table(heuristic_candidate, is_graph=False)
+    
+    # Score graph candidate
+    graph_candidate = None
+    graph_score = 0.0
+    graph_metrics = {
+        "row_count": 0,
+        "column_stability": 0.0,
+        "mapped_token_count": 0,
+        "non_empty_cell_ratio": 0.0,
+        "has_amount_col": 0.0,
+        "math_score": 0.0
+    }
+    
+    if graph_rows and graph_cols:
+        graph_candidate = build_graph_fallback_table_region(
+            graph_rows=graph_rows,
+            graph_cols=graph_cols,
+            graph_confidence=document_graph.get("graph_confidence", 0.5)
+        )
+        graph_score, graph_metrics = evaluate_candidate_table(graph_candidate, is_graph=True)
+
+    # Topology Decision Logic
+    selected_topology_source = "heuristic_anchor"
+    margin = 15.0
+    
+    if not heuristic_candidate or len(heuristic_candidate.rows) == 0:
+        if graph_candidate and len(graph_candidate.rows) > 0:
+            selected_topology_source = "document_graph_candidate"
+    elif graph_candidate and graph_score > heuristic_score + margin:
+        selected_topology_source = "document_graph_candidate"
+
+    logger.info(
+        f"[TOPOLOGY RANKING] Heuristic Score: {heuristic_score:.2f} ({heuristic_metrics}) | "
+        f"Graph Score: {graph_score:.2f} ({graph_metrics}) | "
+        f"Selected Topology Source: {selected_topology_source}"
+    )
+
+    # Promote graph candidate if selected
+    if selected_topology_source == "document_graph_candidate":
+        table_bundle.main_table = graph_candidate
+        if graph_candidate not in table_regions:
+            table_regions.append(graph_candidate)
+        topology_source = "document_graph_candidate"
+
+    # Emergency Fallback Safety Net (Fallback Engine)
     should_fallback = False
     trigger_reason = None
 
@@ -596,35 +743,36 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             trigger_reason = f"low_topology_confidence_{main_tr.topology_confidence:.2f}"
 
     if should_fallback:
-        graph_rows = document_graph.get("graph_candidate_rows", [])
-        graph_cols = document_graph.get("graph_candidate_columns", [])
-
-        if graph_rows and graph_cols:
-            logger.warning(f"[GRAPH FALLBACK] Activating document graph fallback due to: {trigger_reason}")
-            fallback_tr = build_graph_fallback_table_region(
-                graph_rows=graph_rows,
-                graph_cols=graph_cols,
-                graph_confidence=document_graph.get("graph_confidence", 0.5)
-            )
-            # Map tokens to cells specifically for this fallback region
-            map_tokens_to_cells(ocr_blocks, [fallback_tr], debug=(debug and not benchmark_mode))
-
-            # Run multiline merging and update stability scores on the fallback region
-            fallback_tr, audit = merge_multiline_table_rows(fallback_tr, ocr_blocks)
-            fallback_tr = update_row_stability_scores(fallback_tr, ocr_blocks)
-
-            # Assign fallback region as the main table and update routing
-            table_bundle.main_table = fallback_tr
-            if fallback_tr not in table_regions:
-                table_regions.append(fallback_tr)
-
-            topology_source = "document_graph_fallback"
-            graph_fallback_used = True
-            graph_rejection_reason = "fallback_activated"
-            fallback_tr.topology_confidence = document_graph.get("graph_confidence", 0.5)
+        if selected_topology_source == "document_graph_candidate":
+            logger.info("[GRAPH FALLBACK] Already selected document_graph_candidate; skipping redundant emergency fallback.")
         else:
-            graph_rejection_reason = "graph_extraction_empty"
-            logger.warning(f"[GRAPH FALLBACK] Fallback triggered ({trigger_reason}) but document graph candidates were empty.")
+            if graph_rows and graph_cols:
+                logger.warning(f"[GRAPH FALLBACK] Activating emergency document graph fallback due to: {trigger_reason}")
+                fallback_tr = build_graph_fallback_table_region(
+                    graph_rows=graph_rows,
+                    graph_cols=graph_cols,
+                    graph_confidence=document_graph.get("graph_confidence", 0.5)
+                )
+                map_tokens_to_cells(ocr_blocks, [fallback_tr], debug=(debug and not benchmark_mode))
+                fallback_tr, audit = merge_multiline_table_rows(fallback_tr, ocr_blocks)
+                fallback_tr = update_row_stability_scores(fallback_tr, ocr_blocks)
+
+                table_bundle.main_table = fallback_tr
+                if fallback_tr not in table_regions:
+                    table_regions.append(fallback_tr)
+
+                topology_source = "document_graph_fallback"
+                selected_topology_source = "document_graph_fallback"
+                graph_fallback_used = True
+                graph_rejection_reason = "fallback_activated"
+                fallback_tr.topology_confidence = document_graph.get("graph_confidence", 0.5)
+            else:
+                graph_rejection_reason = "graph_extraction_empty"
+                logger.warning(f"[GRAPH FALLBACK] Fallback triggered ({trigger_reason}) but document graph candidates were empty.")
+
+    # Populate actual selected topology sources in metadata
+    tsr_metadata["topology_source"] = topology_source
+    tsr_metadata["selected_topology_source"] = selected_topology_source
 
     if not table_bundle.main_table:
         raise ValueError("Failed to isolate a dominant main invoice table.")
@@ -1252,6 +1400,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "semantic_markdown": semantic_markdown,
         "fast_fail": False,
         "topology_source": topology_source,
+        "selected_topology_source": selected_topology_source,
         "invoice_confidence": confidence_hierarchy["invoice_confidence"],
         "graph_candidate_rows": document_graph.get("graph_candidate_rows", []),
         "graph_candidate_columns": document_graph.get("graph_candidate_columns", []),
