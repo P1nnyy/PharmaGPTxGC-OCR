@@ -7,7 +7,7 @@ import re
 from typing import Dict, Any, List
 
 # Ensure project root is in path
-PROJECT_ROOT = "/Users/pranavgupta/Desktop/PharmaGPTxGC"
+PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
@@ -59,7 +59,7 @@ def main():
         with open(filepath, "r") as f:
             data = json.load(f)
         
-        blocks = data.get("metadata", {}).get("blocks", [])
+        blocks = data.get("metadata", {}).get("blocks", []) or data.get("blocks", [])
         
         # Clear captured logs
         capture_handler.records.clear()
