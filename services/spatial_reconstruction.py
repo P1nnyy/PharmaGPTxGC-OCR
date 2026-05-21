@@ -14,22 +14,14 @@ from services.layout_pipeline.row_roles import classify_row_roles
 from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
 from services.layout_pipeline.column_band_rescue import build_column_band_rescue_candidate
 from services.layout_pipeline.document_graph import build_document_graph
+from services.layout_pipeline.graph_fallback import build_graph_fallback_table_region
 from services.layout_pipeline.vendor_priors import build_vendor_template_prior
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
-from services.table_classifier import TableClassifier, route_tables, TableType
+from services.table_classifier import TableClassifier, route_tables
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
-from services.tsr.future_tatr import TATR_TSREngine
 from services.tsr.future_ppstructure import PPStructure_TSREngine
-
-def get_engine(mode: str):
-    if mode == "tatr":
-        return TATR_TSREngine()
-    elif mode == "ppstructure":
-        return PPStructure_TSREngine()
-    else:
-        return HeuristicTSREngine()
 
 def _compute_tsr_confidence(table_regions) -> float:
     """
@@ -112,88 +104,23 @@ def _invoice_footer_tax_source_counts(invoice_reconciliation: Dict[str, Any]) ->
     }
 
 
-def _build_graph_fallback_table_region(graph_rows: List[Dict[str, Any]], graph_cols: List[Dict[str, Any]], graph_confidence: float) -> Any:
-    """Deterministic assembly of TableRegion from spatial graph candidates."""
-    from models.layout_models import TableRegion, RowRegion, ColumnRegion, TableCell, GeometryBox, RegionType
-    
-    # 1. Build ColumnRegions
-    col_regions = []
-    for c in graph_cols:
-        col_regions.append(ColumnRegion(
-            col_id=c["col_id"],
-            geometry=GeometryBox(
-                min_x=c["min_x"],
-                max_x=c["max_x"],
-                min_y=0.0,
-                max_y=10000.0,
-                center_x=c["center_x"],
-                center_y=5000.0
-            ),
-            confidence=c["confidence"]
-        ))
-        
-    # 2. Build RowRegions
-    table_rows = []
-    for r in graph_rows:
-        table_rows.append(RowRegion(
-            row_id=r["row_id"],
-            geometry=GeometryBox(
-                min_x=r["min_x"],
-                max_x=r["max_x"],
-                min_y=r["min_y"],
-                max_y=r["max_y"],
-                center_x=(r["min_x"] + r["max_x"]) / 2.0,
-                center_y=r["center_y"]
-            ),
-            confidence=r["confidence"],
-            stability=1.0,
-            row_role="item_row" if r["row_type_hint"] == "item_candidate" else "unknown_row"
-        ))
-        
-    # 3. Build TableCells at intersections
-    table_cells = []
-    for row in table_rows:
-        for col in col_regions:
-            cell_geom = GeometryBox(
-                min_x=max(row.geometry.min_x, col.geometry.min_x),
-                max_x=min(row.geometry.max_x, col.geometry.max_x),
-                min_y=row.geometry.min_y,
-                max_y=row.geometry.max_y,
-                center_x=(max(row.geometry.min_x, col.geometry.min_x) + min(row.geometry.max_x, col.geometry.max_x)) / 2.0,
-                center_y=row.geometry.center_y
-            )
-            table_cells.append(TableCell(
-                row_id=row.row_id,
-                col_id=col.col_id,
-                geometry=cell_geom,
-                confidence=min(row.confidence, col.confidence)
-            ))
-            
-    # 4. Compute composite TableRegion geometry
-    reg_min_x = min(r.geometry.min_x for r in table_rows) if table_rows else 0.0
-    reg_max_x = max(r.geometry.max_x for r in table_rows) if table_rows else 1000.0
-    reg_min_y = min(r.geometry.min_y for r in table_rows) if table_rows else 0.0
-    reg_max_y = max(r.geometry.max_y for r in table_rows) if table_rows else 1000.0
-    reg_geom = GeometryBox(
-        min_x=reg_min_x,
-        max_x=reg_max_x,
-        min_y=reg_min_y,
-        max_y=reg_max_y,
-        center_x=(reg_min_x + reg_max_x) / 2.0,
-        center_y=(reg_min_y + reg_max_y) / 2.0
-    )
-    
-    return TableRegion(
-        table_id="graph_fallback_region",
-        region_type=RegionType.MEDICINE_TABLE,
-        geometry=reg_geom,
-        rows=table_rows,
-        columns=col_regions,
-        cells=table_cells,
-        confidence=graph_confidence,
-        source_engine="document_graph_fallback",
-        topology_confidence=graph_confidence
-    )
+def _graph_telemetry_block(
+    document_graph: Dict[str, Any],
+    graph_fallback_used: bool,
+    graph_rejection_reason: str,
+) -> Dict[str, Any]:
+    """Build the canonical graph telemetry dict reused across return paths."""
+    dg_metrics = document_graph.get("metrics", {})
+    return {
+        "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
+        "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
+        "graph_confidence": document_graph.get("graph_confidence", 0.0),
+        "graph_fallback_used": graph_fallback_used,
+        "graph_rejection_reason": graph_rejection_reason,
+        "isolated_node_count": dg_metrics.get("isolated_node_count", 0),
+        "max_row_cluster_size": dg_metrics.get("max_row_cluster_size", 0),
+        "column_band_stability": dg_metrics.get("column_band_stability", 0.0),
+    }
 
 
 def _dominance_score_confidence(score: float) -> float:
@@ -546,14 +473,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "table_count": 0,
                 "topology_debug": topology_debug,
                 "column_anchor_debug": {},
-                "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-                "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-                "graph_confidence": document_graph.get("graph_confidence", 0.0),
-                "graph_fallback_used": graph_fallback_used,
-                "graph_rejection_reason": graph_rejection_reason,
-                "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-                "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-                "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -564,14 +484,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                         "row_confidence_variance": 0.0
                     },
                     "document_graph_metrics": document_graph.get("metrics", {}),
-                    "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-                    "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-                    "graph_confidence": document_graph.get("graph_confidence", 0.0),
-                    "graph_fallback_used": graph_fallback_used,
-                    "graph_rejection_reason": graph_rejection_reason,
-                    "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-                    "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-                    "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+                    **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
                 },
                 "fast_fail": True,
                 **tsr_metadata,
@@ -653,7 +566,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
         if graph_rows and graph_cols:
             logger.warning(f"[GRAPH FALLBACK] Activating document graph fallback due to: {trigger_reason}")
-            fallback_tr = _build_graph_fallback_table_region(
+            fallback_tr = build_graph_fallback_table_region(
                 graph_rows=graph_rows,
                 graph_cols=graph_cols,
                 graph_confidence=document_graph.get("graph_confidence", 0.5)
@@ -1092,14 +1005,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 **table_routing_diagnostics,
                 "column_anchor_debug": column_anchor_debug,
                 "anchor_repair": anchor_repair,
-                "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-                "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-                "graph_confidence": document_graph.get("graph_confidence", 0.0),
-                "graph_fallback_used": graph_fallback_used,
-                "graph_rejection_reason": graph_rejection_reason,
-                "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-                "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-                "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -1115,14 +1021,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "row_role_metrics": row_role_metrics,
                     "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                     "document_graph_metrics": document_graph.get("metrics", {}),
-                    "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-                    "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-                    "graph_confidence": document_graph.get("graph_confidence", 0.0),
-                    "graph_fallback_used": graph_fallback_used,
-                    "graph_rejection_reason": graph_rejection_reason,
-                    "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-                    "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-                    "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+                    **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
                 },
                 "document_graph_metrics": document_graph.get("metrics", {}),
                 "vendor_template_prior": vendor_template_prior,
@@ -1336,14 +1235,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "confidence_hierarchy": confidence_hierarchy,
             "document_graph_metrics": document_graph.get("metrics", {}),
             "vendor_template_prior": vendor_template_prior,
-            "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-            "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-            "graph_confidence": document_graph.get("graph_confidence", 0.0),
-            "graph_fallback_used": graph_fallback_used,
-            "graph_rejection_reason": graph_rejection_reason,
-            "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-            "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-            "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+            **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
             "instrumentation": {
                 "tsr_contribution_percent": tsr_contribution_percent,
                 "heuristic_fallback_used": heuristic_fallback_used,
@@ -1366,14 +1258,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 },
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                 "document_graph_metrics": document_graph.get("metrics", {}),
-                "graph_candidate_row_count": len(document_graph.get("graph_candidate_rows", [])),
-                "graph_candidate_column_count": len(document_graph.get("graph_candidate_columns", [])),
-                "graph_confidence": document_graph.get("graph_confidence", 0.0),
-                "graph_fallback_used": graph_fallback_used,
-                "graph_rejection_reason": graph_rejection_reason,
-                "isolated_node_count": document_graph.get("metrics", {}).get("isolated_node_count", 0),
-                "max_row_cluster_size": document_graph.get("metrics", {}).get("max_row_cluster_size", 0),
-                "column_band_stability": document_graph.get("metrics", {}).get("column_band_stability", 0.0),
+                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
             },
             "fast_fail": False,
             **tsr_metadata,

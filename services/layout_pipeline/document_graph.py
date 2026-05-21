@@ -77,34 +77,6 @@ def _nearest_directional_edges(items: List[Tuple[OCRBlock, GeometryBox]]) -> Dic
     return edges
 
 
-def _row_clusters(items: List[Tuple[OCRBlock, GeometryBox]]) -> List[Dict[str, Any]]:
-    if not items:
-        return []
-    heights = [max(1.0, geom.max_y - geom.min_y) for _, geom in items]
-    median_height = sorted(heights)[len(heights) // 2]
-    threshold = max(8.0, median_height * 0.65)
-    clusters: List[List[Tuple[OCRBlock, GeometryBox]]] = []
-
-    for item in sorted(items, key=lambda entry: entry[1].center_y):
-        _, geom = item
-        for cluster in clusters:
-            center_y = sum(entry[1].center_y for entry in cluster) / len(cluster)
-            if abs(geom.center_y - center_y) <= threshold:
-                cluster.append(item)
-                break
-        else:
-            clusters.append([item])
-
-    output = []
-    for idx, cluster in enumerate(clusters):
-        ordered = sorted(cluster, key=lambda entry: entry[1].min_x)
-        output.append({
-            "cluster_id": f"graph_row_{idx}",
-            "token_ids": [block.id for block, _ in ordered],
-            "token_count": len(ordered),
-            "sample_text": " ".join((block.text or "").strip() for block, _ in ordered)[:180],
-        })
-    return output
 
 
 def _generate_graph_candidate_rows(items: List[Tuple[OCRBlock, GeometryBox]]) -> List[Dict[str, Any]]:
@@ -342,7 +314,6 @@ def build_document_graph(blocks: List[OCRBlock]) -> Dict[str, Any]:
     items = [(block, _geom(block)) for block in blocks if block.id and _geom(block)]
     items = [(block, geom) for block, geom in items if geom is not None]
     edges = _nearest_directional_edges(items)
-    row_clusters = _row_clusters(items)
     isolated = [
         block.id
         for block, _ in items
@@ -361,6 +332,17 @@ def build_document_graph(blocks: List[OCRBlock]) -> Dict[str, Any]:
     # Generate graph candidate rows and columns
     graph_candidate_rows = _generate_graph_candidate_rows(items)
     graph_candidate_columns = _generate_graph_candidate_columns(items, graph_candidate_rows)
+
+    # Derive row_clusters from graph_candidate_rows (preserves identical output keys)
+    row_clusters = [
+        {
+            "cluster_id": r["row_id"],
+            "token_ids": r["token_ids"],
+            "token_count": r["token_count"],
+            "sample_text": r["text"][:180],
+        }
+        for r in graph_candidate_rows
+    ]
 
     # Compute graph table region enclosing item and header candidate rows
     table_rows = [r for r in graph_candidate_rows if r["row_type_hint"] in ["item_candidate", "header_candidate"]]
