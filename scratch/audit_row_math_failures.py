@@ -12,12 +12,13 @@ if PROJECT_ROOT not in sys.path:
 
 from services.spatial_reconstruction import reconstruct_layout
 from services.qty_parser import parse_quantity
-from services.financial_reconciler import DiscountAwareVerifier
+from services.financial_reconciler import DiscountAwareVerifier, normalize_indian_decimal
 
 def _parse_numeric(text: str) -> Optional[float]:
     if not text:
         return None
-    cleaned = re.sub(r'[₹$,\s]', '', text.strip())
+    normalized = normalize_indian_decimal(text)
+    cleaned = re.sub(r'[₹$,\s]', '', normalized.strip())
     try:
         return float(cleaned)
     except ValueError:

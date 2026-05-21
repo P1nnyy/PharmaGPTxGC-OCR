@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 from models.layout_models import ColumnRegion, GeometryBox, OCRBlock, RegionType, RowRegion, TableCell, TableRegion
+from services.financial_reconciler import normalize_indian_decimal
 
 
 PRODUCT_MARKER_RE = re.compile(
@@ -67,7 +68,8 @@ def _synthetic_box(col_index: int, row_index: int, col_count: int) -> GeometryBo
 
 
 def _split_decimal_values(text: str) -> List[str]:
-    clean = re.sub(r"[₹$,\s]", "", text or "")
+    normalized = normalize_indian_decimal(text)
+    clean = re.sub(r"[₹$,\s]", "", normalized or "")
     if not clean:
         return []
 
@@ -92,7 +94,8 @@ def _split_decimal_values(text: str) -> List[str]:
 
 def _to_decimal(value: str) -> Optional[Decimal]:
     try:
-        return Decimal(value.replace(",", ""))
+        normalized = normalize_indian_decimal(value)
+        return Decimal(normalized.replace(",", ""))
     except (InvalidOperation, AttributeError):
         return None
 
@@ -114,7 +117,8 @@ def _nonzero_decimal_values(values: List[str]) -> List[str]:
 
 
 def _split_integer_values(text: str) -> List[str]:
-    clean = re.sub(r"[,\s]", "", text or "")
+    normalized = normalize_indian_decimal(text)
+    clean = re.sub(r"[,\s]", "", normalized or "")
     if not clean or "." in clean or "/" in clean or "-" in clean:
         return []
     return re.findall(r"\d{1,3}", clean)
@@ -352,8 +356,6 @@ def _optional_rescue_bands(
         row_count,
     )
 
-    # Optional numeric bands are block-local: clean numeric-only blocks can be
-    # useful even when an earlier broad region grouped them near footer labels.
     band_excluded_ids = set()
     fused_bands = [
         _numeric_band_from_entry(entry, f"fused_money_band_{idx}")

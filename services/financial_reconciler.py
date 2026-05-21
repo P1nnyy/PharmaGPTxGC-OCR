@@ -48,6 +48,30 @@ class FinancialConfig:
     SUBTOTAL_KEYWORDS = ["SUB TOTAL", "SUBTOTAL", "BEFORE TAX", "TAXABLE VALUE"]
     DISCOUNT_COL_KEYWORDS = ["DIS", "DISC", "DISCOUNT", "TD%", "CD%", "SCHEME DIS", "SCHEME DISCOUNT", "TRADE DISCOUNT"]
 
+def normalize_indian_decimal(text: str) -> str:
+    """Normalize Indian decimal comma values in row math.
+    
+    Treats comma between digits as decimal when pattern is exactly \\d+,\\d{2}
+    and no thousands separator context exists (no dot, exactly one comma).
+    
+    Examples:
+        "223,38" -> "223.38"
+        "345,09" -> "345.09"
+        "125,69" -> "125.69"
+        "1,234.50" -> "1,234.50"
+        "12,345" -> "12,345"
+        "1,23,456" -> "1,23,456"
+    """
+    if not isinstance(text, str):
+        return text
+    if '.' in text:
+        return text
+    if text.count(',') != 1:
+        return text
+    
+    # Replace comma with dot if it matches exactly \\b\\d+,\\d{2}\\b
+    return re.sub(r'\b(\d+),(\d{2})\b', r'\1.\2', text)
+
 def _to_decimal(val: Any) -> Decimal:
     """Safely convert any numeric/string input into Decimal, cleaning currency artifacts."""
     if val is None:
@@ -57,8 +81,11 @@ def _to_decimal(val: Any) -> Decimal:
     if isinstance(val, Decimal):
         return val
     
+    # Apply Indian decimal comma normalization
+    normalized = normalize_indian_decimal(str(val))
+    
     # String cleaning
-    cleaned = re.sub(r'[₹$,\s]', '', str(val).strip())
+    cleaned = re.sub(r'[₹$,\s]', '', normalized.strip())
     
     # OCR Digit Repair
     cleaned = re.sub(r'(?<=\d)[OoOo](?=\d|\.|$)', '0', cleaned)
@@ -205,7 +232,7 @@ class ReconciliationResultV2(BaseModel):
     status: ValidationStatus = ValidationStatus.FAIL
     sub_scores: Dict[str, SubScore] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
-    item_amount_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    item_amount_sources: List[Dict[str, Any]] = Field(default_factory=dict)
 
     def to_legacy_dict(self) -> Dict[str, Any]:
         """Maintains backward compatibility with legacy dashboard keys."""
@@ -369,7 +396,7 @@ class FinancialReconciler:
                          math_pass_count += 1
                      else:
                          math_fail_count += 1
-                         
+                          
         # 4. Global Metadata Extraction (Totals, GST Sum)
         # Total table span for positional heuristics
         total_y_span = 1000.0
@@ -518,6 +545,7 @@ def _decimal_candidates(text: str) -> List[Decimal]:
     values = []
     for match in re.findall(r"-?\d[\d,]*[\.,]\d{1,3}", text or ""):
         if "," in match and "." not in match:
+            # Clean and normalize before parsing to prevent wrong values
             values.append(_to_decimal(match.replace(",", ".")))
         else:
             values.append(_to_decimal(match))
@@ -621,7 +649,7 @@ def _candidate_value_for_label(cells: List[TableCell], label_idx: int, label_kin
 def _has_repeated_gst_rate_band(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "")
     if re.search(r"(?:2[.,]?50){3,}|(?:5[.,]?00){3,}", compact):
-        return True
+         return True
     rates = [
         val.copy_abs().quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
         for val in _decimal_candidates(text)
