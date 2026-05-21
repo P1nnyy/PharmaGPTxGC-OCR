@@ -19,3 +19,15 @@ verification/comparisons/
 # Export scripts
 # scripts/export_codebase.py
 # scripts/export_codebase.sh
+
+# Local/runtime artifacts
+venv/
+benchmarks/
+forensic_runs/
+ocr/
+datasets/ocr_results/
+results/
+test_images/
+working_requirements.txt
+__pycache__/
+*.pyc

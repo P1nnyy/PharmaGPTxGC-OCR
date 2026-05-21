@@ -176,12 +176,13 @@ echo "════════════════════════�
 # --- Run Financial Validation on Outputs ---
 echo ""
 echo "Running financial topology validation..."
-python3 verification/scripts/validate_invoice_math.py --results-dir "$OUTPUTS_DIR" --report-out "$REPORTS_DIR/topology_integrity_report.md" 2>/dev/null || \
-    python3 -c "
-import sys; sys.path.insert(0,'.')
-from verification.scripts.validate_invoice_math import generate_validation_dashboard
-generate_validation_dashboard('$OUTPUTS_DIR', '$REPORTS_DIR/topology_integrity_report.md')
-" 2>/dev/null || echo "⚠️  Financial validation skipped (script error)"
+if python3 ../verification/scripts/validate_invoice_math.py \
+  --results-dir "$OUTPUTS_DIR" \
+  --report-out "$REPORTS_DIR/topology_integrity_report.md"; then
+  echo "✅ Financial topology validation complete"
+else
+  echo "⚠️  Financial validation skipped (script error)"
+fi
 
 # --- Cleanup Mode ---
 if [ "$CLEANUP" = true ]; then

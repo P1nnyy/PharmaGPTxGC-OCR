@@ -220,6 +220,14 @@ class ReconciliationResultV2(BaseModel):
             "subtotal_discrepancy": float(abs((self.parsed_subtotal or self.derived_subtotal) - self.derived_subtotal)),
             "grand_total_discrepancy": float(self.grand_total_discrepancy),
             "confidence": float(self.integrity_score / 100.0),
+            "integrity_score": self.integrity_score,
+            "total_rows": self.total_rows,
+            "rows_math_passed": self.rows_math_passed,
+            "rows_math_failed": self.rows_math_failed,
+            "sub_scores": {
+                key: value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+                for key, value in self.sub_scores.items()
+            },
             "warnings": self.warnings,
             "item_amount_sources": self.item_amount_sources,
             "status": self.status.value
@@ -272,8 +280,10 @@ class FinancialReconciler:
         
         verifier = DiscountAwareVerifier()
         footer_row_pattern = re.compile(
-            r"\b(SUB\s*TOTAL|GRAND\s*TOTAL|TOTAL|SGST|CGST|GST|ROUND(?:OFF)?|DISCOUNT)\b"
-            r"|(?:\b(?:RS\.?|RUPEES)\b.*\bONLY\b)",
+            r"\b(SUB\s*TOTAL|SUBTOTAL|GRAND\s*TOTAL|TOTAL|SGST|CGST|IGST|GST|ROUND\s*OFF|"
+            r"ROUNDOFF|DISCOUNT|LESS\s+TD|TRADE\s+DISCOUNT|CR\s*/?\s*DR|CR\s+NOTE|DR\s+NOTE|"
+            r"AMOUNT\s+IN\s+WORDS)\b"
+            r"|(?:\b(?:RS\.?|RUPEES|INR)\b.*\b(?:ONLY|PAISE)\b)",
             re.IGNORECASE
         )
         
@@ -1024,8 +1034,15 @@ def _compute_v2_scoring(res: ReconciliationResultV2) -> ReconciliationResultV2:
     sub_scores["gst_consistency"] = SubScore(name="GST Consistency", score=gst_score, weight=0.15, reasoning=reason_gst)
     
     # 4. Structural Stability (20% Weight)
-    # Placeholder logic here as we're within reconciler. Full pipe pushes higher metrics.
-    sub_scores["structural_integrity"] = SubScore(name="Structural Integrity", score=90.0, weight=0.20, reasoning="Table structure recognized.")
+    structural_score = 90.0 if res.total_rows > 0 else 0.0
+    structural_reason = "Table has item rows and usable amount structure."
+    if "row_math_unverified" in res.warnings:
+        structural_score = 60.0
+        structural_reason = "Item rows exist, but topology lacks measurable qty/rate/amount row math."
+    elif res.rows_math_failed > 0:
+        structural_score = 75.0
+        structural_reason = "Item rows exist, but row-level math has failures."
+    sub_scores["structural_integrity"] = SubScore(name="Structural Integrity", score=structural_score, weight=0.20, reasoning=structural_reason)
     
     # 5. Completeness (10% Weight)
     compl = 100.0 if res.total_rows > 0 else 0.0

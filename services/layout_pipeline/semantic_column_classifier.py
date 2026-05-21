@@ -43,6 +43,24 @@ class SemanticColumnClassifier:
     """
 
     GST_VALUES = {0.0, 2.5, 5.0, 6.0, 9.0, 12.0, 18.0, 28.0}
+    FOOTER_SIGNAL_RE = re.compile(
+        r"\b(SUB\s*TOTAL|GRAND\s*TOTAL|ROUND\s*OFF|ROUNDOFF|DISCOUNT|LESS|"
+        r"CGST|SGST|IGST|GST\s*SUMMARY|AMOUNT\s+IN\s+WORDS|NET\s*(?:AMT|AMOUNT|PAYABLE))\b",
+        re.IGNORECASE,
+    )
+    HEADER_LABEL_PATTERNS = {
+        ColumnSemantics.PRODUCT: re.compile(r"\b(?:PRODUCT|ITEM|DESCRIPTION|PARTICULARS?)\b", re.IGNORECASE),
+        ColumnSemantics.BATCH: re.compile(r"\bBATCH\b", re.IGNORECASE),
+        ColumnSemantics.EXPIRY: re.compile(r"\bEXP(?:IRY)?\b", re.IGNORECASE),
+        ColumnSemantics.HSN: re.compile(r"\bHSN\b", re.IGNORECASE),
+        ColumnSemantics.QUANTITY: re.compile(r"\b(?:QTY|QUANTITY)\b", re.IGNORECASE),
+        ColumnSemantics.FREE_QUANTITY: re.compile(r"\bFREE\b", re.IGNORECASE),
+        ColumnSemantics.MRP: re.compile(r"\bMRP\b", re.IGNORECASE),
+        ColumnSemantics.RATE: re.compile(r"\bRATE\b", re.IGNORECASE),
+        ColumnSemantics.DISCOUNT: re.compile(r"\b(?:DIS|DISC|DISCOUNT|TD)\b", re.IGNORECASE),
+        ColumnSemantics.GST: re.compile(r"\b(?:GST|CGST|SGST|IGST)\b", re.IGNORECASE),
+        ColumnSemantics.AMOUNT: re.compile(r"\b(?:AMOUNT|AMT|VALUE)\b", re.IGNORECASE),
+    }
 
     def _compact(self, text: str) -> str:
         return re.sub(r"\s+", "", (text or "").strip().upper())
@@ -193,6 +211,32 @@ class SemanticColumnClassifier:
             "right_side_score": right_side_score,
         }
 
+    def _column_context(self, region: TableRegion, col_id: str, row_roles: Dict[str, str]) -> Dict[str, Any]:
+        header_votes: Dict[str, int] = {}
+        footer_signal_count = 0
+        non_item_numeric_outlier_count = 0
+
+        for cell in region.cells:
+            if cell.col_id != col_id or not (cell.text or "").strip():
+                continue
+            role = row_roles.get(cell.row_id, "unknown_row")
+            text = cell.text or ""
+            if role == "header_row":
+                for semantic_type, pattern in self.HEADER_LABEL_PATTERNS.items():
+                    if pattern.search(text):
+                        header_votes[semantic_type] = header_votes.get(semantic_type, 0) + 1
+            elif role in {"footer_summary_row", "tax_summary_row", "metadata_row"}:
+                if self.FOOTER_SIGNAL_RE.search(text):
+                    footer_signal_count += 1
+                if self._text_features(text)["is_money"]:
+                    non_item_numeric_outlier_count += 1
+
+        return {
+            "header_votes": header_votes,
+            "footer_signal_count": footer_signal_count,
+            "non_item_numeric_outlier_count": non_item_numeric_outlier_count,
+        }
+
     def _base_scores(self, profile: Dict[str, Any]) -> Dict[str, float]:
         sample_size = max(1, profile["sample_size"])
         expiry_ratio = profile["expiry_pattern_count"] / sample_size
@@ -230,6 +274,15 @@ class SemanticColumnClassifier:
             scores[ColumnSemantics.RATE] += money_score
             scores[ColumnSemantics.TAXABLE_VALUE] += money_score * right_side
             scores[ColumnSemantics.AMOUNT] += money_score * (1.0 + right_side)
+
+        for semantic_type, count in profile.get("header_votes", {}).items():
+            if semantic_type in scores:
+                scores[semantic_type] += min(3.0, count * 2.0)
+
+        if profile.get("footer_signal_count", 0):
+            penalty = min(1.5, profile["footer_signal_count"] * 0.5)
+            for semantic_type in (ColumnSemantics.GST, ColumnSemantics.TAXABLE_VALUE, ColumnSemantics.AMOUNT):
+                scores[semantic_type] = max(0.0, scores[semantic_type] - penalty)
 
         return scores
 
@@ -351,10 +404,13 @@ class SemanticColumnClassifier:
                 continue
 
             profile = self._column_profile(region, col_id, active_cells)
+            profile.update(self._column_context(region, col_id, row_roles))
             scores = self._base_scores(profile)
             profiles[col_id] = profile
             scores_by_col[col_id] = scores
             sample_size = max(1, profile["sample_size"])
+            required_support = 2 if len(item_row_ids) >= 2 else 1
+            sufficient_row_support = profile["unique_row_support"] >= required_support
 
             expiry_ratio = self._ratio(profile, "expiry_pattern_count")
             hsn_ratio = self._ratio(profile, "hsn_pattern_count")
@@ -365,7 +421,7 @@ class SemanticColumnClassifier:
             compound_qty_ratio = self._ratio(profile, "compound_qty_pattern_count")
             gst_small_ratio = self._ratio(profile, "gst_small_value_count")
             quantity_eligible, quantity_reason = self._quantity_candidate_reason(profile)
-            if quantity_eligible:
+            if quantity_eligible and sufficient_row_support:
                 quantity_column_candidates.append({
                     "col_id": col_id,
                     "reason": quantity_reason,
@@ -386,6 +442,9 @@ class SemanticColumnClassifier:
                 })
 
             amount_eligible, amount_reasons = self._strict_amount_candidate(profile)
+            if amount_eligible and not sufficient_row_support:
+                amount_eligible = False
+                amount_reasons = [*amount_reasons, "insufficient_row_support_for_semantics"]
             if amount_eligible:
                 amount_column_candidates.append({
                     "col_id": col_id,
@@ -412,27 +471,29 @@ class SemanticColumnClassifier:
                 and hsn_ratio < 0.25
                 and gst_small_ratio < 0.55
             )
-            if money_like_candidate and col_id not in money_candidates:
+            if money_like_candidate and sufficient_row_support and col_id not in money_candidates:
                 money_candidates.append(col_id)
 
             if profile["alpha_density"] >= 0.35 and profile["right_side_score"] <= 0.6:
                 product_column_candidates.append(col_id)
-            if expiry_ratio >= 0.25:
+            if expiry_ratio >= 0.25 and sufficient_row_support:
                 expiry_column_candidates.append(col_id)
-            if batch_ratio >= 0.25:
+            if batch_ratio >= 0.25 and sufficient_row_support:
                 batch_column_candidates.append(col_id)
-            if hsn_ratio >= 0.25:
+            if hsn_ratio >= 0.25 and sufficient_row_support:
                 hsn_column_candidates.append(col_id)
-            if gst_ratio >= 0.25 or gst_small_ratio >= 0.55:
+            if sufficient_row_support and (gst_ratio >= 0.25 or gst_small_ratio >= 0.55):
                 gst_column_candidates.append(col_id)
 
-            if expiry_ratio >= 0.35:
+            if sufficient_row_support and expiry_ratio >= 0.35:
                 hard_semantics[col_id] = ColumnSemantics.EXPIRY
-            elif hsn_ratio >= 0.35:
+            elif sufficient_row_support and hsn_ratio >= 0.35:
                 hard_semantics[col_id] = ColumnSemantics.HSN
-            elif batch_ratio >= 0.35 and profile["alpha_density"] >= 0.12:
+            elif sufficient_row_support and batch_ratio >= 0.35 and profile["alpha_density"] >= 0.12:
                 hard_semantics[col_id] = ColumnSemantics.BATCH
             elif (
+                sufficient_row_support
+                and
                 (gst_ratio >= 0.45 or gst_small_ratio >= 0.55)
                 and profile["right_side_score"] >= 0.65
                 and money_ratio <= 0.7
@@ -441,12 +502,15 @@ class SemanticColumnClassifier:
             elif profile["alpha_density"] >= 0.35 and profile["right_side_score"] <= 0.55:
                 hard_semantics[col_id] = ColumnSemantics.PRODUCT
             elif (
-                quantity_eligible
-                or (
-                    qty_ratio >= 0.45
-                    and profile["alpha_density"] <= 0.2
-                    and money_ratio < 0.35
-                    and not self._strong_non_amount_signal(profile)
+                sufficient_row_support
+                and (
+                    quantity_eligible
+                    or (
+                        qty_ratio >= 0.45
+                        and profile["alpha_density"] <= 0.2
+                        and money_ratio < 0.35
+                        and not self._strong_non_amount_signal(profile)
+                    )
                 )
             ):
                 quantity_candidates.append(col_id)
@@ -460,6 +524,8 @@ class SemanticColumnClassifier:
                     **self._round_metrics(profile),
                     "weighted_votes": {k: round(v, 3) for k, v in scores.items()},
                     "amount_eligible": amount_eligible,
+                    "required_row_support": required_support,
+                    "sufficient_row_support": sufficient_row_support,
                     "inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
                 },
             }
