@@ -588,7 +588,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "mapped_token_count": 0,
                 "non_empty_cell_ratio": 0.0,
                 "has_amount_col": 0.0,
-                "math_score": 0.0
+                "math_score": 0.0,
+                "status": "FAIL",
+                "missing_req_cols": ["amount", "quantity", "rate", "product"],
+                "quality_penalty": 0.0,
+                "semantic_mismatches": 0,
+                "structural_failures": 0,
+                "financial_failures": 0,
+                "item_row_ratio": 0.0,
+                "non_item_ratio": 0.0
             }
         
         row_count = len(tr.rows)
@@ -599,7 +607,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "mapped_token_count": 0,
                 "non_empty_cell_ratio": 0.0,
                 "has_amount_col": 0.0,
-                "math_score": 0.0
+                "math_score": 0.0,
+                "status": "FAIL",
+                "missing_req_cols": ["amount", "quantity", "rate", "product"],
+                "quality_penalty": 0.0,
+                "semantic_mismatches": 0,
+                "structural_failures": 0,
+                "financial_failures": 0,
+                "item_row_ratio": 0.0,
+                "non_item_ratio": 0.0
             }
 
         # For graph candidate, we perform mapping, multiline merging, and stability scores first
@@ -652,14 +668,78 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         else:
             math_score = temp_invoice_recon.get("integrity_score", 0.0)
 
-        # Unified ranking score formula
+        # 7. Row Validation & Quality Metrics
+        temp_validator = RowValidator(semantic_column_cache={tr.table_id: temp_semantic_res})
+        val_results = temp_validator.validate_table(tr)
+        
+        semantic_mismatches = val_results.get("semantic_mismatches", 0)
+        structural_failures = val_results.get("structural_failures", 0)
+        financial_failures = val_results.get("financial_failures", 0)
+
+        # Check for required semantic columns: rate, amount, quantity, product
+        final_vals = {str(v).lower() for v in final_semantics.values()}
+        missing_req_cols = []
+        if 'amount' not in final_vals:
+            missing_req_cols.append('amount')
+        if not any(k in final_vals for k in ('quantity', 'qty', 'free_quantity')):
+            missing_req_cols.append('quantity')
+        if 'rate' not in final_vals:
+            missing_req_cols.append('rate')
+        if not any(k in final_vals for k in ('product', 'drug_name')):
+            missing_req_cols.append('product')
+
+        # Row Role Metrics
+        role_metrics = classify_row_roles(tr)
+        item_rows = role_metrics.get("item_rows_count", 0)
+        non_item_rows = (
+            role_metrics.get("footer_rows_count", 0) +
+            role_metrics.get("tax_rows_count", 0) +
+            role_metrics.get("metadata_rows_count", 0) +
+            role_metrics.get("unknown_rows_count", 0)
+        )
+        item_row_ratio = item_rows / row_count if row_count > 0 else 0.0
+        non_item_ratio = non_item_rows / row_count if row_count > 0 else 0.0
+
+        # Calculate Quality Penalty
+        quality_penalty = 0.0
+        
+        # - reconciliation status FAIL or math score < 75
+        if status == "FAIL" or math_score < 75.0:
+            quality_penalty += 30.0
+            
+        # - missing required semantic columns, especially rate/amount/quantity/product
+        quality_penalty += len(missing_req_cols) * 15.0
+        
+        # - high semantic_mismatches
+        quality_penalty += semantic_mismatches * 3.0
+        
+        # - high structural_fail count
+        quality_penalty += structural_failures * 5.0
+        
+        # - high financial_fail count
+        quality_penalty += financial_failures * 5.0
+        
+        # - high footer/tax/metadata/unknown row ratio
+        if non_item_ratio > 0.50:
+            quality_penalty += 15.0
+            
+        # - low item_row ratio
+        if item_row_ratio < 0.40:
+            quality_penalty += 20.0
+            
+        # - very low non_empty_cell_ratio (< 0.20)
+        if non_empty_cell_ratio < 0.20:
+            quality_penalty += 25.0
+
+        # Unified ranking score formula (with reduced density metrics influence)
         rank_score = (
             math_score +
             (30.0 if has_amount_col else 0.0) +
-            (row_count * 1.5) +
-            (mapped_token_count * 0.2) +
+            (row_count * 0.5) +  # Reduced row count influence from 1.5 to 0.5
+            (mapped_token_count * 0.05) +  # Reduced mapped token count influence from 0.2 to 0.05
             (non_empty_cell_ratio * 20.0) +
-            (avg_row_stability * 10.0)
+            (avg_row_stability * 10.0) -
+            quality_penalty
         )
         
         metrics = {
@@ -668,7 +748,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "mapped_token_count": mapped_token_count,
             "non_empty_cell_ratio": round(non_empty_cell_ratio, 4),
             "has_amount_col": has_amount_col,
-            "math_score": math_score
+            "math_score": math_score,
+            "status": status,
+            "missing_req_cols": missing_req_cols,
+            "quality_penalty": quality_penalty,
+            "semantic_mismatches": semantic_mismatches,
+            "structural_failures": structural_failures,
+            "financial_failures": financial_failures,
+            "item_row_ratio": round(item_row_ratio, 4),
+            "non_item_ratio": round(non_item_ratio, 4)
         }
         return rank_score, metrics
 
@@ -685,7 +773,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "mapped_token_count": 0,
         "non_empty_cell_ratio": 0.0,
         "has_amount_col": 0.0,
-        "math_score": 0.0
+        "math_score": 0.0,
+        "status": "FAIL",
+        "missing_req_cols": ["amount", "quantity", "rate", "product"],
+        "quality_penalty": 0.0,
+        "semantic_mismatches": 0,
+        "structural_failures": 0,
+        "financial_failures": 0,
+        "item_row_ratio": 0.0,
+        "non_item_ratio": 0.0
     }
     
     if graph_rows and graph_cols:
@@ -696,21 +792,58 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         )
         graph_score, graph_metrics = evaluate_candidate_table(graph_candidate, is_graph=True)
 
+    # Deterministic Blocking Rules
+    graph_selection_blocked_reason = None
+    heuristic_collapsed_or_unusable = (
+        not heuristic_candidate
+        or len(heuristic_candidate.rows) < 3
+        or len(heuristic_candidate.columns) < 3
+    )
+    
+    graph_reconciliation_fail = (graph_metrics.get("status") == "FAIL")
+    heuristic_reconciliation_pass_or_warn = (heuristic_metrics.get("status") in ("PASS", "WARN"))
+    graph_missing_req_cols = len(graph_metrics.get("missing_req_cols", [])) > 0
+    
+    if graph_candidate and len(graph_candidate.rows) > 0:
+        # Rule 3: cannot beat heuristic if graph reconciliation is FAIL and heuristic is PASS/WARN
+        if graph_reconciliation_fail and heuristic_reconciliation_pass_or_warn:
+            graph_selection_blocked_reason = "reconciliation_fail_vs_pass_or_warn"
+        # Rule 4: cannot be selected if required semantic columns are missing unless heuristic is collapsed/unusable
+        elif graph_missing_req_cols and not heuristic_collapsed_or_unusable:
+            graph_selection_blocked_reason = "missing_semantic_columns_vs_heuristic"
+
     # Topology Decision Logic
     selected_topology_source = "heuristic_anchor"
+    selected_candidate_reason = "default_heuristic"
     margin = 15.0
     
     if not heuristic_candidate or len(heuristic_candidate.rows) == 0:
         if graph_candidate and len(graph_candidate.rows) > 0:
             selected_topology_source = "document_graph_candidate"
-    elif graph_candidate and graph_score > heuristic_score + margin:
-        selected_topology_source = "document_graph_candidate"
+            selected_candidate_reason = "heuristic_empty_graph_available"
+    elif graph_candidate and len(graph_candidate.rows) > 0:
+        if graph_selection_blocked_reason:
+            selected_topology_source = "heuristic_anchor"
+            selected_candidate_reason = f"heuristic_preferred_due_to_block_{graph_selection_blocked_reason}"
+        elif graph_score > heuristic_score + margin:
+            selected_topology_source = "document_graph_candidate"
+            selected_candidate_reason = f"graph_score_beats_heuristic_with_margin_{graph_score - heuristic_score:.2f}"
+        else:
+            selected_topology_source = "heuristic_anchor"
+            selected_candidate_reason = f"heuristic_score_higher_or_within_margin (diff: {heuristic_score - graph_score:.2f})"
 
     logger.info(
         f"[TOPOLOGY RANKING] Heuristic Score: {heuristic_score:.2f} ({heuristic_metrics}) | "
         f"Graph Score: {graph_score:.2f} ({graph_metrics}) | "
-        f"Selected Topology Source: {selected_topology_source}"
+        f"Selected Topology Source: {selected_topology_source} | "
+        f"Reason: {selected_candidate_reason} | Blocked: {graph_selection_blocked_reason}"
     )
+
+    # Telemetry logging
+    tsr_metadata["graph_selection_blocked_reason"] = graph_selection_blocked_reason
+    tsr_metadata["graph_quality_penalty"] = graph_metrics.get("quality_penalty", 0.0)
+    tsr_metadata["heuristic_quality_penalty"] = heuristic_metrics.get("quality_penalty", 0.0)
+    tsr_metadata["selected_candidate_reason"] = selected_candidate_reason
 
     # Promote graph candidate if selected
     if selected_topology_source == "document_graph_candidate":
