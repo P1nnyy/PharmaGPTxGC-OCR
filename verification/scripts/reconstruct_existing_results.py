@@ -32,7 +32,7 @@ def main():
                 data = json.load(f)
                 
             metadata = data.setdefault("metadata", {})
-            blocks = metadata.get("blocks", [])
+            blocks = metadata.get("blocks", []) or data.get("blocks", [])
             
             if not blocks:
                 print(f"⚠️  No blocks found in {filename}, skipping.")
@@ -44,7 +44,7 @@ def main():
             # Since primary engine is heuristic_anchor, no image input is required
             reconstruct_res = reconstruct_layout(
                 blocks=blocks,
-                debug=True,
+                debug=False,
                 reconstruct_mode="heuristic_anchor",
                 image=None,
                 benchmark_mode=False
