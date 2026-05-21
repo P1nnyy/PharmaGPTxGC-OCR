@@ -108,6 +108,11 @@ def _graph_telemetry_block(
     document_graph: Dict[str, Any],
     graph_fallback_used: bool,
     graph_rejection_reason: str,
+    graph_fallback_cell_count: int = 0,
+    graph_fallback_non_empty_cell_count: int = 0,
+    graph_fallback_mapped_token_count: int = 0,
+    graph_fallback_empty_cell_ratio: float = 0.0,
+    graph_fallback_item_row_count: int = 0,
 ) -> Dict[str, Any]:
     """Build the canonical graph telemetry dict reused across return paths."""
     dg_metrics = document_graph.get("metrics", {})
@@ -120,6 +125,11 @@ def _graph_telemetry_block(
         "isolated_node_count": dg_metrics.get("isolated_node_count", 0),
         "max_row_cluster_size": dg_metrics.get("max_row_cluster_size", 0),
         "column_band_stability": dg_metrics.get("column_band_stability", 0.0),
+        "graph_fallback_cell_count": graph_fallback_cell_count,
+        "graph_fallback_non_empty_cell_count": graph_fallback_non_empty_cell_count,
+        "graph_fallback_mapped_token_count": graph_fallback_mapped_token_count,
+        "graph_fallback_empty_cell_ratio": graph_fallback_empty_cell_ratio,
+        "graph_fallback_item_row_count": graph_fallback_item_row_count,
     }
 
 
@@ -285,6 +295,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     graph_fallback_used = False
     graph_rejection_reason = "reconstruction_confidence_high"
+
+    # Fallback telemetry initialization
+    graph_fallback_cell_count = 0
+    graph_fallback_non_empty_cell_count = 0
+    graph_fallback_mapped_token_count = 0
+    graph_fallback_empty_cell_ratio = 0.0
+    graph_fallback_item_row_count = 0
 
     # Ensure blocks have IDs for mapping provenance
     for i, b in enumerate(blocks):
@@ -473,7 +490,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "table_count": 0,
                 "topology_debug": topology_debug,
                 "column_anchor_debug": {},
-                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+                **_graph_telemetry_block(
+                    document_graph=document_graph,
+                    graph_fallback_used=graph_fallback_used,
+                    graph_rejection_reason=graph_rejection_reason,
+                    graph_fallback_cell_count=graph_fallback_cell_count,
+                    graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                    graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                    graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                    graph_fallback_item_row_count=graph_fallback_item_row_count,
+                ),
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -484,7 +510,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                         "row_confidence_variance": 0.0
                     },
                     "document_graph_metrics": document_graph.get("metrics", {}),
-                    **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+                    **_graph_telemetry_block(
+                        document_graph=document_graph,
+                        graph_fallback_used=graph_fallback_used,
+                        graph_rejection_reason=graph_rejection_reason,
+                        graph_fallback_cell_count=graph_fallback_cell_count,
+                        graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                        graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                        graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                        graph_fallback_item_row_count=graph_fallback_item_row_count,
+                    ),
                 },
                 "fast_fail": True,
                 **tsr_metadata,
@@ -1005,7 +1040,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 **table_routing_diagnostics,
                 "column_anchor_debug": column_anchor_debug,
                 "anchor_repair": anchor_repair,
-                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+                **_graph_telemetry_block(
+                    document_graph=document_graph,
+                    graph_fallback_used=graph_fallback_used,
+                    graph_rejection_reason=graph_rejection_reason,
+                    graph_fallback_cell_count=graph_fallback_cell_count,
+                    graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                    graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                    graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                    graph_fallback_item_row_count=graph_fallback_item_row_count,
+                ),
                 "instrumentation": {
                     "tsr_contribution_percent": tsr_contribution_percent,
                     "heuristic_fallback_used": heuristic_fallback_used,
@@ -1021,7 +1065,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "row_role_metrics": row_role_metrics,
                     "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                     "document_graph_metrics": document_graph.get("metrics", {}),
-                    **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+                    **_graph_telemetry_block(
+                        document_graph=document_graph,
+                        graph_fallback_used=graph_fallback_used,
+                        graph_rejection_reason=graph_rejection_reason,
+                        graph_fallback_cell_count=graph_fallback_cell_count,
+                        graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                        graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                        graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                        graph_fallback_item_row_count=graph_fallback_item_row_count,
+                    ),
                 },
                 "document_graph_metrics": document_graph.get("metrics", {}),
                 "vendor_template_prior": vendor_template_prior,
@@ -1030,6 +1083,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "tsr_status": tsr_status_metric
             }
         }
+
+    # --- Graph Fallback Effectiveness Telemetry ---
+    if graph_fallback_used and table_bundle.main_table:
+        fallback_tr = table_bundle.main_table
+        graph_fallback_cell_count = len(fallback_tr.cells)
+        fallback_mapped_tokens = set()
+        fallback_empty_cells = 0
+        for cell in fallback_tr.cells:
+            if cell.mapped_block_ids:
+                fallback_mapped_tokens.update(cell.mapped_block_ids)
+            else:
+                fallback_empty_cells += 1
+        graph_fallback_non_empty_cell_count = graph_fallback_cell_count - fallback_empty_cells
+        graph_fallback_mapped_token_count = len(fallback_mapped_tokens)
+        graph_fallback_empty_cell_ratio = round(fallback_empty_cells / graph_fallback_cell_count, 4) if graph_fallback_cell_count > 0 else 0.0
+        
+        # Calculate item row count dynamically
+        graph_fallback_item_row_count = sum(
+            1 for row in fallback_tr.rows
+            if getattr(row, "row_role", "unknown_row") == "item_row"
+        )
 
     # --- Metrics Logging ---
     total_cells = sum(len(r.cells) for r in table_regions)
@@ -1235,7 +1309,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "confidence_hierarchy": confidence_hierarchy,
             "document_graph_metrics": document_graph.get("metrics", {}),
             "vendor_template_prior": vendor_template_prior,
-            **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+            **_graph_telemetry_block(
+                document_graph=document_graph,
+                graph_fallback_used=graph_fallback_used,
+                graph_rejection_reason=graph_rejection_reason,
+                graph_fallback_cell_count=graph_fallback_cell_count,
+                graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                graph_fallback_item_row_count=graph_fallback_item_row_count,
+            ),
             "instrumentation": {
                 "tsr_contribution_percent": tsr_contribution_percent,
                 "heuristic_fallback_used": heuristic_fallback_used,
@@ -1258,7 +1341,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 },
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                 "document_graph_metrics": document_graph.get("metrics", {}),
-                **_graph_telemetry_block(document_graph, graph_fallback_used, graph_rejection_reason),
+                **_graph_telemetry_block(
+                    document_graph=document_graph,
+                    graph_fallback_used=graph_fallback_used,
+                    graph_rejection_reason=graph_rejection_reason,
+                    graph_fallback_cell_count=graph_fallback_cell_count,
+                    graph_fallback_non_empty_cell_count=graph_fallback_non_empty_cell_count,
+                    graph_fallback_mapped_token_count=graph_fallback_mapped_token_count,
+                    graph_fallback_empty_cell_ratio=graph_fallback_empty_cell_ratio,
+                    graph_fallback_item_row_count=graph_fallback_item_row_count,
+                ),
             },
             "fast_fail": False,
             **tsr_metadata,
