@@ -11,7 +11,7 @@ This report presents a thorough topological and mathematical validation audit of
 | 38e5c640-96c4-4268-b092-58de09e63216.JPG.json | document_graph_candidate | 23 / 23 | 23 | Yes/Yes/Yes/Yes | 6 / 8 | No | No | Yes | Clear |
 | 49bdab61-6a62-469d-a942-5b41bf02eb6c.JPG.json | document_graph_candidate | 16 / 16 | 16 | Yes/Yes/Yes/Yes | 0 / 7 | Yes | Yes | Yes | Clear |
 | 7d4c3bb9-2c0b-4c75-b7d4-7c23244401bb.JPG.json | document_graph_fallback | 14 / 14 | 14 | No/Yes/No/Yes | 0 / 0 | No | No | Yes | Clear |
-| 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json | document_graph_candidate | 18 / 18 | 18 | Yes/Yes/Yes/Yes | 0 / 9 | Yes | Yes | Yes | Clear |
+| 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json | heuristic_anchor | 11 / 11 | 11 | Yes/Yes/Yes/Yes | 0 / 6 | Yes | Yes | Yes | Clear |
 | 9ed2543c-2e03-42ea-9fec-c68ee8c39625.JPG.json | document_graph_fallback | 19 / 19 | 19 | Yes/Yes/Yes/Yes | 0 / 10 | No | No | No | Clear |
 | caf60269-bcd3-43e9-ad8c-2293eefbdbcb.JPG.json | document_graph_candidate | 13 / 13 | 13 | Yes/Yes/No/Yes | 0 / 0 | No | No | No | Clear |
 | cb07d17e-fd1c-4ff6-8b05-7b699189485d.JPG.json | document_graph_fallback | 11 / 11 | 11 | Yes/Yes/Yes/Yes | 0 / 0 | Yes | No | Yes | Clear |
@@ -113,9 +113,9 @@ This report presents a thorough topological and mathematical validation audit of
 
 ### 4. 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json
 
-- **Selected Topology Source**: `document_graph_candidate`
-- **Total Table Rows**: 18
-- **Total Item Rows**: 18
+- **Selected Topology Source**: `heuristic_anchor`
+- **Total Table Rows**: 11
+- **Total Item Rows**: 11
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
@@ -123,7 +123,7 @@ This report presents a thorough topological and mathematical validation audit of
   - Product Column: `Yes`
 - **Row-Level Accounting Math Integrity**:
   - Row Math Passes: 0
-  - Row Math Failures: 9
+  - Row Math Failures: 6
 - **Invoice-Level Financial Reconciliation**:
   - Invoice Subtotal Match: `Yes` (Expected: 2291.0, Parsed: 2291.0)
   - Invoice Grand Total Match: `Yes`
@@ -238,6 +238,6 @@ This report presents a thorough topological and mathematical validation audit of
 
 ## 3. Analysis & Key Findings
 
-1. **Topology Distribution**: Out of the 7 baseline invoices, **4** successfully selected the promoted `document_graph_candidate`, **0** selected the `heuristic_anchor` topology, and **3** activated the `document_graph_fallback` safety path. This distribution demonstrates the quality-aware ranking model working as intended by using heuristic anchor or fallback paths when the raw document graph is either unreconciled or missing critical fields.
+1. **Topology Distribution**: Out of the 7 baseline invoices, **3** successfully selected the promoted `document_graph_candidate`, **1** selected the `heuristic_anchor` topology, and **3** activated the `document_graph_fallback` safety path. This distribution demonstrates the quality-aware ranking model working as intended by using heuristic anchor or fallback paths when the raw document graph is either unreconciled or missing critical fields.
 2. **Verification of Blocking Rules**: The deterministic blocking rules successfully prevented graph over-selection. When graph candidates had financial failures or lacked crucial semantic columns, they were appropriately penalized or blocked, restoring maximum mathematical reconciliation accuracy and structural safety.
 3. **Indian Pharma GST Verification**: In 100% of the cases where tax details were present, intra-state CGST + SGST or inter-state IGST equations perfectly reconciled, reinforcing that quality-aware candidate selection enhances semantic and financial compliance.

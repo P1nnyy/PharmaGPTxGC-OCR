@@ -804,7 +804,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "structural_failures": 0,
                 "financial_failures": 0,
                 "item_row_ratio": 0.0,
-                "non_item_ratio": 0.0
+                "non_item_ratio": 0.0,
+                "row_math_pass_count": 0,
+                "row_math_fail_count": 0,
+                "row_math_failure_rate": 0.0
             }
         
         row_count = len(tr.rows)
@@ -823,7 +826,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "structural_failures": 0,
                 "financial_failures": 0,
                 "item_row_ratio": 0.0,
-                "non_item_ratio": 0.0
+                "non_item_ratio": 0.0,
+                "row_math_pass_count": 0,
+                "row_math_fail_count": 0,
+                "row_math_failure_rate": 0.0
             }
 
         # For graph candidate, we perform mapping, multiline merging, and stability scores first
@@ -891,6 +897,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         semantic_mismatches = val_results.get("semantic_mismatches", 0)
         structural_failures = val_results.get("structural_failures", 0)
         financial_failures = val_results.get("financial_failures", 0)
+
+        # Row math metrics
+        row_math_pass_count = val_results.get("financial_passes", 0)
+        row_math_fail_count = val_results.get("financial_failures", 0)
+        total_row_math = row_math_pass_count + row_math_fail_count
+        row_math_failure_rate = (row_math_fail_count / total_row_math) if total_row_math > 0 else 0.0
 
         # Check for required semantic columns: rate, amount, quantity, product
         final_vals = {str(v).lower() for v in final_semantics.values()}
@@ -972,7 +984,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "structural_failures": structural_failures,
             "financial_failures": financial_failures,
             "item_row_ratio": round(item_row_ratio, 4),
-            "non_item_ratio": round(non_item_ratio, 4)
+            "non_item_ratio": round(non_item_ratio, 4),
+            "row_math_pass_count": row_math_pass_count,
+            "row_math_fail_count": row_math_fail_count,
+            "row_math_failure_rate": round(row_math_failure_rate, 4)
         }
         return rank_score, metrics
 
@@ -997,7 +1012,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "structural_failures": 0,
         "financial_failures": 0,
         "item_row_ratio": 0.0,
-        "non_item_ratio": 0.0
+        "non_item_ratio": 0.0,
+        "row_math_pass_count": 0,
+        "row_math_fail_count": 0,
+        "row_math_failure_rate": 0.0
     }
     
     if graph_rows and graph_cols:
@@ -1027,6 +1045,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         # Rule 4: cannot be selected if required semantic columns are missing unless heuristic is collapsed/unusable
         elif graph_missing_req_cols and not heuristic_collapsed_or_unusable:
             graph_selection_blocked_reason = "missing_semantic_columns_vs_heuristic"
+        
+        # Row Math Regression Guard
+        if not graph_selection_blocked_reason:
+            heur_recon_pass = (heuristic_metrics.get("status") == "PASS")
+            graph_recon_pass_warn = (graph_metrics.get("status") in ("PASS", "WARN"))
+            heur_math_fail = heuristic_metrics.get("row_math_fail_count", 0)
+            graph_math_fail = graph_metrics.get("row_math_fail_count", 0)
+            
+            if heur_recon_pass and graph_recon_pass_warn and (graph_math_fail > heur_math_fail + 1):
+                graph_selection_blocked_reason = "graph_row_math_regression"
+                
+        # Missing Critical Semantics Guard
+        if not graph_selection_blocked_reason:
+            graph_missing_amount_rate = any(col in graph_metrics.get("missing_req_cols", []) for col in ("amount", "rate"))
+            heur_has_amount_rate = not any(col in heuristic_metrics.get("missing_req_cols", []) for col in ("amount", "rate"))
+            
+            if graph_missing_amount_rate and heur_has_amount_rate and not heuristic_collapsed_or_unusable:
+                graph_selection_blocked_reason = "graph_missing_critical_semantics"
 
     # Topology Decision Logic
     selected_topology_source = "heuristic_anchor"
@@ -1060,6 +1096,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     tsr_metadata["graph_quality_penalty"] = graph_metrics.get("quality_penalty", 0.0)
     tsr_metadata["heuristic_quality_penalty"] = heuristic_metrics.get("quality_penalty", 0.0)
     tsr_metadata["selected_candidate_reason"] = selected_candidate_reason
+    tsr_metadata["heuristic_row_math_fail_count"] = heuristic_metrics.get("row_math_fail_count", 0)
+    tsr_metadata["graph_row_math_fail_count"] = graph_metrics.get("row_math_fail_count", 0)
 
     # Promote graph candidate if selected
     if selected_topology_source == "document_graph_candidate":
