@@ -356,7 +356,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     # Step 3: TSR Table Region Detection with Confidence-Gated Fallback
     table_regions = []
-    tsr_metadata = {}
+    tsr_metadata = {
+        "graph_fallback_product_repair_count": 0,
+        "graph_fallback_amount_repair_count": 0,
+        "graph_fallback_numeric_reassignment_count": 0,
+        "graph_fallback_suspicious_qty_count": 0,
+    }
     ppstructure_enabled = bool(
         settings.ENABLE_PPSTRUCTURE
         or str(settings.TSR_PRIMARY_ENGINE).lower() == "ppstructure"
@@ -823,7 +828,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
         # For graph candidate, we perform mapping, multiline merging, and stability scores first
         if is_graph:
-            map_tokens_to_cells(ocr_blocks, [tr], debug=False)
+            from services.layout_pipeline.graph_fallback import assign_tokens_to_graph_cells
+            rep_counts = assign_tokens_to_graph_cells(tr, ocr_blocks, graph_rows, graph_cols)
+            for k in ["graph_fallback_product_repair_count", "graph_fallback_amount_repair_count", "graph_fallback_numeric_reassignment_count", "graph_fallback_suspicious_qty_count"]:
+                if k not in tsr_metadata:
+                    tsr_metadata[k] = 0
+            tsr_metadata["graph_fallback_product_repair_count"] += rep_counts.get("product_repair_count", 0)
+            tsr_metadata["graph_fallback_amount_repair_count"] += rep_counts.get("amount_repair_count", 0)
+            tsr_metadata["graph_fallback_numeric_reassignment_count"] += rep_counts.get("numeric_reassignment_count", 0)
+            tsr_metadata["graph_fallback_suspicious_qty_count"] += rep_counts.get("suspicious_qty_count", 0)
             tr, _ = merge_multiline_table_rows(tr, ocr_blocks)
             tr = update_row_stability_scores(tr, ocr_blocks)
             
@@ -1089,7 +1102,15 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     graph_cols=graph_cols,
                     graph_confidence=document_graph.get("graph_confidence", 0.5)
                 )
-                map_tokens_to_cells(ocr_blocks, [fallback_tr], debug=(debug and not benchmark_mode))
+                from services.layout_pipeline.graph_fallback import assign_tokens_to_graph_cells
+                rep_counts = assign_tokens_to_graph_cells(fallback_tr, ocr_blocks, graph_rows, graph_cols)
+                for k in ["graph_fallback_product_repair_count", "graph_fallback_amount_repair_count", "graph_fallback_numeric_reassignment_count", "graph_fallback_suspicious_qty_count"]:
+                    if k not in tsr_metadata:
+                        tsr_metadata[k] = 0
+                tsr_metadata["graph_fallback_product_repair_count"] += rep_counts.get("product_repair_count", 0)
+                tsr_metadata["graph_fallback_amount_repair_count"] += rep_counts.get("amount_repair_count", 0)
+                tsr_metadata["graph_fallback_numeric_reassignment_count"] += rep_counts.get("numeric_reassignment_count", 0)
+                tsr_metadata["graph_fallback_suspicious_qty_count"] += rep_counts.get("suspicious_qty_count", 0)
                 fallback_tr, audit = merge_multiline_table_rows(fallback_tr, ocr_blocks)
                 fallback_tr = update_row_stability_scores(fallback_tr, ocr_blocks)
 
