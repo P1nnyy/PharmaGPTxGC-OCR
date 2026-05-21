@@ -576,8 +576,112 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     # --- GRAPH FALLBACK & RANKED TOPOLOGY ENGINE ---
     # Retrieve graph candidate rows/cols
-    graph_rows = document_graph.get("graph_candidate_rows", [])
+    raw_graph_rows = document_graph.get("graph_candidate_rows", [])
     graph_cols = document_graph.get("graph_candidate_columns", [])
+
+    import re
+    graph_rows = []
+    graph_rows_raw_count = len(raw_graph_rows)
+    graph_rows_dropped_reasons = {}
+
+    for r in raw_graph_rows:
+        text = r.get("text", "")
+        text_upper = text.upper()
+        hint = r.get("row_type_hint", "unknown")
+
+        # 1. Exclude specific row_type_hints
+        if hint in ("footer_candidate", "metadata_candidate", "tax_candidate"):
+            reason = f"row_type_hint_{hint}"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        # 2. Only include item_candidate and header_candidate
+        if hint not in ("item_candidate", "header_candidate"):
+            reason = f"row_type_hint_{hint}"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        # 3. Exclude amount-in-words rows
+        is_amount_in_words = (
+            "AMOUNT IN WORDS" in text_upper or
+            "AMT IN WORDS" in text_upper or
+            "RUPEES ONLY" in text_upper or
+            "RUPEES" in text_upper or
+            "WORDS ONLY" in text_upper or
+            "RUPEES IN WORDS" in text_upper or
+            re.search(r"RUPEES\s+[A-Za-z\s]+ONLY", text_upper) is not None
+        )
+        if is_amount_in_words:
+            reason = "amount_in_words"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        # 4. Exclude terms/conditions rows
+        is_terms_conditions = (
+            "TERMS & CONDITIONS" in text_upper or
+            "TERMS AND CONDITIONS" in text_upper or
+            "SUBJECT TO" in text_upper or
+            "JURISDICTION" in text_upper or
+            "GOODS ONCE SOLD" in text_upper or
+            "INTEREST @" in text_upper or
+            "DELAYED PAYMENT" in text_upper
+        )
+        if is_terms_conditions:
+            reason = "terms_conditions"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        # 5. Exclude bank/signature rows
+        is_bank_signature = (
+            "SIGNATURE" in text_upper or
+            "AUTHORISED SIGN" in text_upper or
+            "AUTH. SIGN" in text_upper or
+            "BANK DETAIL" in text_upper or
+            "IFSC CODE" in text_upper or
+            "A/C NO" in text_upper or
+            "ACCOUNT NO" in text_upper or
+            "FOR AUTHORISED" in text_upper or
+            "PROP." in text_upper or
+            "PARTNER" in text_upper
+        )
+        if is_bank_signature:
+            reason = "bank_signature"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        # 6. Exclude GST summary/tax footer rows unless table role is tax summary (default main table is items, so we exclude)
+        is_tax_footer = (
+            "GST SUMMARY" in text_upper or
+            "TAX SUMMARY" in text_upper or
+            "CGST RATE" in text_upper or
+            "SGST RATE" in text_upper or
+            "IGST RATE" in text_upper or
+            "TAXABLE VALUE" in text_upper or
+            "TAXABLE VAL" in text_upper or
+            ("CGST" in text_upper and "SGST" in text_upper and "TAXABLE" in text_upper)
+        )
+        if is_tax_footer:
+            reason = "gst_summary_tax_footer"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            continue
+
+        graph_rows.append(r)
+
+    graph_rows_filtered_count = len(graph_rows)
+    graph_rows_dropped_count = graph_rows_raw_count - graph_rows_filtered_count
+
+    logger.info(
+        f"[GRAPH FILTERING] Raw Count: {graph_rows_raw_count} | "
+        f"Filtered Count: {graph_rows_filtered_count} | "
+        f"Dropped Count: {graph_rows_dropped_count} | "
+        f"Dropped Reasons: {graph_rows_dropped_reasons}"
+    )
+
+    # Telemetry
+    tsr_metadata["graph_rows_raw_count"] = graph_rows_raw_count
+    tsr_metadata["graph_rows_filtered_count"] = graph_rows_filtered_count
+    tsr_metadata["graph_rows_dropped_count"] = graph_rows_dropped_count
+    tsr_metadata["graph_rows_dropped_reasons"] = graph_rows_dropped_reasons
 
     # Helper function to evaluate and score table candidates
     def evaluate_candidate_table(tr, is_graph=False):

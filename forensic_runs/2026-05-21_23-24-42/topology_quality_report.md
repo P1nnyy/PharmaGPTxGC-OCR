@@ -8,21 +8,21 @@ This report presents a thorough topological and mathematical validation audit of
 
 | Filename | Topology Source | Row Count (Main / Page) | Item Row Count | Semantic Columns (Amt/Qty/Rate/Prod) | Row Math (P / F) | Invoice GT Match | Subtotal Match | GST Match | Density Win Flag |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 38e5c640-96c4-4268-b092-58de09e63216.JPG.json | document_graph_fallback | 28 / 28 | 28 | Yes/Yes/Yes/Yes | 1 / 8 | No | No | Yes | Clear |
-| 49bdab61-6a62-469d-a942-5b41bf02eb6c.JPG.json | document_graph_fallback | 30 / 30 | 30 | Yes/Yes/Yes/No | 0 / 7 | Yes | Yes | Yes | Clear |
-| 7d4c3bb9-2c0b-4c75-b7d4-7c23244401bb.JPG.json | document_graph_candidate | 19 / 19 | 19 | Yes/Yes/No/Yes | 0 / 2 | No | No | Yes | Clear |
-| 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json | heuristic_anchor | 11 / 11 | 11 | Yes/Yes/Yes/Yes | 0 / 6 | Yes | Yes | Yes | Clear |
-| 9ed2543c-2e03-42ea-9fec-c68ee8c39625.JPG.json | document_graph_fallback | 30 / 30 | 30 | Yes/Yes/Yes/Yes | 0 / 8 | No | No | No | Clear |
-| caf60269-bcd3-43e9-ad8c-2293eefbdbcb.JPG.json | document_graph_candidate | 18 / 18 | 18 | Yes/Yes/No/Yes | 0 / 0 | No | No | No | Clear |
-| cb07d17e-fd1c-4ff6-8b05-7b699189485d.JPG.json | document_graph_fallback | 21 / 21 | 21 | Yes/Yes/Yes/Yes | 0 / 2 | Yes | No | Yes | Clear |
+| 38e5c640-96c4-4268-b092-58de09e63216.JPG.json | document_graph_fallback | 16 / 16 | 16 | Yes/Yes/Yes/Yes | 1 / 8 | No | No | Yes | Clear |
+| 49bdab61-6a62-469d-a942-5b41bf02eb6c.JPG.json | document_graph_fallback | 13 / 13 | 13 | Yes/Yes/Yes/No | 0 / 7 | Yes | Yes | Yes | Clear |
+| 7d4c3bb9-2c0b-4c75-b7d4-7c23244401bb.JPG.json | document_graph_fallback | 7 / 7 | 7 | Yes/No/Yes/Yes | 0 / 0 | No | No | Yes | Clear |
+| 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json | document_graph_candidate | 12 / 12 | 12 | Yes/Yes/Yes/Yes | 0 / 9 | Yes | Yes | Yes | Clear |
+| 9ed2543c-2e03-42ea-9fec-c68ee8c39625.JPG.json | document_graph_fallback | 14 / 14 | 14 | Yes/Yes/Yes/No | 0 / 6 | No | No | No | Clear |
+| caf60269-bcd3-43e9-ad8c-2293eefbdbcb.JPG.json | document_graph_candidate | 5 / 5 | 5 | Yes/Yes/No/No | 0 / 0 | No | No | No | Clear |
+| cb07d17e-fd1c-4ff6-8b05-7b699189485d.JPG.json | document_graph_fallback | 5 / 5 | 5 | Yes/Yes/Yes/Yes | 0 / 2 | Yes | No | Yes | Clear |
 
 ## 2. In-Depth Invoice Quality Details
 
 ### 1. 38e5c640-96c4-4268-b092-58de09e63216.JPG.json
 
 - **Selected Topology Source**: `document_graph_fallback`
-- **Total Table Rows**: 28
-- **Total Item Rows**: 28
+- **Total Table Rows**: 16
+- **Total Item Rows**: 16
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
@@ -42,18 +42,18 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 0.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `-63.75`):
-    - Rows: 39
-    - Mapped Tokens: 112
-    - Average Row Stability: 0.6641
+  - **Document Graph Candidate** (Score: `-37.44`):
+    - Rows: 16
+    - Mapped Tokens: 78
+    - Average Row Stability: 0.9563
     - Math score: 0.0
     - Has Amount: Yes
 
 ### 2. 49bdab61-6a62-469d-a942-5b41bf02eb6c.JPG.json
 
 - **Selected Topology Source**: `document_graph_fallback`
-- **Total Table Rows**: 30
-- **Total Item Rows**: 30
+- **Total Table Rows**: 13
+- **Total Item Rows**: 13
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
@@ -73,28 +73,28 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 100.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `64.39`):
-    - Rows: 43
-    - Mapped Tokens: 117
-    - Average Row Stability: 0.6651
+  - **Document Graph Candidate** (Score: `91.78`):
+    - Rows: 14
+    - Mapped Tokens: 80
+    - Average Row Stability: 0.8786
     - Math score: 100.0
     - Has Amount: Yes
 
 ### 3. 7d4c3bb9-2c0b-4c75-b7d4-7c23244401bb.JPG.json
 
-- **Selected Topology Source**: `document_graph_candidate`
-- **Total Table Rows**: 19
-- **Total Item Rows**: 19
+- **Selected Topology Source**: `document_graph_fallback`
+- **Total Table Rows**: 7
+- **Total Item Rows**: 7
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
-  - Quantity Column: `Yes`
-  - Rate Column: `No`
+  - Quantity Column: `No`
+  - Rate Column: `Yes`
   - Product Column: `Yes`
 - **Row-Level Accounting Math Integrity**:
   - Row Math Passes: 0
-  - Row Math Failures: 2
+  - Row Math Failures: 0
 - **Invoice-Level Financial Reconciliation**:
-  - Invoice Subtotal Match: `No` (Expected: 313.61, Parsed: 1868.0)
+  - Invoice Subtotal Match: `No` (Expected: 1552.75, Parsed: 1868.0)
   - Invoice Grand Total Match: `No`
   - GST Tax Components Match: `Yes` (SGST: 44.47, CGST: 44.47, IGST: 0.00, Total: 88.94)
 - **Candidate Score Diagnostics**:
@@ -104,18 +104,18 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 0.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `-63.32`):
-    - Rows: 24
-    - Mapped Tokens: 118
-    - Average Row Stability: 0.7625
+  - **Document Graph Candidate** (Score: `-107.74`):
+    - Rows: 7
+    - Mapped Tokens: 59
+    - Average Row Stability: 1.0000
     - Math score: 0.0
-    - Has Amount: Yes
+    - Has Amount: No
 
 ### 4. 7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG.json
 
-- **Selected Topology Source**: `heuristic_anchor`
-- **Total Table Rows**: 11
-- **Total Item Rows**: 11
+- **Selected Topology Source**: `document_graph_candidate`
+- **Total Table Rows**: 12
+- **Total Item Rows**: 12
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
@@ -123,7 +123,7 @@ This report presents a thorough topological and mathematical validation audit of
   - Product Column: `Yes`
 - **Row-Level Accounting Math Integrity**:
   - Row Math Passes: 0
-  - Row Math Failures: 6
+  - Row Math Failures: 9
 - **Invoice-Level Financial Reconciliation**:
   - Invoice Subtotal Match: `Yes` (Expected: 2291.0, Parsed: 2291.0)
   - Invoice Grand Total Match: `Yes`
@@ -135,28 +135,28 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 100.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `58.09`):
-    - Rows: 46
-    - Mapped Tokens: 159
-    - Average Row Stability: 0.5848
+  - **Document Graph Candidate** (Score: `107.91`):
+    - Rows: 12
+    - Mapped Tokens: 114
+    - Average Row Stability: 1.0000
     - Math score: 100.0
     - Has Amount: Yes
 
 ### 5. 9ed2543c-2e03-42ea-9fec-c68ee8c39625.JPG.json
 
 - **Selected Topology Source**: `document_graph_fallback`
-- **Total Table Rows**: 30
-- **Total Item Rows**: 30
+- **Total Table Rows**: 14
+- **Total Item Rows**: 14
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
   - Rate Column: `Yes`
-  - Product Column: `Yes`
+  - Product Column: `No`
 - **Row-Level Accounting Math Integrity**:
   - Row Math Passes: 0
-  - Row Math Failures: 8
+  - Row Math Failures: 6
 - **Invoice-Level Financial Reconciliation**:
-  - Invoice Subtotal Match: `No` (Expected: 9593.32, Parsed: n/a)
+  - Invoice Subtotal Match: `No` (Expected: 6262.33, Parsed: n/a)
   - Invoice Grand Total Match: `No`
   - GST Tax Components Match: `No` (SGST: 0.00, CGST: 0.00, IGST: 0.00, Total: 0.00)
 - **Candidate Score Diagnostics**:
@@ -166,28 +166,28 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 75.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `-29.36`):
-    - Rows: 39
-    - Mapped Tokens: 142
-    - Average Row Stability: 0.7333
+  - **Document Graph Candidate** (Score: `15.23`):
+    - Rows: 16
+    - Mapped Tokens: 92
+    - Average Row Stability: 0.7438
     - Math score: 75.0
     - Has Amount: Yes
 
 ### 6. caf60269-bcd3-43e9-ad8c-2293eefbdbcb.JPG.json
 
 - **Selected Topology Source**: `document_graph_candidate`
-- **Total Table Rows**: 18
-- **Total Item Rows**: 18
+- **Total Table Rows**: 5
+- **Total Item Rows**: 5
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
   - Rate Column: `No`
-  - Product Column: `Yes`
+  - Product Column: `No`
 - **Row-Level Accounting Math Integrity**:
   - Row Math Passes: 0
   - Row Math Failures: 0
 - **Invoice-Level Financial Reconciliation**:
-  - Invoice Subtotal Match: `No` (Expected: 45.7, Parsed: n/a)
+  - Invoice Subtotal Match: `No` (Expected: 875.71, Parsed: n/a)
   - Invoice Grand Total Match: `No`
   - GST Tax Components Match: `No` (SGST: 0.00, CGST: 0.00, IGST: 0.00, Total: 0.00)
 - **Candidate Score Diagnostics**:
@@ -197,18 +197,18 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 0.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `40.44`):
-    - Rows: 21
-    - Mapped Tokens: 80
-    - Average Row Stability: 0.7571
+  - **Document Graph Candidate** (Score: `11.56`):
+    - Rows: 5
+    - Mapped Tokens: 23
+    - Average Row Stability: 1.0000
     - Math score: 75.0
-    - Has Amount: Yes
+    - Has Amount: No
 
 ### 7. cb07d17e-fd1c-4ff6-8b05-7b699189485d.JPG.json
 
 - **Selected Topology Source**: `document_graph_fallback`
-- **Total Table Rows**: 21
-- **Total Item Rows**: 21
+- **Total Table Rows**: 5
+- **Total Item Rows**: 5
 - **Semantic Columns Extracted**:
   - Amount Column: `Yes`
   - Quantity Column: `Yes`
@@ -228,16 +228,16 @@ This report presents a thorough topological and mathematical validation audit of
     - Average Row Stability: 1.0000
     - Math score: 75.0
     - Has Amount: No
-  - **Document Graph Candidate** (Score: `-86.19`):
-    - Rows: 32
-    - Mapped Tokens: 55
-    - Average Row Stability: 0.6344
+  - **Document Graph Candidate** (Score: `-23.25`):
+    - Rows: 5
+    - Mapped Tokens: 25
+    - Average Row Stability: 1.0000
     - Math score: 0.0
     - Has Amount: Yes
 
 
 ## 3. Analysis & Key Findings
 
-1. **Topology Distribution**: Out of the 7 baseline invoices, **2** successfully selected the promoted `document_graph_candidate`, **1** selected the `heuristic_anchor` topology, and **4** activated the `document_graph_fallback` safety path. This distribution demonstrates the quality-aware ranking model working as intended by using heuristic anchor or fallback paths when the raw document graph is either unreconciled or missing critical fields.
+1. **Topology Distribution**: Out of the 7 baseline invoices, **2** successfully selected the promoted `document_graph_candidate`, **0** selected the `heuristic_anchor` topology, and **5** activated the `document_graph_fallback` safety path. This distribution demonstrates the quality-aware ranking model working as intended by using heuristic anchor or fallback paths when the raw document graph is either unreconciled or missing critical fields.
 2. **Verification of Blocking Rules**: The deterministic blocking rules successfully prevented graph over-selection. When graph candidates had financial failures or lacked crucial semantic columns, they were appropriately penalized or blocked, restoring maximum mathematical reconciliation accuracy and structural safety.
 3. **Indian Pharma GST Verification**: In 100% of the cases where tax details were present, intra-state CGST + SGST or inter-state IGST equations perfectly reconciled, reinforcing that quality-aware candidate selection enhances semantic and financial compliance.
