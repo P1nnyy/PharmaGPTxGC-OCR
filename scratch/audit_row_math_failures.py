@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 import sys
 import json
@@ -6,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
 
-PROJECT_ROOT = "/Users/pranavgupta/Desktop/PharmaGPTxGC"
+PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
