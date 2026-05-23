@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import ast
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,7 +107,10 @@ def _clean(value: Any) -> str:
         return ", ".join(_clean(item) for item in value)
     text = str(value).strip()
     text = re.sub(r"^\*\*|\*\*$", "", text)
-    return text.strip("` ").strip()
+    text = text.strip("` ").strip()
+    if text.lower() in {"none", "n/a", "*empty*", "empty"}:
+        return ""
+    return text
 
 
 def _norm_key(key: str) -> str:
@@ -157,10 +161,160 @@ def _window_for_line(lines: List[str], idx: int) -> List[str]:
     return lines[start:end]
 
 
+FAILURE_HEADER_RE = re.compile(r"^### Failure #\d+:\s+`([^`]+)`\s+in\s+`([^`]+)`")
+CELL_SEMANTIC_MAP = [
+    ("free quantity", "free_qty"),
+    ("free qty", "free_qty"),
+    ("product", "product"),
+    ("drug", "product"),
+    ("quantity", "qty"),
+    ("qty", "qty"),
+    ("rate", "rate"),
+    ("mrp", "mrp"),
+    ("gst", "gst"),
+    ("tax", "gst"),
+    ("amount", "amount"),
+]
+PARSED_VALUE_MAP = {
+    "parsed billed quantity": "parsed_qty",
+    "parsed unit rate": "parsed_rate",
+    "parsed actual amount": "parsed_amount",
+}
+
+
+def _failure_blocks(lines: List[str]) -> Iterable[List[str]]:
+    start = None
+    for idx, line in enumerate(lines):
+        if FAILURE_HEADER_RE.match(line.strip()):
+            if start is not None:
+                yield lines[start:idx]
+            start = idx
+    if start is not None:
+        yield lines[start:]
+
+
+def _parse_inline_metadata(block: List[str]) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not block:
+        return values
+
+    header_match = FAILURE_HEADER_RE.match(block[0].strip())
+    if header_match:
+        values["row_id"] = _clean(header_match.group(1))
+        values["invoice_filename"] = _clean(header_match.group(2))
+
+    for line in block:
+        stripped = line.strip()
+        match = re.match(r"^- \*\*(.+?)\*\*:\s*(.+)$", stripped)
+        if not match:
+            continue
+        key, value = match.groups()
+        key_norm = _norm_key(key)
+        if key_norm == "selected topology":
+            values["selected_topology_source"] = _clean(value)
+        elif key_norm == "assigned cause":
+            values["assigned_cause"] = _clean(value).lower()
+        elif key_norm in PARSED_VALUE_MAP:
+            values[PARSED_VALUE_MAP[key_norm]] = _clean(value)
+    return values
+
+
+def _parse_mapped_block_ids(text: str) -> List[str]:
+    cleaned = _clean(text)
+    if not cleaned:
+        return []
+    try:
+        parsed = ast.literal_eval(cleaned)
+        if isinstance(parsed, (list, tuple)):
+            return [str(item) for item in parsed]
+        if parsed is None:
+            return []
+    except Exception:
+        pass
+    return [cleaned]
+
+
+def _cell_field_for_semantic(semantic_text: str) -> Optional[str]:
+    semantic_norm = _norm_key(semantic_text)
+    for needle, field_name in CELL_SEMANTIC_MAP:
+        if needle in semantic_norm:
+            return field_name
+    return None
+
+
+def _parse_cell_table(block: List[str]) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+    cell_texts: Dict[str, str] = {}
+    mapped_ids: Dict[str, List[str]] = {}
+    in_cell_table = False
+
+    for line in block:
+        stripped = line.strip()
+        if stripped.startswith("#### Cell Level Texts"):
+            in_cell_table = True
+            continue
+        if in_cell_table and stripped.startswith("#### "):
+            break
+        if not in_cell_table or not stripped.startswith("|"):
+            continue
+        if "Column Semantic" in stripped or re.fullmatch(r"\|\s*:?-+", stripped.replace(" |", "|")):
+            continue
+
+        parts = [part.strip() for part in stripped.strip("|").split("|")]
+        if len(parts) < 3:
+            continue
+        field_name = _cell_field_for_semantic(parts[0])
+        if not field_name:
+            continue
+
+        cell_text = _clean(" | ".join(parts[1:-1]))
+        block_ids = _parse_mapped_block_ids(parts[-1])
+        cell_texts[f"{field_name}_text"] = cell_text
+        mapped_ids[field_name] = block_ids
+
+    return cell_texts, mapped_ids
+
+
+def _parse_failure_block(block: List[str], path: Path) -> Optional[WrongColumnFailure]:
+    values = _parse_inline_metadata(block)
+    if values.get("assigned_cause") != WRONG_COLUMN_CAUSE:
+        return None
+
+    cell_texts, mapped_ids = _parse_cell_table(block)
+    values.update(cell_texts)
+    record = WrongColumnFailure(
+        invoice_filename=values.get("invoice_filename", "unknown"),
+        selected_topology_source=values.get("selected_topology_source", "unknown"),
+        row_id=values.get("row_id", "unknown"),
+        product_text=values.get("product_text", ""),
+        qty_text=values.get("qty_text", ""),
+        free_qty_text=values.get("free_qty_text", ""),
+        rate_text=values.get("rate_text", ""),
+        mrp_text=values.get("mrp_text", ""),
+        gst_text=values.get("gst_text", ""),
+        amount_text=values.get("amount_text", ""),
+        parsed_qty=values.get("parsed_qty", ""),
+        parsed_rate=values.get("parsed_rate", ""),
+        parsed_amount=values.get("parsed_amount", ""),
+        mapped_block_ids=mapped_ids,
+        source_path=str(path.relative_to(REPO_ROOT)),
+        raw_excerpt="\n".join(block[:100]),
+    )
+    _classify_record(record)
+    return record
+
+
 def parse_forensic_markdown(path: Path) -> List[WrongColumnFailure]:
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     records = []
+
+    for block in _failure_blocks(lines):
+        record = _parse_failure_block(block, path)
+        if record:
+            records.append(record)
+
+    if records:
+        return records
 
     for idx, line in enumerate(lines):
         if "assigned cause" not in line.lower():
