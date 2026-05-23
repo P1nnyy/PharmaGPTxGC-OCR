@@ -104,6 +104,235 @@ def _invoice_footer_tax_source_counts(invoice_reconciliation: Dict[str, Any]) ->
     }
 
 
+def _repair_product_numeric_phase_shift(
+    main_table,
+    table_regions,
+    ocr_blocks,
+    final_semantics: Dict[str, str],
+) -> Dict[str, Any]:
+    """Conservatively shift product ownership up one visual row for heuristic tables."""
+    metrics = {
+        "product_numeric_phase_shift_detected": False,
+        "product_phase_shift_repair_count": 0,
+        "product_phase_shift_source": "not_attempted",
+        "product_phase_shift_affected_rows": [],
+    }
+    if not main_table or not str(main_table.table_id).startswith("heuristic_region"):
+        metrics["product_phase_shift_source"] = "not_heuristic_table"
+        return metrics
+
+    product_col_id = next((col_id for col_id, semantic in final_semantics.items() if semantic == "product"), None)
+    numeric_col_ids = {
+        col_id
+        for col_id, semantic in final_semantics.items()
+        if semantic in {"quantity", "free_quantity", "mrp", "rate", "amount"}
+    }
+    if not product_col_id or not numeric_col_ids:
+        metrics["product_phase_shift_source"] = "missing_product_or_numeric_semantics"
+        return metrics
+
+    block_by_id = {block.id: block for block in ocr_blocks if getattr(block, "id", None)}
+
+    def _center_y(block) -> float:
+        geom = getattr(block, "normalized_geometry", None) or getattr(block, "original_geometry", None)
+        return float(getattr(geom, "center_y", 0.0) or 0.0)
+
+    def _center_x(block) -> float:
+        geom = getattr(block, "normalized_geometry", None) or getattr(block, "original_geometry", None)
+        return float(getattr(geom, "center_x", 0.0) or 0.0)
+
+    def _is_product_like(text: str) -> bool:
+        import re
+
+        upper = (text or "").upper().strip()
+        if not upper or not re.search(r"[A-Z]", upper):
+            return False
+        blocked = {
+            "PRODUCT",
+            "PRODUCT NAME",
+            "PACK",
+            "BATCH",
+            "HSN",
+            "MRP",
+            "RATE",
+            "AMOUNT",
+            "QTY",
+            "SGST",
+            "CGST",
+            "GST",
+            "DIS",
+        }
+        if upper in blocked:
+            return False
+        if any(word in upper for word in ("TOTAL", "SUB TOTAL", "GRAND", "ROUND", "DISCOUNT", "BANK", "GSTIN")):
+            return False
+        return True
+
+    row_by_id = {row.row_id: row for row in main_table.rows}
+    cells_by_row: Dict[str, Dict[str, Any]] = {}
+    for cell in main_table.cells:
+        cells_by_row.setdefault(cell.row_id, {})[cell.col_id] = cell
+
+    def _row_center(row) -> float:
+        return float(getattr(row.geometry, "center_y", 0.0) or 0.0)
+
+    def _cell_blocks(cell) -> List[Any]:
+        return [block_by_id[block_id] for block_id in cell.mapped_block_ids if block_id in block_by_id]
+
+    eligible_rows = []
+    for row in sorted(main_table.rows, key=_row_center):
+        if getattr(row, "row_role", "") != "item_row":
+            continue
+        row_cells = cells_by_row.get(row.row_id, {})
+        has_numeric = any((row_cells.get(col_id) and row_cells[col_id].mapped_block_ids) for col_id in numeric_col_ids)
+        if has_numeric:
+            eligible_rows.append(row)
+    if len(eligible_rows) < 3:
+        metrics["product_phase_shift_source"] = "insufficient_item_rows"
+        return metrics
+
+    row_centers = [_row_center(row) for row in eligible_rows]
+    intervals = [
+        row_centers[idx + 1] - row_centers[idx]
+        for idx in range(len(row_centers) - 1)
+        if row_centers[idx + 1] > row_centers[idx]
+    ]
+    if not intervals:
+        metrics["product_phase_shift_source"] = "missing_row_intervals"
+        return metrics
+    intervals_sorted = sorted(intervals)
+    row_interval = intervals_sorted[len(intervals_sorted) // 2]
+
+    product_col = next((col for col in main_table.columns if col.col_id == product_col_id), None)
+    if not product_col or not product_col.geometry:
+        metrics["product_phase_shift_source"] = "missing_product_column_geometry"
+        return metrics
+    x_min = max(float(product_col.geometry.min_x) + 35.0, float(product_col.geometry.min_x))
+    x_max = float(product_col.geometry.max_x) + 55.0
+    first_row = eligible_rows[0]
+    first_center = _row_center(first_row)
+    external_candidates = []
+    current_table_token_ids = {block_id for cell in main_table.cells for block_id in cell.mapped_block_ids}
+    for region in table_regions:
+        if region.table_id == main_table.table_id:
+            continue
+        for cell in region.cells:
+            candidate_blocks = []
+            for block in _cell_blocks(cell):
+                if block.id in current_table_token_ids:
+                    continue
+                if not (x_min <= _center_x(block) <= x_max):
+                    continue
+                if not (first_center - (1.5 * row_interval) <= _center_y(block) < first_center):
+                    continue
+                if _is_product_like(block.text):
+                    candidate_blocks.append(block)
+            if candidate_blocks:
+                candidate_blocks.sort(key=lambda b: (_center_y(b), _center_x(b)))
+                external_candidates.append(
+                    {
+                        "source_table_id": region.table_id,
+                        "source_row_id": cell.row_id,
+                        "source_col_id": cell.col_id,
+                        "block_ids": [block.id for block in candidate_blocks],
+                        "text": " ".join(block.text for block in candidate_blocks if block.text).strip(),
+                        "center_y": max(_center_y(block) for block in candidate_blocks),
+                    }
+                )
+    if not external_candidates:
+        metrics["product_phase_shift_source"] = "no_preceding_product_candidate"
+        return metrics
+    external_candidates.sort(key=lambda item: item["center_y"], reverse=True)
+    preceding_product = external_candidates[0]
+
+    product_cells = []
+    for row in eligible_rows:
+        product_cell = cells_by_row.get(row.row_id, {}).get(product_col_id)
+        if product_cell is not None:
+            product_cells.append(product_cell)
+        else:
+            product_cells.append(None)
+
+    current_products = []
+    for cell in product_cells:
+        if cell is None:
+            continue
+        product_blocks = [
+            block
+            for block in _cell_blocks(cell)
+            if x_min <= _center_x(block) <= x_max and _is_product_like(block.text)
+        ]
+        if not product_blocks:
+            continue
+        product_blocks.sort(key=lambda b: (_center_y(b), _center_x(b)))
+        current_products.append(
+            {
+                "block_ids": [block.id for block in product_blocks],
+                "text": " ".join(block.text for block in product_blocks if block.text).strip(),
+                "source_table_id": main_table.table_id,
+                "source_row_id": cell.row_id,
+                "source_col_id": cell.col_id,
+            }
+        )
+    if len(current_products) < 2:
+        metrics["product_phase_shift_source"] = "insufficient_product_cells"
+        return metrics
+
+    replacement_sequence = [preceding_product] + current_products
+    repair_limit = min(len(eligible_rows), len(replacement_sequence))
+    if repair_limit < 3:
+        metrics["product_phase_shift_source"] = "insufficient_repair_sequence"
+        return metrics
+
+    metrics["product_numeric_phase_shift_detected"] = True
+    metrics["product_phase_shift_source"] = (
+        f"{preceding_product['source_table_id']}:{preceding_product['source_row_id']}:{preceding_product['source_col_id']}"
+    )
+    affected_rows = []
+    for idx in range(repair_limit):
+        row = eligible_rows[idx]
+        product_cell = cells_by_row.get(row.row_id, {}).get(product_col_id)
+        if product_cell is None:
+            continue
+        replacement = replacement_sequence[idx]
+        before = {
+            "text": product_cell.text,
+            "mapped_block_ids": list(product_cell.mapped_block_ids),
+        }
+        if before["mapped_block_ids"] == replacement["block_ids"]:
+            continue
+        product_cell.original_text = product_cell.original_text or product_cell.text
+        product_cell.mapped_block_ids = list(replacement["block_ids"])
+        product_cell.text = replacement["text"]
+        product_cell.assignment_strategy = "product_phase_shift_repair"
+        row.provenance["product_phase_shift_repair"] = {
+            "before": before,
+            "after": {
+                "text": product_cell.text,
+                "mapped_block_ids": list(product_cell.mapped_block_ids),
+                "source_table_id": replacement.get("source_table_id"),
+                "source_row_id": replacement.get("source_row_id"),
+                "source_col_id": replacement.get("source_col_id"),
+            },
+        }
+        affected_rows.append(
+            {
+                "row_id": row.row_id,
+                "before_text": before["text"],
+                "after_text": product_cell.text,
+                "before_block_ids": before["mapped_block_ids"],
+                "after_block_ids": list(product_cell.mapped_block_ids),
+            }
+        )
+
+    metrics["product_phase_shift_repair_count"] = len(affected_rows)
+    metrics["product_phase_shift_affected_rows"] = affected_rows
+    if not affected_rows:
+        metrics["product_numeric_phase_shift_detected"] = False
+        metrics["product_phase_shift_source"] = "no_cell_changes_needed"
+    return metrics
+
+
 def _graph_telemetry_block(
     document_graph: Dict[str, Any],
     graph_fallback_used: bool,
@@ -1419,6 +1648,29 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 row_validation_results = row_validator.validate_all(analysis_targets)
                 break
 
+    product_phase_shift_metrics = {
+        "product_numeric_phase_shift_detected": False,
+        "product_phase_shift_repair_count": 0,
+        "product_phase_shift_source": "not_evaluated",
+        "product_phase_shift_affected_rows": [],
+    }
+    for tr in analysis_targets:
+        product_phase_shift_metrics = _repair_product_numeric_phase_shift(
+            tr,
+            table_regions,
+            ocr_blocks,
+            final_column_semantics.get(tr.table_id, {}),
+        )
+        if product_phase_shift_metrics.get("product_phase_shift_repair_count", 0) > 0:
+            logger.info(
+                "[PRODUCT PHASE SHIFT] repaired rows=%s source=%s",
+                product_phase_shift_metrics.get("product_phase_shift_repair_count"),
+                product_phase_shift_metrics.get("product_phase_shift_source"),
+            )
+            row_validator = RowValidator(semantic_column_cache=semantic_results)
+            row_validation_results = row_validator.validate_all(analysis_targets)
+            break
+
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
     # Note: We reconcile the MAIN table specifically
     target_reconcile = [table_bundle.main_table]
@@ -1847,6 +2099,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "invoice_source_tax_rows_count": invoice_source_role_counts["tax_rows_count"],
             },
             "topology_repairs": repair_metrics_total,
+            **product_phase_shift_metrics,
             "row_validation": row_validation_results,
             "financial_reconciliation": reconciliation_results,
             "invoice_financial_reconciliation": invoice_reconciliation_result,
@@ -1883,6 +2136,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     "invoice_source_footer_rows_count": invoice_source_role_counts["footer_rows_count"],
                     "invoice_source_tax_rows_count": invoice_source_role_counts["tax_rows_count"],
                 },
+                **product_phase_shift_metrics,
                 "confidence_variance": confidence_hierarchy.get("confidence_variance", {}),
                 "document_graph_metrics": document_graph.get("metrics", {}),
                 **_graph_telemetry_block(
