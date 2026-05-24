@@ -33,3 +33,10 @@ __pycache__/
 *.pyc
 *.pkl
 *.jsonl
+
+# Local OCR/debug outputs
+local_runs/
+results/
+forensic_runs/
+datasets/debug/
+item_rows_clean.json
