@@ -68,7 +68,11 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     # 2. Adaptive Resolution Upscaling
     # Run coarse detection height validation after potential rotation correction
     if det_results:
-        boxes = getattr(det_results[0], 'bboxes', None)
+        # Surya versions differ:
+        # - Some return List[TextDetectionResult]
+        # - surya-ocr==0.17.1 may return TextDetectionResult directly
+        det_result = det_results[0] if isinstance(det_results, (list, tuple)) else det_results
+        boxes = getattr(det_result, 'bboxes', None)
         heights = []
         if boxes:
             for box in boxes:
