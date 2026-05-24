@@ -6,6 +6,10 @@ from typing import List, Dict, Any, Tuple, Optional
 from models.layout_models import OCRBlock, TableRegion, GeometryBox, TableCell
 from core.logger import logger
 from services.qty_parser import is_compound_quantity, parse_quantity
+from services.ml_models.confidence_learner import ConfidenceLearner
+
+# Instantiate the global ML-driven confidence mapping estimator
+confidence_learner = ConfidenceLearner()
 
 def is_numeric_like(text: str) -> bool:
     """
@@ -99,9 +103,9 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
     V4 Assignment Engine: Soft Row-Scoped Allocator.
     
     Three-tier assignment strategy:
-    - Tier 1 (row_scoped): Token assigned within its primary row band. Full confidence.
-    - Tier 2 (neighbor_row): Token assigned in adjacent row (±1). 0.85x confidence penalty.
-    - Tier 3 (global_fallback): Unrestricted cell search. 0.5x confidence penalty.
+    - Tier 1 (row_scoped): Token assigned within its primary row band. ML confidence scoring.
+    - Tier 2 (neighbor_row): Token assigned in adjacent row (±1). ML confidence scoring.
+    - Tier 3 (global_fallback): Unrestricted cell search. ML confidence scoring.
     
     Preserves right-edge scoring for numerics, IoA thresholds, and ambiguity rejection.
     """
@@ -125,6 +129,9 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
     }
     _right_edge_deltas = []
     _total_tokens_attempted = 0
+    
+    # Store online learning samples collected during this extraction run
+    online_samples = []
 
     # Build row-indexed cell lookup and collect all rows with geometry
     all_cells = []
@@ -213,13 +220,36 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
                     scored = _score_against_cells(block, row_cells, is_num, min_gate_ioa)
                     if scored and not _check_ambiguity(scored):
                         top_score, top_ioa, top_cell = scored[0]
+                        
+                        # ── Dynamic ML-Driven Confidence Mapping (Tier 1) ──
+                        row_density = float(sum(1 for b in blocks if b.normalized_geometry and _compute_y_overlap(b.normalized_geometry, best_row.geometry) > 0.3))
+                        col_w = float(top_cell.geometry.max_x - top_cell.geometry.min_x) if top_cell.geometry else 120.0
+                        token_conf = float(getattr(block, "confidence", None) or 1.0)
+                        
+                        features = {
+                            "row_density": row_density,
+                            "is_numeric": 1.0 if is_num else 0.0,
+                            "column_width": col_w,
+                            "assignment_strategy": 0.0,
+                            "raw_ioa": top_ioa,
+                            "alignment_score": top_score,
+                            "token_confidence": token_conf,
+                            "row_y_overlap": best_y_overlap
+                        }
+                        confidence_multiplier = confidence_learner.predict_confidence(features)
+                        
                         top_cell.mapped_block_ids.append(block.id)
                         top_cell.assignment_strategy = "row_scoped"
-                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score)
+                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * confidence_multiplier)
                         assignment_strategy = "row_scoped"
-                        confidence_multiplier = 1.0
                         assigned = True
                         metrics["tier1_assignments"] += 1
+                        
+                        # Record features for online update loop
+                        online_samples.append({
+                            "features": features,
+                            "cell_key": f"{top_cell.row_id}:{top_cell.col_id}"
+                        })
         
         # ── TIER 2: Neighboring Row Tolerance (±1 row) ──
         if not assigned and all_rows:
@@ -233,26 +263,73 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
                     scored = _score_against_cells(block, neighbor_cells, is_num, min_gate_ioa)
                     if scored and not _check_ambiguity(scored):
                         top_score, top_ioa, top_cell = scored[0]
+                        
+                        # ── Dynamic ML-Driven Confidence Mapping (Tier 2) ──
+                        row_density = float(sum(1 for b in blocks if b.normalized_geometry and _compute_y_overlap(b.normalized_geometry, best_row.geometry) > 0.3))
+                        col_w = float(top_cell.geometry.max_x - top_cell.geometry.min_x) if top_cell.geometry else 120.0
+                        token_conf = float(getattr(block, "confidence", None) or 1.0)
+                        
+                        features = {
+                            "row_density": row_density,
+                            "is_numeric": 1.0 if is_num else 0.0,
+                            "column_width": col_w,
+                            "assignment_strategy": 1.0,
+                            "raw_ioa": top_ioa,
+                            "alignment_score": top_score,
+                            "token_confidence": token_conf,
+                            "row_y_overlap": best_y_overlap
+                        }
+                        confidence_multiplier = confidence_learner.predict_confidence(features)
+                        
                         top_cell.mapped_block_ids.append(block.id)
                         top_cell.assignment_strategy = "neighbor_row"
-                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * 0.85)
+                        top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * confidence_multiplier)
                         assignment_strategy = "neighbor_row"
-                        confidence_multiplier = 0.85
                         assigned = True
                         metrics["tier2_assignments"] += 1
+                        
+                        # Record features for online update loop
+                        online_samples.append({
+                            "features": features,
+                            "cell_key": f"{top_cell.row_id}:{top_cell.col_id}"
+                        })
         
         # ── TIER 3: Global Fallback ──
         if not assigned:
             scored = _score_against_cells(block, all_cells, is_num, min_gate_ioa)
             if scored and not _check_ambiguity(scored):
                 top_score, top_ioa, top_cell = scored[0]
+                
+                # ── Dynamic ML-Driven Confidence Mapping (Tier 3) ──
+                row_density = float(sum(1 for b in blocks if b.normalized_geometry and _compute_y_overlap(b.normalized_geometry, best_row.geometry) > 0.3)) if all_rows else 1.0
+                col_w = float(top_cell.geometry.max_x - top_cell.geometry.min_x) if top_cell.geometry else 120.0
+                token_conf = float(getattr(block, "confidence", None) or 1.0)
+                best_y_ovr = row_scores[0][1] if all_rows else 0.0
+                
+                features = {
+                    "row_density": row_density,
+                    "is_numeric": 1.0 if is_num else 0.0,
+                    "column_width": col_w,
+                    "assignment_strategy": 2.0,
+                    "raw_ioa": top_ioa,
+                    "alignment_score": top_score,
+                    "token_confidence": token_conf,
+                    "row_y_overlap": best_y_ovr
+                }
+                confidence_multiplier = confidence_learner.predict_confidence(features)
+                
                 top_cell.mapped_block_ids.append(block.id)
                 top_cell.assignment_strategy = "global_fallback"
-                top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * 0.5)
+                top_cell.assignment_confidence = min(top_cell.assignment_confidence, top_score * confidence_multiplier)
                 assignment_strategy = "global_fallback"
-                confidence_multiplier = 0.5
                 assigned = True
                 metrics["tier3_assignments"] += 1
+                
+                # Record features for online update loop
+                online_samples.append({
+                    "features": features,
+                    "cell_key": f"{top_cell.row_id}:{top_cell.col_id}"
+                })
         
         # ── Record Result ──
         if assigned:
@@ -329,6 +406,45 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
                 metrics["semantic_collision_count"] += 1
                 logger.debug(f"[SEMANTIC COLLISION] Suspicious multi-number cell: {cell.row_id}:{cell.col_id} → '{cell.text}'")
             
+    # ── Online Learning Feedback Loop (Online Update Heuristics) ──
+    # Identify collided/suspicious cells to label online data points
+    suspicious_cell_keys = set()
+    for cell in all_cells:
+        if cell.mapped_block_ids and len(cell.mapped_block_ids) > 1:
+            c_blocks = [b for b in blocks if b.id in cell.mapped_block_ids]
+            nums = [b for b in c_blocks if is_numeric_like(b.text or "")]
+            if len(nums) > 1:
+                vals = []
+                for n in nums:
+                    cleaned = re.sub(r'[^\d.]', '', (n.text or ""))
+                    try: vals.append(float(cleaned))
+                    except: pass
+                if len(vals) >= 2:
+                    has_decimal_chain = bool(re.search(r'\d+\.\d+\.\d+', cell.text or ""))
+                    all_large = all(v > 100.0 for v in vals)
+                    near_duplicate = (len(vals) == 2 and abs(vals[0] - vals[1]) < 0.5)
+                    if has_decimal_chain or (all_large and near_duplicate):
+                        if not is_compound_quantity(cell.text or ""):
+                            try:
+                                pq = parse_quantity(cell.text or "")
+                                if not (pq.is_scheme or pq.pack_size is not None):
+                                    suspicious_cell_keys.add(f"{cell.row_id}:{cell.col_id}")
+                            except Exception:
+                                suspicious_cell_keys.add(f"{cell.row_id}:{cell.col_id}")
+
+    # Build final labeled samples for online learning
+    online_update_data = []
+    for s in online_samples:
+        key = s["cell_key"]
+        # Label is 0.0 (incorrect) if cell had a semantic collision, else 1.0 (correct)
+        is_correct = 0.0 if key in suspicious_cell_keys else 1.0
+        sample_dict = s["features"]
+        sample_dict["is_correct"] = is_correct
+        online_update_data.append(sample_dict)
+        
+    if online_update_data:
+        confidence_learner.online_update(online_update_data)
+
     # 7. Benchmark Telemetry Finalization
     total_rejected = metrics["orphan_numeric_tokens"] + metrics["ambiguous_numeric_tokens"]
     metrics["assignment_rejection_rate"] = round(
@@ -349,7 +465,7 @@ def map_tokens_to_cells(blocks: List[OCRBlock], regions: List[TableRegion], debu
                 }, f, indent=2)
         except Exception as e:
             logger.error(f"Allocator telemetry write failure: {e}")
-
+ 
     logger.info(
         f"V4 Row-Scoped Allocator: mapped={metrics['total_numeric_mapped']} nums, "
         f"orphans={metrics['orphan_numeric_tokens']}, "

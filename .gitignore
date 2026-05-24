@@ -31,3 +31,5 @@ test_images/
 working_requirements.txt
 __pycache__/
 *.pyc
+*.pkl
+*.jsonl
