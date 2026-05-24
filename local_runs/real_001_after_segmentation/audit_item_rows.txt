@@ -1,0 +1,9 @@
+ITEM ROWS CLEAN AUDIT
+========================================================================================================================
+01. PCode=None | Desc=IstcI- PCode. | HSN=None | UPC=None | MRP=None | Qty=None | Taxable=None | Net=0.00
+02. PCode=50895798 | Desc=50895798 | HSN=96032100 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=3,17
+03. PCode=80895637 | Desc=80895637 | HSN=30049011 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=6.17
+04. PCode=80895638 | Desc=80895638 | HSN=30049011 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=23.78
+05. PCode=80862569 | Desc=80862569 | HSN=30049011 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=11.67
+06. PCode=80847741 | Desc=80847741 80827060 | HSN=80847741 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=0.00
+07. PCode=96190030 | Desc=None | HSN=96190030 | UPC=None | MRP=None | Qty=None | Taxable=None | Net=7.74
