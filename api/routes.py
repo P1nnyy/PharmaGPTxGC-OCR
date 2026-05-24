@@ -33,6 +33,17 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         file_bytes = await file.read()
         if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(status_code=413, detail=f"File too large. Maximum upload size is {settings.MAX_UPLOAD_SIZE_BYTES} bytes.")
+            
+        # pre-validate the image using the lightweight ImageValidator
+        from services.validators.image_validator import ImageValidator
+        val_report = ImageValidator.validate_image(file_bytes)
+        if not val_report["is_valid"]:
+            logger.warning(f"[IMAGE VALIDATION FAILURE] File: {file.filename}, error: {val_report.get('error_message')}")
+            raise HTTPException(
+                status_code=400,
+                detail=val_report.get("error_message", "Uploaded file is not a valid invoice image.")
+            )
+            
         invoice_id = cache_service.compute_md5(file_bytes)
         
         logger.info(f"Received file: {file.filename}, computed invoice_id: {invoice_id}")
@@ -42,7 +53,10 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         if cached_result:
             logger.info("OCR cache hit: reusing OCR blocks only")
             blocks = cached_result.get("blocks", [])
-            metadata = {"blocks": blocks}
+            metadata = {
+                "blocks": blocks,
+                "image_validation": val_report
+            }
             if reconstruct or extract:
                 logger.info("Cached reconstruction response disabled")
                 logger.info("Running fresh reconstruction with current code")
@@ -69,7 +83,10 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         cache_service.save_result(invoice_id, ocr_result)
         
         blocks = ocr_result.get("blocks", [])
-        metadata = {"blocks": blocks}
+        metadata = {
+            "blocks": blocks,
+            "image_validation": val_report
+        }
         if reconstruct or extract:
             logger.info("Cached reconstruction response disabled")
             logger.info("Running fresh reconstruction with current code")

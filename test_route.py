@@ -15,6 +15,7 @@ async def test_route():
             self.content = content
             self.filename = "test.jpg"
             self.content_type = "image/jpeg"
+            self.size = len(content)
         async def read(self):
             return self.content
             
@@ -23,13 +24,20 @@ async def test_route():
     logger.info("Calling upload_invoice...")
     response = await upload_invoice(file=dummy_file, reconstruct=True, reconstruct_mode="heuristic")
     
-    print("\n--- RESPONSE KEYS ---")
+    print("\n--- RESPONSE DETAILS ---")
     print(f"Response cached: {response.cached}")
-    print(f"Metadata keys: {response.metadata.keys()}")
-    
-    if "reconstructed_rows" in response.metadata:
-        print(f"Found reconstructed_rows! Length: {len(response.metadata['reconstructed_rows'])}")
+    if response.metadata.image_validation:
+        print("Image Validation Report:")
+        print(f"  Valid: {response.metadata.image_validation.is_valid}")
+        print(f"  Quality Score: {response.metadata.image_validation.quality_score}")
+        print(f"  Warnings: {response.metadata.image_validation.warnings}")
+        print(f"  Properties: {response.metadata.image_validation.properties}")
     else:
-        print("MISSING reconstructed_rows")
+        print("MISSING image_validation")
+        
+    if response.metadata.reconstructed_rows:
+        print(f"Found reconstructed_rows! Length: {len(response.metadata.reconstructed_rows)}")
+    else:
+        print("reconstructed_rows is empty or None")
 
 asyncio.run(test_route())
