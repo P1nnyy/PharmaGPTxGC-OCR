@@ -26,6 +26,7 @@ class OCRBlock(BaseModel):
     polygon: List[Tuple[float, float]] = Field(default_factory=list)
     original_geometry: Optional[GeometryBox] = None
     normalized_geometry: Optional[GeometryBox] = None
+    confidence: Optional[float] = None
     
     # Numeric tokens often align to the right edge
     @property

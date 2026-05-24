@@ -10,6 +10,7 @@ def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
     polygon = block_data.get("polygon", [])
     raw_text = block_data.get("text", "")
     block_id = block_data.get("id")
+    confidence = block_data.get("confidence")
     
     # Text Sanitization
     clean_text = re.sub(r"<[^>]+>", "", raw_text)
@@ -27,7 +28,8 @@ def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
             text=clean_text,
             polygon=polygon,
             original_geometry=geom,
-            normalized_geometry=geom.model_copy()
+            normalized_geometry=geom.model_copy(),
+            confidence=confidence
         )
         
     xs = [pt[0] for pt in polygon]
@@ -51,7 +53,8 @@ def compute_base_geometry(block_data: Dict[str, Any]) -> OCRBlock:
         text=clean_text,
         polygon=polygon,
         original_geometry=geom,
-        normalized_geometry=geom.model_copy()
+        normalized_geometry=geom.model_copy(),
+        confidence=confidence
     )
 
 def process_blocks(raw_blocks: List[Dict[str, Any]]) -> List[OCRBlock]:

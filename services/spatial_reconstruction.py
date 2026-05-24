@@ -776,6 +776,37 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions, debug=(debug and not benchmark_mode))
 
+    # Step 5.1: Token Coverage Validation
+    from services.layout_pipeline.token_validator import TokenMappingValidator, TokenCoverageError
+    try:
+        coverage_threshold = float(settings.TOKEN_COVERAGE_THRESHOLD)
+        validator = TokenMappingValidator(threshold=coverage_threshold)
+        report = validator.validate(ocr_blocks, table_regions)
+        
+        logger.info(
+            f"[TOKEN COVERAGE] total_tokens={report.total_tokens}, mapped={report.mapped_tokens}, "
+            f"unmapped={report.unmapped_tokens}, misaligned={report.misaligned_tokens}, "
+            f"coverage={report.coverage_percentage:.2f}% (required >= {coverage_threshold * 100.0:.2f}%)"
+        )
+        
+        try:
+            debug_dir = os.path.join(settings.DATASETS_DIR, "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            with open(os.path.join(debug_dir, "token_coverage_report.json"), "w", encoding="utf-8") as f:
+                f.write(report.to_json())
+        except Exception as e:
+            logger.error(f"Failed to export token coverage report: {e}")
+            
+        if report.coverage_percentage < (coverage_threshold * 100.0):
+            raise TokenCoverageError(
+                f"OCR Token coverage ({report.coverage_percentage:.2f}%) fell below "
+                f"required threshold ({coverage_threshold * 100.0:.2f}%). total_tokens={report.total_tokens}, "
+                f"unmapped={report.unmapped_tokens}."
+            )
+    except TokenCoverageError as e:
+        logger.error(f"[TOKEN COVERAGE FAILURE] {e}")
+        raise
+
     # ── NEW: HIERARCHICAL ROW GRAPH STAGE ──
     # Before applying destruction, snapshot Visual Row definitions for debug rendering
     visual_rows_snapshot = []

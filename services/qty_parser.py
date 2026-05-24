@@ -9,7 +9,7 @@ Supported formats:
     "2.750+.250"    → 2.75 billed + 0.25 free (scheme notation)
     "4.50+.50"      → 4.5 billed + 0.5 free
     "2+1"           → 2 billed + 1 free (integer scheme)
-    "1*15"          → 15 total (pack: 1 box × 15 strips)
+    "1*15 2"        → 2 billed, pack size 15 (fused qty/pack notation)
     "3×1×15"        → 45 total (nested pack: 3×1×15)
     "2 (1×10)"      → 20 total (2 units of 10-strip pack)
     "2"             → 2 billed, plain integer
@@ -49,6 +49,11 @@ class ParsedQuantity(BaseModel):
     parse_method: str = "none"
     qty_parse_extracted_expression: Optional[str] = None
     qty_parse_rejected_reason: Optional[str] = None
+    
+    # NEW: Fused Qty/Pack parse diagnostic metadata fields
+    qty_pack_fused_parse_used: bool = False
+    qty_pack_original_text: Optional[str] = None
+    qty_pack_parsed_billed_qty: Optional[Decimal] = None
 
     model_config = {"json_encoders": {Decimal: str}}  # Pydantic v2 ConfigDict
 
@@ -159,41 +164,18 @@ def parse_quantity(raw: str) -> ParsedQuantity:
     """Parse an Indian pharma quantity string into structured components.
 
     Processes the raw string through a prioritized regex pipeline:
-    1. Scheme notation: billed+free (e.g., "2.750+.250")
-    2. Parenthesized pack: qty (pack_expr) (e.g., "2 (1×10)")
-    3. Pack/multiply notation: a*b*c (e.g., "3×1×15")
-    4. Plain numeric: integer or decimal (e.g., "2", "1.84")
+    1. Fused Qty/Pack notation: pack-like prefix + standalone integer (e.g. "1-10 2")
+    2. Standalone Pack size: pack pattern alone, should not parse as quantity (e.g. "1*10")
+    3. Scheme notation: billed+free (e.g., "2.750+.250")
+    4. Parenthesized pack: qty (pack_expr) (e.g., "2 (1×10)")
+    5. Pack/multiply notation: a*b*c (e.g., "3×1×15")
+    6. Plain numeric: integer or decimal (e.g., "2", "1.84")
 
     Args:
         raw: Raw text from a quantity cell in an OCR-extracted invoice table.
 
     Returns:
         ParsedQuantity with billed_qty, free_qty, total_qty, etc.
-
-    Raises:
-        No exceptions raised — returns a zero-quantity result on parse failure
-        and logs a warning.
-
-    Examples:
-        >>> r = parse_quantity("2.750+.250")
-        >>> (r.billed_qty, r.free_qty, r.is_scheme)
-        (Decimal('2.750'), Decimal('0.250'), True)
-
-        >>> r = parse_quantity("2+1")
-        >>> (r.billed_qty, r.free_qty, r.total_qty)
-        (Decimal('2'), Decimal('1'), Decimal('3'))
-
-        >>> r = parse_quantity("3*1*15")
-        >>> (r.total_qty, r.pack_size, r.is_scheme)
-        (Decimal('45'), 45, False)
-
-        >>> r = parse_quantity("2 (1*10)")
-        >>> (r.total_qty, r.pack_size)
-        (Decimal('20'), 10)
-
-        >>> r = parse_quantity("1.84")
-        >>> (r.billed_qty, r.is_scheme)
-        (Decimal('1.84'), False)
     """
     if not raw or not raw.strip():
         return ParsedQuantity(
@@ -204,13 +186,141 @@ def parse_quantity(raw: str) -> ParsedQuantity:
 
     text = _normalize_ocr_noise(raw)
     original = raw.strip()
-    parse_text, extracted_expression, rejected_reason = _extract_quantity_expression(text)
 
-    # ── PATTERN 1: Scheme notation (billed + free) ──
-    # Matches: "2.750+.250", "4.50+0.50", "2+1", ".750+.250"
-    # Regex: one or more digit/dot groups separated by '+'
+    # ── NEW: PATTERN 1: Fused Qty/Pack notation ──
+    # If the quantity cell has a pack-like pattern followed by a space and a trailing standalone number.
+    # Examples: "1*10 2", "1-10 2", "MIS 3", "1:10= 2"
+    fused_match = re.search(r"^(.*?)\s+(\d+(?:\.\d+)?)$", text.strip())
+    if fused_match:
+        prefix = fused_match.group(1).strip()
+        trailing_str = fused_match.group(2).strip()
+        
+        # Determine if the prefix looks like a pack size
+        is_pack_prefix = False
+        if prefix.upper() == "MIS":
+            is_pack_prefix = True
+        elif re.search(r"\b\d+\s*(?:GM|ML|MG|TAB|CAP|S|'S|NOS)\b", prefix, re.IGNORECASE):
+            is_pack_prefix = True
+        elif re.search(r"\b\d+[\*\-xX×/:=]\d+[\*\-xX×/:=]?\d*=?", prefix):
+            is_pack_prefix = True
+            
+        if is_pack_prefix:
+            try:
+                billed = _safe_decimal(trailing_str)
+                # Compute pack size by multiplying factors in prefix
+                pack_sz = None
+                mult_match = re.search(r"(\d+)[\*\-xX×/:=](\d+)", prefix)
+                if mult_match:
+                    try:
+                        p1 = int(mult_match.group(1))
+                        p2 = int(mult_match.group(2))
+                        pack_sz = p1 * p2
+                    except ValueError:
+                        pass
+                if pack_sz is None:
+                    # Look for trailing/leading units GM/ML/etc
+                    unit_match = re.search(r"\b(\d+)\s*(?:GM|ML|MG|TAB|CAP|S|'S|NOS)\b", prefix, re.IGNORECASE)
+                    if unit_match:
+                        try:
+                            pack_sz = int(unit_match.group(1))
+                        except ValueError:
+                            pass
+
+                logger.info(
+                    f"qty_parser: detected fused qty/pack '{original}' -> "
+                    f"billed_qty={billed}, pack_size={pack_sz}"
+                )
+                return ParsedQuantity(
+                    billed_qty=billed,
+                    free_qty=Decimal("0"),
+                    total_qty=billed,
+                    pack_size=pack_sz,
+                    is_scheme=False,
+                    raw=original,
+                    parse_method="qty_pack_fused_extracted",
+                    qty_parse_extracted_expression=trailing_str,
+                    qty_pack_fused_parse_used=True,
+                    qty_pack_original_text=original,
+                    qty_pack_parsed_billed_qty=billed,
+                )
+            except InvalidOperation:
+                pass
+
+    # ── NEW: PATTERN 2: Standalone Pack Size (Rule 4) ──
+    # If the quantity cell contains ONLY a pack-like pattern, do not parse it as quantity (return 0).
+    # Examples: "1*10" -> billed_qty=0, "200ML" -> billed_qty=0
+    is_pack_alone = False
+    if text.upper() == "MIS":
+        is_pack_alone = True
+    elif re.fullmatch(r"\d+\s*(?:GM|ML|MG|TAB|CAP|S|'S|NOS)", text, re.IGNORECASE):
+        is_pack_alone = True
+    elif re.fullmatch(r"1\s*[\*\-xX×/:=]\s*\d+", text, re.IGNORECASE):
+        is_pack_alone = True
+        
+    if is_pack_alone:
+        pack_sz = None
+        mult_match = re.search(r"(\d+)[\*\-xX×/:=](\d+)", text)
+        if mult_match:
+            try:
+                p1 = int(mult_match.group(1))
+                p2 = int(mult_match.group(2))
+                pack_sz = p1 * p2
+            except ValueError:
+                pass
+        if pack_sz is None:
+            unit_match = re.search(r"\b(\d+)\s*(?:GM|ML|MG|TAB|CAP|S|'S|NOS)", text, re.IGNORECASE)
+            if unit_match:
+                try:
+                    pack_sz = int(unit_match.group(1))
+                except ValueError:
+                    pass
+
+        logger.info(f"qty_parser: standalone pack size detected '{original}' -> returning 0 quantity")
+        return ParsedQuantity(
+            billed_qty=Decimal("0"),
+            free_qty=Decimal("0"),
+            total_qty=Decimal("0"),
+            pack_size=pack_sz,
+            is_scheme=False,
+            raw=original,
+            parse_method="pack_size_alone",
+            qty_parse_rejected_reason="pack_size_alone",
+        )
+
+    # ── PATTERN 4: Parenthesized pack ──
+    paren_re = re.compile(
+        r'^(\d+\.?\d*)\s*'
+        r'\(([^)]+)\)$'
+    )
+    m = paren_re.match(text)
+    if m:
+        try:
+            outer_qty = _safe_decimal(m.group(1))
+            inner_expr = m.group(2)
+            inner_parts = inner_expr.split("*")
+            inner_product = Decimal("1")
+            for part in inner_parts:
+                inner_product *= _safe_decimal(part)
+            total = outer_qty * inner_product
+            pack_sz = int(inner_product)
+            return ParsedQuantity(
+                billed_qty=total,
+                free_qty=Decimal("0"),
+                total_qty=total,
+                pack_size=pack_sz,
+                is_scheme=False,
+                raw=original,
+                parse_method="parenthesized_pack",
+            )
+        except (InvalidOperation, ValueError):
+            logger.warning(
+                f"qty_parser: parenthesized pack parse failed for '{original}'"
+            )
+
+    # ── PATTERN 3: Scheme notation (billed + free) ──
+    parse_text, extracted_expression, rejected_reason = _extract_quantity_expression(text)
     scheme_re = re.compile(
-        r'^(\d*\.?\d+)\+(\d*\.?\d+)$'  # group1 + group2, both numeric
+        r'^(\d*\.?\d+)\+(\d*\.?\d+)$'
     )
     m = scheme_re.match(parse_text)
     if m:
@@ -229,41 +339,7 @@ def parse_quantity(raw: str) -> ParsedQuantity:
         except InvalidOperation:
             logger.warning(f"qty_parser: scheme parse failed for '{original}'")
 
-    # ── PATTERN 2: Parenthesized pack — "2 (1*10)" or "2(1×10)" ──
-    # Outer qty × inner pack expression
-    paren_re = re.compile(
-        r'^(\d+\.?\d*)\s*'   # outer quantity (e.g., "2")
-        r'\(([^)]+)\)$'      # parenthesized inner expression (e.g., "1*10")
-    )
-    m = paren_re.match(parse_text)
-    if m:
-        try:
-            outer_qty = _safe_decimal(m.group(1))
-            inner_expr = m.group(2)
-            # Evaluate inner pack expression: "1*10" → 10
-            inner_parts = inner_expr.split("*")
-            inner_product = Decimal("1")
-            for part in inner_parts:
-                inner_product *= _safe_decimal(part)
-            total = outer_qty * inner_product
-            pack_sz = int(inner_product)
-            return ParsedQuantity(
-                billed_qty=total,
-                free_qty=Decimal("0"),
-                total_qty=total,
-                pack_size=pack_sz,
-                is_scheme=False,
-                raw=original,
-                parse_method="parenthesized_pack_extracted" if extracted_expression else "parenthesized_pack",
-                qty_parse_extracted_expression=extracted_expression,
-            )
-        except (InvalidOperation, ValueError):
-            logger.warning(
-                f"qty_parser: parenthesized pack parse failed for '{original}'"
-            )
-
-    # ── PATTERN 3: Multiply/pack notation — "1*15", "3*1*15" ──
-    # All components multiplied together to get total dispatched units
+    # ── PATTERN 5: Multiply/pack notation ──
     if "*" in parse_text:
         parts = parse_text.split("*")
         if all(re.match(r'^\d+\.?\d*$', p.strip()) for p in parts):
@@ -287,10 +363,9 @@ def parse_quantity(raw: str) -> ParsedQuantity:
                     f"qty_parser: pack multiply parse failed for '{original}'"
                 )
 
-    # ── PATTERN 4: Plain numeric — "2", "1.84", "2.00" ──
-    # Standard integer or decimal quantity
+    # ── PATTERN 6: Plain numeric ──
     plain_re = re.compile(
-        r'^(\d+\.?\d*)$'  # one numeric group, optional decimal
+        r'^(\d+\.?\d*)$'
     )
     m = plain_re.match(parse_text)
     if m:
@@ -322,51 +397,49 @@ def parse_quantity(raw: str) -> ParsedQuantity:
 
 
 def is_compound_quantity(text: str) -> bool:
-    """Quick check if a text value looks like a compound quantity format.
-
-    Used by ioa_mapping.py collision detection to suppress false alerts
-    on multi-number cells that are actually scheme/pack quantities.
-
-    Args:
-        text: Cell text to check.
-
-    Returns:
-        True if the text matches scheme ("+") or pack ("*"/"×") notation.
-    """
+    """Quick check if a text value looks like a compound quantity format."""
     if not text:
         return False
     cleaned = _normalize_ocr_noise(text)
     parse_text, extracted_expression, _ = _extract_quantity_expression(cleaned)
     if extracted_expression:
         return True
-    # Scheme: digits+digits
     if re.match(r'^\d*\.?\d+\+\d*\.?\d+$', parse_text):
         return True
-    # Pack: digits*digits (with optional additional *digits)
     if re.match(r'^\d+\.?\d*(\*\d+\.?\d*)+$', parse_text):
         return True
-    # Parenthesized: digits (expr)
     if re.match(r'^\d+\.?\d*\s*\([^)]+\)$', parse_text):
         return True
     return False
 
 
-# ── Doctest Runner ──
+# ── Doctest / Test Cases Runner ──
 if __name__ == "__main__":
     import doctest
     results = doctest.testmod(verbose=True)
 
-    # Additional manual test cases covering OCR noise and edge cases
+    # Manual test cases covering OCR noise and edge cases
     test_cases = [
         # (input, expected_billed, expected_free, expected_scheme)
         ("2.750+.250", Decimal("2.750"), Decimal("0.250"), True),
         ("4.50+.50", Decimal("4.50"), Decimal("0.50"), True),
         ("2+1", Decimal("2"), Decimal("1"), True),
-        ("1*15", Decimal("15"), Decimal("0"), False),
+        # New Rule 4: Standalone pack size alone does not become quantity
+        ("1*15", Decimal("0"), Decimal("0"), False),
+        ("1*10", Decimal("0"), Decimal("0"), False),
+        ("200ML", Decimal("0"), Decimal("0"), False),
+        ("15GM", Decimal("0"), Decimal("0"), False),
+        ("MIS", Decimal("0"), Decimal("0"), False),
+        # Nested compound quantities still parse
         ("3*1*15", Decimal("45"), Decimal("0"), False),
         ("2 (1*10)", Decimal("20"), Decimal("0"), False),
         ("2", Decimal("2"), Decimal("0"), False),
         ("1.84", Decimal("1.84"), Decimal("0"), False),
+        # New Rule 2: Fused Qty/Pack parses trailing standalone integer
+        ("1*10 2", Decimal("2"), Decimal("0"), False),
+        ("1-10 2", Decimal("2"), Decimal("0"), False),
+        ("MIS 3", Decimal("3"), Decimal("0"), False),
+        ("1:10= 2", Decimal("2"), Decimal("0"), False),
         # OCR noise variants
         ("2,750+,250", Decimal("2.750"), Decimal("0.250"), True),
         ("2.750 +.250", Decimal("2.750"), Decimal("0.250"), True),
@@ -374,7 +447,6 @@ if __name__ == "__main__":
         # Multiplication symbol variants
         ("3×1×15", Decimal("45"), Decimal("0"), False),
         ("3x1x15", Decimal("45"), Decimal("0"), False),
-        # is_compound_quantity checks
     ]
 
     print("\n--- Manual Test Cases ---")
@@ -392,7 +464,7 @@ if __name__ == "__main__":
         print(
             f"  {status} parse_quantity('{raw_input}') → "
             f"billed={r.billed_qty}, free={r.free_qty}, "
-            f"scheme={r.is_scheme}, method={r.parse_method}"
+            f"scheme={r.is_scheme}, method={r.parse_method}, pack_size={r.pack_size}"
         )
 
     compound_tests = [

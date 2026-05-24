@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     ENABLE_PPSTRUCTURE_MULTI_ORIENTATION: bool = False
     PPSTRUCTURE_CONFIDENCE_THRESHOLD: float = 0.40
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
+    TOKEN_COVERAGE_THRESHOLD: float = 0.95
 
     @model_validator(mode="after")
     def derive_ocr_results_dir(self):
