@@ -2069,8 +2069,53 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "credit_notes": [tr.model_dump(mode='json') for tr in table_bundle.credit_notes],
         }
 
+    # Run the table region segmentation and anchor-based reconstruction
+    from services.table_segmenter import TableSegmenter
+    segmenter = TableSegmenter(table_regions, ocr_blocks)
+    segmenter_results = segmenter.process()
+    
+    seg_debug = segmenter_results["debug"]
+    
+    # invoice_totals construction
+    invoice_level = reconciliation_results.get("invoice_level") or {}
+    invoice_totals = {
+        "subtotal": invoice_level.get("footer_subtotal") or invoice_level.get("item_derived_subtotal") or 0.0,
+        "discount": invoice_level.get("discount_total") or 0.0,
+        "cgst": invoice_level.get("cgst_total") or 0.0,
+        "sgst": invoice_level.get("sgst_total") or 0.0,
+        "igst": invoice_level.get("igst_total") or 0.0,
+        "gst_total": invoice_level.get("gst_total") or 0.0,
+        "roundoff": invoice_level.get("roundoff") or 0.0,
+        "grand_total": invoice_level.get("parsed_grand_total") or invoice_level.get("expected_grand_total") or 0.0
+    }
+    
+    # metadata section
+    metadata_section = {
+        "invoice_id": invoice_level.get("item_table_region_id") or "unknown",
+        "tsr_engine": tsr_metadata.get("tsr_engine") or "unknown",
+        "topology_source": topology_source,
+        "selected_topology_source": selected_topology_source,
+        "invoice_confidence": confidence_hierarchy.get("invoice_confidence", 0.0),
+        "total_tokens": raw_token_count,
+        "reconstructed_line_count": recon_line_count,
+        "image_properties": tsr_metadata.get("image_properties") or {}
+    }
+
     return {
+        "metadata": metadata_section,
+        "tax_summary": segmenter_results["tax_summary"],
+        "item_rows_clean": segmenter_results["item_rows_clean"],
+        "scheme_rows": segmenter_results["scheme_rows"],
+        "credit_note_rows": segmenter_results["credit_note_rows"],
+        "invoice_totals": invoice_totals,
+        "table_region_debug": seg_debug["table_region_debug"],
+        "detected_region_boundaries": seg_debug["detected_region_boundaries"],
+        "rejected_item_rows_with_reason": seg_debug["rejected_item_rows_with_reason"],
+        "item_row_anchor_debug": seg_debug["item_row_anchor_debug"],
         "reconstructed_rows": legacy_reconstructed_rows,
+        "detected_table_rows": legacy_table_rows,
+        "columns_extracted": True,
+        "structured_tables": structured_tables,
         "detected_table_rows": legacy_table_rows,
         "columns_extracted": True,
         "structured_tables": structured_tables,
