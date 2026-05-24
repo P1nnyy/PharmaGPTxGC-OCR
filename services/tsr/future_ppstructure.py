@@ -451,6 +451,12 @@ class PPStructure_TSREngine(BaseTSREngine):
                 coverage = placed_cells / max(1, len(utilized_rows) * len(utilized_cols))
                 # High collisions or low coverage = low confidence
                 region.topology_confidence = round(max(0.1, min(1.0, coverage * (1.0 - collision_ratio))), 3)
+                
+                # Apply 0.9x penalty if the image/layout was rotated
+                if winner["angle"] != 0:
+                    region.topology_confidence = round(region.topology_confidence * 0.9, 3)
+                    region.confidence = round(region.confidence * 0.9, 3)
+
                 logger.info(f"Table {table_counter} topology_confidence={region.topology_confidence} (coverage={coverage:.2f}, collision_ratio={collision_ratio:.2f})")
 
                 final_regions.append(region)

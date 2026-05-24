@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     PIPELINE_VERSION: str = "2.0"
     ENABLE_PPSTRUCTURE: bool = False
     TSR_PRIMARY_ENGINE: str = "heuristic_anchor"
-    ENABLE_PPSTRUCTURE_MULTI_ORIENTATION: bool = False
+    ENABLE_PPSTRUCTURE_MULTI_ORIENTATION: bool = True
     PPSTRUCTURE_CONFIDENCE_THRESHOLD: float = 0.40
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
     TOKEN_COVERAGE_THRESHOLD: float = 0.95
