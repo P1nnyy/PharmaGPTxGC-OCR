@@ -3,6 +3,7 @@ from core.config import settings
 from core.logger import logger
 from models.schemas import HealthResponse, OCRResponse
 from services import cache_service, ocr_engine, spatial_reconstruction
+from services.error_handler import classify_error
 from services.llm_extractor import LLMExtractor
 from PIL import Image
 import io
@@ -109,5 +110,6 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
-        logger.error(f"Error processing upload: {e}")
+        classification = classify_error(e, stage="upload_invoice").to_dict()
+        logger.error(f"Error processing upload: {e}", extra={"error_classification": classification})
         raise HTTPException(status_code=500, detail=str(e))
