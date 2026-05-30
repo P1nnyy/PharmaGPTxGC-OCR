@@ -40,3 +40,6 @@ results/
 forensic_runs/
 datasets/debug/
 item_rows_clean.json
+
+.DS_Store
+**/.DS_Store
