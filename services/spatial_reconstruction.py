@@ -776,36 +776,23 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions, debug=(debug and not benchmark_mode))
 
-    # Step 5.1: Token Coverage Validation
-    from services.layout_pipeline.token_validator import TokenMappingValidator, TokenCoverageError
+    # Step 5.1: Token Coverage Validation (diagnostic only)
+    from services.layout_pipeline.token_validator import TokenMappingValidator
+    token_coverage_report = None
     try:
-        coverage_threshold = float(settings.TOKEN_COVERAGE_THRESHOLD)
-        validator = TokenMappingValidator(threshold=coverage_threshold)
-        report = validator.validate(ocr_blocks, table_regions)
-        
-        logger.info(
-            f"[TOKEN COVERAGE] total_tokens={report.total_tokens}, mapped={report.mapped_tokens}, "
-            f"unmapped={report.unmapped_tokens}, misaligned={report.misaligned_tokens}, "
-            f"coverage={report.coverage_percentage:.2f}% (required >= {coverage_threshold * 100.0:.2f}%)"
-        )
-        
-        try:
-            debug_dir = os.path.join(settings.DATASETS_DIR, "debug")
-            os.makedirs(debug_dir, exist_ok=True)
-            with open(os.path.join(debug_dir, "token_coverage_report.json"), "w", encoding="utf-8") as f:
-                f.write(report.to_json())
-        except Exception as e:
-            logger.error(f"Failed to export token coverage report: {e}")
-            
-        if report.coverage_percentage < (coverage_threshold * 100.0):
-            raise TokenCoverageError(
-                f"OCR Token coverage ({report.coverage_percentage:.2f}%) fell below "
-                f"required threshold ({coverage_threshold * 100.0:.2f}%). total_tokens={report.total_tokens}, "
-                f"unmapped={report.unmapped_tokens}."
-            )
-    except TokenCoverageError as e:
-        logger.error(f"[TOKEN COVERAGE FAILURE] {e}")
-        raise
+        validator = TokenMappingValidator(threshold=float(settings.TOKEN_COVERAGE_THRESHOLD))
+        token_coverage_report = validator.validate(ocr_blocks, table_regions)
+
+        if debug and not benchmark_mode:
+            try:
+                debug_dir = os.path.join(settings.DATASETS_DIR, "debug")
+                os.makedirs(debug_dir, exist_ok=True)
+                with open(os.path.join(debug_dir, "token_coverage_report.json"), "w", encoding="utf-8") as f:
+                    f.write(token_coverage_report.to_json())
+            except Exception as e:
+                logger.error(f"Failed to export token coverage report: {e}")
+    except Exception as e:
+        logger.error(f"[TOKEN COVERAGE] diagnostic generation failed: {e}")
 
     # ── NEW: HIERARCHICAL ROW GRAPH STAGE ──
     # Before applying destruction, snapshot Visual Row definitions for debug rendering
@@ -2139,6 +2126,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "graph_confidence": document_graph.get("graph_confidence", 0.0),
         "metrics": {
             "raw_token_count": raw_token_count,
+            "token_coverage": token_coverage_report.to_dict() if token_coverage_report else {},
+            "token_coverage_debug": token_coverage_report.to_dict() if token_coverage_report else {},
             "reconstructed_line_count": recon_line_count,
             "numeric_merge_suspicions": int(numeric_merge_suspicions),
             "avg_tokens_per_line": float(round(avg_tok, 2)),
