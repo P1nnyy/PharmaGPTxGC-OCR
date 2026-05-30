@@ -2,17 +2,55 @@ import os
 import threading
 from PIL import Image, ImageOps
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from core.logger import logger
 from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
 from surya.detection import DetectionPredictor
+from services.validators.rotation_detector import RotationDetector, rotate_image_clockwise
 
 # Global variables to cache the loaded models
 _foundation_predictor = None
 _detection_predictor = None
 _recognition_predictor = None
 _model_load_lock = threading.Lock()
+ROTATION_AUTO_CORRECT_CONFIDENCE_THRESHOLD = 0.85
+
+
+def _apply_rotation_if_confident(
+    image: Image.Image,
+    rotation_result: Any,
+    threshold: float = ROTATION_AUTO_CORRECT_CONFIDENCE_THRESHOLD,
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """
+    Apply the standalone rotation detector recommendation only when confidence is high.
+
+    Returns a copied image in all cases so caller-owned PIL instances are not mutated.
+    """
+    result_dict = rotation_result.to_dict() if hasattr(rotation_result, "to_dict") else {}
+    angle = int(getattr(rotation_result, "detected_rotation", 0) or 0)
+    confidence = float(getattr(rotation_result, "confidence", 0.0) or 0.0)
+    should_rotate = bool(getattr(rotation_result, "should_rotate", False))
+
+    metadata = {
+        "rotation_detection": result_dict,
+        "rotation_applied": False,
+        "rotation_angle": 0,
+        "rotation_auto_correct_threshold": threshold,
+    }
+
+    if should_rotate and angle in {90, 180, 270} and confidence >= threshold:
+        logger.warning(
+            "Applying conservative rotation correction angle=%s confidence=%.4f threshold=%.2f",
+            angle,
+            confidence,
+            threshold,
+        )
+        metadata["rotation_applied"] = True
+        metadata["rotation_angle"] = angle
+        return rotate_image_clockwise(image.copy(), angle), metadata
+
+    return image.copy(), metadata
 
 def load_models_if_needed():
     global _foundation_predictor, _detection_predictor, _recognition_predictor
@@ -37,6 +75,7 @@ def load_models_if_needed():
 
 def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, Any]:
     load_models_if_needed()
+    image = image.copy()
     
     # 1. Orientation Normalization
     try:
@@ -52,6 +91,15 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     except Exception as e:
         logger.error(f"Error during orientation normalization: {e}")
         
+    rotation_result = RotationDetector().detect(image)
+    image, rotation_metadata = _apply_rotation_if_confident(image, rotation_result)
+    logger.info(
+        "Rotation metadata: applied=%s angle=%s confidence=%.4f",
+        rotation_metadata["rotation_applied"],
+        rotation_metadata["rotation_angle"],
+        float(getattr(rotation_result, "confidence", 0.0) or 0.0),
+    )
+
     logger.info("Running Surya OCR (v0.17.1)")
     
     # 2. Adaptive Resolution Upscaling
@@ -59,11 +107,15 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     upscaled = False
     det_results = _detection_predictor([image])
     
-    # ── Multi-Orientation (4-Rotation) Correction Logic ──
-    from services.validators.rotation_detector import RotationDetector
+    # ── Existing OCR-based Multi-Orientation (4-Rotation) Correction Logic ──
     image, det_results, applied_rotation, rot_confidence = RotationDetector.detect_and_correct(
         image, _detection_predictor, threshold=0.70
     )
+    rotation_metadata.update({
+        "legacy_rotation_applied": bool(applied_rotation),
+        "legacy_rotation_angle": int(applied_rotation or 0),
+        "legacy_rotation_confidence": float(rot_confidence or 0.0),
+    })
 
     # 2. Adaptive Resolution Upscaling
     # Run coarse detection height validation after potential rotation correction
@@ -100,7 +152,7 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     predictions = _recognition_predictor([image], det_predictor=_detection_predictor)
     
     if not predictions:
-        return {"text": "", "blocks": []}
+        return {"text": "", "blocks": [], "metadata": rotation_metadata}
     
     result = predictions[0]
     
@@ -123,5 +175,6 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
     
     return {
         "text": full_text,
-        "blocks": blocks
+        "blocks": blocks,
+        "metadata": rotation_metadata,
     }

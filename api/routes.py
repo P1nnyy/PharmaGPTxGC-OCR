@@ -84,7 +84,9 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
         cache_service.save_result(invoice_id, ocr_result)
         
         blocks = ocr_result.get("blocks", [])
+        ocr_metadata = ocr_result.get("metadata") if isinstance(ocr_result.get("metadata"), dict) else {}
         metadata = {
+            **ocr_metadata,
             "blocks": blocks,
             "image_validation": val_report
         }
