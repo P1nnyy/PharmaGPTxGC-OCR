@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     PPSTRUCTURE_CONFIDENCE_THRESHOLD: float = 0.40
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
     TOKEN_COVERAGE_THRESHOLD: float = 0.95
+    IMAGE_MIN_SIDE_PX: int = 256
+    IMAGE_MAX_SIDE_PX: int = 4096
+    IMAGE_MIN_ASPECT_RATIO: float = 0.5
+    IMAGE_MAX_ASPECT_RATIO: float = 2.0
+    IMAGE_MIN_DPI_WARNING: float = 150
 
     @model_validator(mode="after")
     def derive_ocr_results_dir(self):

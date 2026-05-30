@@ -1,164 +1,252 @@
 """
 Image Validator for Invoice Processing.
 
-Performs dimensions, aspect ratio, DPI, color space, upside-down rotation detection,
-and quality scoring on uploaded images before passing to the OCR engine.
+Performs lightweight readability, dimensions, aspect ratio, DPI, color mode, and
+quality checks on uploaded images before passing them to the OCR engine.
 """
 
 import io
-import time
-from typing import List, Dict, Any, Optional, Tuple
-from PIL import Image
-import numpy as np
+import os
+from pathlib import Path
+from typing import Any, BinaryIO, Dict, List, Optional, Union
+
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field
+
+from core.config import settings
 from core.logger import logger
 
+
+class ImageValidationProperties(BaseModel):
+    width: Optional[int] = None
+    height: Optional[int] = None
+    aspect_ratio: Optional[float] = None
+    color_space: Optional[str] = None
+    estimated_dpi: Optional[float] = None
+    format: Optional[str] = None
+    mode: Optional[str] = None
+
+
+class ImageValidationResult(BaseModel):
+    is_valid: bool
+    quality_score: float
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    properties: ImageValidationProperties = Field(default_factory=ImageValidationProperties)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = self.model_dump(mode="json")
+        if self.errors:
+            payload["error_message"] = "; ".join(self.errors)
+        return payload
+
+
 class ImageValidator:
-    """Validator class to evaluate image characteristics and enforce OCR processing gates."""
+    """Validator class to evaluate image characteristics before OCR processing."""
+
+    def __init__(
+        self,
+        min_side_px: Optional[int] = None,
+        max_side_px: Optional[int] = None,
+        min_aspect_ratio: Optional[float] = None,
+        max_aspect_ratio: Optional[float] = None,
+        min_dpi_warning: Optional[float] = None,
+    ):
+        self.min_side_px = int(min_side_px if min_side_px is not None else settings.IMAGE_MIN_SIDE_PX)
+        self.max_side_px = int(max_side_px if max_side_px is not None else settings.IMAGE_MAX_SIDE_PX)
+        self.min_aspect_ratio = float(
+            min_aspect_ratio if min_aspect_ratio is not None else settings.IMAGE_MIN_ASPECT_RATIO
+        )
+        self.max_aspect_ratio = float(
+            max_aspect_ratio if max_aspect_ratio is not None else settings.IMAGE_MAX_ASPECT_RATIO
+        )
+        self.min_dpi_warning = float(
+            min_dpi_warning if min_dpi_warning is not None else settings.IMAGE_MIN_DPI_WARNING
+        )
 
     @staticmethod
-    def validate_image(file_bytes: bytes) -> Dict[str, Any]:
-        """
-        Validates an uploaded image and computes structural property metadata and a quality score.
-        
-        Args:
-            file_bytes: Raw binary content of the uploaded file.
-            
-        Returns:
-            A validation report dictionary adhering to the required return structure.
-        """
-        start_time = time.time()
-        warnings = []
-        is_valid = True
-        error_message = None
-        
-        # 1. Format Validation (PIL open test)
+    def validate_image(image_input: Any) -> Dict[str, Any]:
+        """Backward-compatible dict-returning validation entry point."""
+        return ImageValidator().validate(image_input).to_dict()
+
+    def validate(self, image_input: Any) -> ImageValidationResult:
         try:
-            img = Image.open(io.BytesIO(file_bytes))
-            # verify() checks format integrity, but closes/invalidates the PIL object
-            img.verify()
-            # Reopen for actual property checks
-            img = Image.open(io.BytesIO(file_bytes))
-        except Exception as e:
-            logger.error(f"[IMAGE VALIDATION] PIL format verification failed: {e}")
-            return {
-                "is_valid": False,
-                "quality_score": 0.0,
-                "warnings": [f"Invalid image format: {str(e)}"],
-                "properties": {
-                    "width": 0,
-                    "height": 0,
-                    "aspect_ratio": 0.0,
-                    "estimated_dpi": 0,
-                    "color_space": "unknown",
-                    "likely_rotation": None
-                }
-            }
+            image = self._open_image(image_input)
+            image.load()
+        except (UnidentifiedImageError, OSError, ValueError, TypeError) as exc:
+            message = f"Invalid image format: {exc}"
+            logger.warning("[IMAGE VALIDATION] PIL image read failed: %s", exc)
+            return ImageValidationResult(
+                is_valid=False,
+                quality_score=0.0,
+                errors=[message],
+            )
 
-        width, height = img.size
-        aspect_ratio = round(width / height, 4) if height > 0 else 0.0
-        
-        # 2. Dimension Checks (256px <= min(width, height) <= 4096px)
-        min_dim = min(width, height)
-        if min_dim < 256:
-            is_valid = False
-            error_message = f"Minimum image dimension ({min_dim}px) is too small. Must be at least 256px."
-        elif min_dim > 4096:
-            is_valid = False
-            error_message = f"Minimum image dimension ({min_dim}px) is too large. Must be at most 4096px."
+        properties = self._properties(image)
+        warnings: List[str] = []
+        errors: List[str] = []
 
-        # 3. Aspect Ratio Validation (0.5 <= aspect_ratio <= 2.0)
-        if is_valid and (aspect_ratio < 0.5 or aspect_ratio > 2.0):
-            is_valid = False
-            error_message = f"Invalid image aspect ratio ({aspect_ratio:.2f}). Invoices must be portrait or landscape between 0.5 and 2.0."
-
-        # 4. Color Space Analysis (Grayscale vs RGB)
-        color_space = "grayscale" if img.mode in ("L", "1") else "RGB"
-
-        # 5. DPI Estimation (From EXIF or estimated from A4 length heuristic)
-        estimated_dpi = 0
-        exif_dpi = img.info.get("dpi")
-        if exif_dpi and isinstance(exif_dpi, (tuple, list)) and len(exif_dpi) >= 2:
-            estimated_dpi = int(exif_dpi[0])
+        width = properties.width
+        height = properties.height
+        if width is None or height is None or width <= 0 or height <= 0:
+            errors.append("Image dimensions could not be read.")
         else:
-            # Fallback A4 length heuristic: assume standard page length is ~11.0 inches
-            estimated_dpi = int(max(width, height) / 11.0)
+            min_side = min(width, height)
+            max_side = max(width, height)
+            if min_side < self.min_side_px:
+                errors.append(
+                    f"Minimum image dimension ({min_side}px) is too small. Must be at least {self.min_side_px}px."
+                )
+            if max_side > self.max_side_px:
+                errors.append(
+                    f"Maximum image dimension ({max_side}px) is too large. Must be at most {self.max_side_px}px."
+                )
 
-        if estimated_dpi < 150:
-            warnings.append(f"Low estimated DPI ({estimated_dpi}). Text recognition accuracy may be reduced.")
+        aspect_ratio = properties.aspect_ratio
+        if aspect_ratio is not None and not (self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio):
+            errors.append(
+                f"Invalid image aspect ratio ({aspect_ratio:.2f}). "
+                f"Invoices must be between {self.min_aspect_ratio:.2f} and {self.max_aspect_ratio:.2f}."
+            )
 
-        # 6. Pre-Rotation Upside-Down (180 deg) Detection using Top/Bottom brightness projections
-        likely_rotation = 0
-        try:
-            # Convert to grayscale for intensity profile analysis
-            gray = img.convert("L")
-            w_gray, h_gray = gray.size
-            
-            # Crop top and bottom 20% bands
-            top_band = gray.crop((0, 0, w_gray, int(h_gray * 0.20)))
-            bottom_band = gray.crop((0, int(h_gray * 0.80), w_gray, h_gray))
-            
-            # Compute average brightness (0 = dark, 255 = white)
-            top_brightness = np.mean(np.array(top_band))
-            bottom_brightness = np.mean(np.array(bottom_band))
-            
-            # Invoices generally contain dense title text/logo/headers at the top (darker) 
-            # and sparse blank margins at the bottom (brighter). 
-            # If the top band is significantly whiter/brighter than the bottom band, it is likely upside down.
-            if top_brightness > (bottom_brightness + 18.0):
-                likely_rotation = 180
-                warnings.append("Image appears to be upside-down (180° rotation detected).")
-        except Exception as e:
-            logger.warning(f"[IMAGE VALIDATION] Pre-rotation estimation failed: {e}")
-            likely_rotation = None
+        if properties.mode in {"L", "1"} or properties.color_space == "grayscale":
+            warnings.append("Image is grayscale; OCR may have reduced contrast information.")
 
-        # 7. Quality Score Generation (0.0-1.0)
-        quality_score = 1.0
-        
-        # Deduct for low DPI
-        if estimated_dpi < 100:
-            quality_score -= 0.35
-        elif estimated_dpi < 150:
-            quality_score -= 0.15
-            
-        # Deduct for extremely narrow sizes
-        if min_dim < 512:
-            quality_score -= 0.20
-            
-        # Deduct for extreme aspect ratios close to limits
-        if aspect_ratio < 0.65 or aspect_ratio > 1.75:
-            quality_score -= 0.10
-            
-        # Deduct for grayscale (reduced color contrast)
-        if color_space == "grayscale":
-            quality_score -= 0.05
-            
-        # Clamp quality score between 0.1 and 1.0
-        quality_score = round(max(0.1, min(1.0, quality_score)), 2)
+        if properties.estimated_dpi is None:
+            warnings.append("DPI metadata missing; continuing.")
+        elif properties.estimated_dpi < self.min_dpi_warning:
+            warnings.append(
+                f"Low DPI metadata ({properties.estimated_dpi:g}); OCR accuracy may be reduced."
+            )
 
-        elapsed_ms = (time.time() - start_time) * 1000.0
-        
-        # Log validator properties as required
-        logger.info(
-            f"[IMAGE VALIDATION] dims={width}x{height}, aspect={aspect_ratio:.2f}, "
-            f"dpi={estimated_dpi}, color={color_space}, rotation={likely_rotation}, "
-            f"quality={quality_score}, valid={is_valid}, time={elapsed_ms:.1f}ms"
+        quality_score = self._quality_score(properties, errors, warnings)
+        result = ImageValidationResult(
+            is_valid=not errors,
+            quality_score=quality_score,
+            warnings=warnings,
+            errors=errors,
+            properties=properties,
         )
-        
-        report = {
-            "is_valid": is_valid,
-            "quality_score": quality_score,
-            "warnings": warnings,
-            "properties": {
-                "width": width,
-                "height": height,
-                "aspect_ratio": aspect_ratio,
-                "estimated_dpi": estimated_dpi,
-                "color_space": color_space,
-                "likely_rotation": likely_rotation
-            }
-        }
-        
-        if error_message:
-            report["error_message"] = error_message
-            
-        return report
+
+        logger.info(
+            "[IMAGE VALIDATION] width=%s height=%s aspect_ratio=%s mode=%s color_space=%s format=%s dpi=%s quality=%.2f valid=%s",
+            properties.width,
+            properties.height,
+            properties.aspect_ratio,
+            properties.mode,
+            properties.color_space,
+            properties.format,
+            properties.estimated_dpi,
+            result.quality_score,
+            result.is_valid,
+        )
+        for warning in warnings:
+            logger.warning("[IMAGE VALIDATION] %s", warning)
+        for error in errors:
+            logger.warning("[IMAGE VALIDATION] %s", error)
+
+        return result
+
+    def _open_image(self, image_input: Any) -> Image.Image:
+        if isinstance(image_input, Image.Image):
+            return image_input.copy()
+
+        if isinstance(image_input, (bytes, bytearray, memoryview)):
+            return Image.open(io.BytesIO(bytes(image_input)))
+
+        if isinstance(image_input, (str, os.PathLike, Path)):
+            return Image.open(image_input)
+
+        file_obj = getattr(image_input, "file", None)
+        if file_obj is not None:
+            return self._open_file_like(file_obj)
+
+        read = getattr(image_input, "read", None)
+        if callable(read):
+            return self._open_file_like(image_input)
+
+        raise TypeError("Unsupported image input type.")
+
+    @staticmethod
+    def _open_file_like(file_obj: BinaryIO) -> Image.Image:
+        try:
+            position = file_obj.tell()
+        except Exception:
+            position = None
+        data = file_obj.read()
+        if position is not None:
+            try:
+                file_obj.seek(position)
+            except Exception:
+                pass
+        return Image.open(io.BytesIO(data))
+
+    @staticmethod
+    def _properties(image: Image.Image) -> ImageValidationProperties:
+        width, height = image.size
+        aspect_ratio = round(width / height, 4) if height else None
+        dpi = ImageValidator._read_dpi(image)
+        return ImageValidationProperties(
+            width=int(width) if width is not None else None,
+            height=int(height) if height is not None else None,
+            aspect_ratio=aspect_ratio,
+            color_space=ImageValidator._color_space(image.mode),
+            estimated_dpi=dpi,
+            format=image.format,
+            mode=image.mode,
+        )
+
+    @staticmethod
+    def _read_dpi(image: Image.Image) -> Optional[float]:
+        dpi = image.info.get("dpi")
+        if isinstance(dpi, (tuple, list)) and dpi:
+            numeric = [float(value) for value in dpi if isinstance(value, (int, float))]
+            return round(sum(numeric) / len(numeric), 2) if numeric else None
+        if isinstance(dpi, (int, float)):
+            return float(dpi)
+        return None
+
+    @staticmethod
+    def _color_space(mode: Optional[str]) -> Optional[str]:
+        if mode in {"L", "1"}:
+            return "grayscale"
+        return mode
+
+    def _quality_score(
+        self,
+        properties: ImageValidationProperties,
+        errors: List[str],
+        warnings: List[str],
+    ) -> float:
+        if errors:
+            score = 0.35
+        else:
+            score = 1.0
+
+        if properties.width and properties.height:
+            min_side = min(properties.width, properties.height)
+            max_side = max(properties.width, properties.height)
+            if min_side < 512:
+                score -= 0.20
+            if max_side > (self.max_side_px * 0.9):
+                score -= 0.10
+
+        if properties.aspect_ratio is not None:
+            near_min = self.min_aspect_ratio <= properties.aspect_ratio < (self.min_aspect_ratio + 0.15)
+            near_max = (self.max_aspect_ratio - 0.25) < properties.aspect_ratio <= self.max_aspect_ratio
+            if near_min or near_max:
+                score -= 0.10
+
+        if properties.estimated_dpi is not None:
+            if properties.estimated_dpi < 100:
+                score -= 0.25
+            elif properties.estimated_dpi < self.min_dpi_warning:
+                score -= 0.15
+
+        if properties.mode in {"L", "1"}:
+            score -= 0.05
+
+        if warnings and properties.estimated_dpi is None:
+            score -= 0.02
+
+        return round(max(0.0, min(1.0, score)), 2)

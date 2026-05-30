@@ -8,17 +8,20 @@ class HealthResponse(BaseModel):
     cuda_version: Optional[str] = None
 
 class ImageProperties(BaseModel):
-    width: int
-    height: int
-    aspect_ratio: float
-    estimated_dpi: int
-    color_space: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    aspect_ratio: Optional[float] = None
+    estimated_dpi: Optional[float] = None
+    color_space: Optional[str] = None
+    format: Optional[str] = None
+    mode: Optional[str] = None
     likely_rotation: Optional[int] = None
 
 class ImageValidationReport(BaseModel):
     is_valid: bool
     quality_score: float
     warnings: List[str] = []
+    errors: List[str] = []
     properties: ImageProperties
 
 class OCRMetadata(BaseModel):
