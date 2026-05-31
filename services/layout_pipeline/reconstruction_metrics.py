@@ -250,6 +250,7 @@ def build_row_handoff_summary(
     item_rows_clean_count = _count_or_none(item_rows_clean)
     source_counts = _count_item_row_sources(item_rows_clean)
     dominant_source = _dominant_source(source_counts)
+    graph_rows_are_handed_off = dominant_source in {"selected_graph_table", "document_graph_candidate"}
     validation_reason_counts = _validation_error_reasons(clean_item_row_validation_errors)
     missing_key_counts = _missing_key_column_counts(item_rows_clean)
 
@@ -266,7 +267,12 @@ def build_row_handoff_summary(
     ):
         mismatch_reasons.append("graph_selected_but_item_rows_clean_uses_raw_ocr")
 
-    if selected_column_count is not None and selected_column_count >= 4 and any(missing_key_counts.values()):
+    if (
+        not graph_rows_are_handed_off
+        and selected_column_count is not None
+        and selected_column_count >= 4
+        and any(missing_key_counts.values())
+    ):
         missing = [
             field
             for field, count in missing_key_counts.items()
@@ -278,6 +284,7 @@ def build_row_handoff_summary(
         candidate_graph_math_failures is not None
         and reconciliation_rows_math_failed is not None
         and reconciliation_rows_math_failed > candidate_graph_math_failures + 1
+        and not graph_rows_are_handed_off
     ):
         mismatch_reasons.append("final_reconciliation_math_failures_exceed_candidate_graph_failures")
 

@@ -1836,13 +1836,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Run the table region segmentation and anchor-based reconstruction
     from services.table_segmenter import TableSegmenter
     segmenter = TableSegmenter(table_regions, ocr_blocks)
-    segmenter_results = segmenter.process()
+    selected_main_table = table_bundle.main_table if table_bundle else None
+    selected_main_table_semantics = (
+        final_column_semantics.get(selected_main_table.table_id, {})
+        if selected_main_table is not None
+        else {}
+    )
+    segmenter_results = segmenter.process(
+        selected_topology_source=selected_topology_source,
+        selected_main_table=selected_main_table,
+        column_semantics=selected_main_table_semantics,
+    )
     
     seg_debug = segmenter_results["debug"]
+    item_row_source_selection = (
+        segmenter_results.get("item_row_source_selection")
+        or seg_debug.get("item_row_source_selection", {})
+    )
     row_handoff_summary = build_row_handoff_summary(
         selected_topology_source=selected_topology_source,
         topology_source=topology_source,
-        selected_main_table=table_bundle.main_table if table_bundle else None,
+        selected_main_table=selected_main_table,
         item_rows_clean=segmenter_results.get("item_rows_clean"),
         clean_item_row_validation_errors=seg_debug.get("clean_item_row_validation_errors", []),
         reconciliation_result=main_rec,
@@ -2012,6 +2026,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             },
             "fast_fail": False,
             "tsr_candidate_decision": tsr_candidate_decision,
+            "item_row_source_selection": item_row_source_selection,
             "row_handoff_summary": row_handoff_summary,
             **tsr_metadata,
             "tsr_status": tsr_status_metric

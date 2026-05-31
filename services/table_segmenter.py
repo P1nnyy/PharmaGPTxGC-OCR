@@ -390,6 +390,249 @@ def extract_item_rows_from_ocr_blocks(
     debug["tokens_rejected_by_column_rule"] = rejected_column_tokens
     return item_rows
 
+
+_GRAPH_FIELD_ALIASES = {
+    "pcode": {"pcode", "p_code", "product_code", "code"},
+    "item_description": {"product", "description", "item", "item_description", "particulars", "drug_name"},
+    "hsn": {"hsn", "hsn_code"},
+    "batch": {"batch", "batch_no", "batch_number"},
+    "expiry": {"expiry", "exp", "expiry_date"},
+    "mrp": {"mrp"},
+    "qty": {"qty", "quantity", "free_quantity"},
+    "rate": {"rate", "unit_rate", "price"},
+    "discount": {"discount", "disc"},
+    "gst": {"gst", "tax", "cgst", "sgst", "igst"},
+    "net_amt": {"amount", "net_amt", "net_amount", "value", "taxable_value"},
+}
+
+_GRAPH_CLEAN_ROW_FIELDS = [
+    "pcode",
+    "item_description",
+    "hsn",
+    "batch",
+    "expiry",
+    "mrp",
+    "qty",
+    "rate",
+    "discount",
+    "gst",
+    "net_amt",
+]
+
+_CRITICAL_CLEAN_ROW_FIELDS = ("hsn", "qty", "rate", "net_amt")
+
+
+def _read_attr(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _normalize_semantic_label(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("type") or value.get("semantic") or value.get("label")
+    value = getattr(value, "value", value)
+    text = str(value or "").strip().lower()
+    return re.sub(r"[^a-z0-9_]+", "_", text)
+
+
+def _field_for_semantic(value: Any) -> Optional[str]:
+    semantic = _normalize_semantic_label(value)
+    if not semantic or semantic in {"unknown", "unknown_column"}:
+        return None
+    for field, aliases in _GRAPH_FIELD_ALIASES.items():
+        if semantic in aliases:
+            return field
+    return None
+
+
+def _row_sort_key(row: Any) -> Tuple[float, str]:
+    geom = _read_attr(row, "geometry") or _read_attr(row, "normalized_geometry") or _read_attr(row, "original_geometry")
+    return (
+        float(_read_attr(geom, "min_y", 0.0) or 0.0),
+        str(_read_attr(row, "row_id", "")),
+    )
+
+
+def _cell_sort_key(cell: Any) -> Tuple[float, str]:
+    geom = _read_attr(cell, "geometry") or _read_attr(cell, "normalized_geometry") or _read_attr(cell, "original_geometry")
+    return (
+        float(_read_attr(geom, "min_x", 0.0) or 0.0),
+        str(_read_attr(cell, "col_id", "")),
+    )
+
+
+def _join_cell_values(values: List[str]) -> str:
+    return " ".join(value for value in values if value).strip()
+
+
+def selected_table_to_clean_item_rows(
+    selected_table: Any,
+    column_semantics: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Convert an already-selected graph/structured table into clean item rows.
+
+    This is intentionally conservative: it reads existing row roles, cells, and
+    semantic labels only. It does not rerun classifiers or alter the table.
+    """
+    if selected_table is None:
+        return []
+
+    column_semantics = column_semantics or {}
+    rows = list(_read_attr(selected_table, "rows", []) or [])
+    cells = list(_read_attr(selected_table, "cells", []) or [])
+    cells_by_row: Dict[str, List[Any]] = {}
+    for cell in cells:
+        row_id = str(_read_attr(cell, "row_id", "") or "")
+        if row_id:
+            cells_by_row.setdefault(row_id, []).append(cell)
+
+    item_rows = []
+    for row in sorted(rows, key=_row_sort_key):
+        row_role = str(_read_attr(row, "row_role", "") or "").lower()
+        if row_role != "item_row":
+            continue
+
+        row_id = str(_read_attr(row, "row_id", "") or "")
+        row_cells = sorted(cells_by_row.get(row_id, []), key=_cell_sort_key)
+        values_by_field: Dict[str, List[str]] = {field: [] for field in _GRAPH_CLEAN_ROW_FIELDS}
+        for cell in row_cells:
+            text = str(_read_attr(cell, "text", "") or "").strip()
+            if not text:
+                continue
+            col_id = str(_read_attr(cell, "col_id", "") or "")
+            field = _field_for_semantic(column_semantics.get(col_id))
+            if field:
+                values_by_field[field].append(text)
+
+        clean_row = {
+            field: _join_cell_values(values_by_field[field])
+            for field in _GRAPH_CLEAN_ROW_FIELDS
+        }
+        confidence_reasons = []
+        if not clean_row["pcode"]:
+            confidence_reasons.append("missing_pcode")
+        if not clean_row["item_description"]:
+            confidence_reasons.append("empty_description")
+        if not clean_row["hsn"]:
+            confidence_reasons.append("missing_hsn")
+        if not clean_row["qty"]:
+            confidence_reasons.append("missing_qty")
+        if not clean_row["rate"]:
+            confidence_reasons.append("missing_rate")
+        if not clean_row["net_amt"]:
+            confidence_reasons.append("missing_net_amt")
+
+        clean_row.update({
+            "low_confidence": bool(confidence_reasons),
+            "confidence_reasons": confidence_reasons,
+            "visual_row_id": row_id,
+            "source": "selected_graph_table",
+        })
+        item_rows.append(clean_row)
+
+    return item_rows
+
+
+def _missing_critical_field_count(rows: Any) -> int:
+    if not isinstance(rows, list):
+        return 0
+    missing = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            missing += len(_CRITICAL_CLEAN_ROW_FIELDS)
+            continue
+        reasons = set(row.get("confidence_reasons") or [])
+        for field in _CRITICAL_CLEAN_ROW_FIELDS:
+            reason = "missing_net_amt" if field == "net_amt" else f"missing_{field}"
+            if not row.get(field) or reason in reasons:
+                missing += 1
+    return missing
+
+
+def _missing_critical_field_names(rows: Any) -> List[str]:
+    if not isinstance(rows, list):
+        return []
+    missing = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            missing.update(_CRITICAL_CLEAN_ROW_FIELDS)
+            continue
+        reasons = set(row.get("confidence_reasons") or [])
+        for field in _CRITICAL_CLEAN_ROW_FIELDS:
+            reason = "missing_net_amt" if field == "net_amt" else f"missing_{field}"
+            if not row.get(field) or reason in reasons:
+                missing.add(field)
+    return sorted(missing)
+
+
+def select_item_rows_clean_source(
+    raw_item_rows: Any,
+    graph_item_rows: Any,
+    selected_topology_source: Any = None,
+    selected_main_table: Any = None,
+    bridge_error: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Choose graph-derived clean rows only when they clearly improve the raw fallback."""
+    raw_rows = raw_item_rows if isinstance(raw_item_rows, list) else []
+    graph_rows = graph_item_rows if isinstance(graph_item_rows, list) else []
+    raw_missing = _missing_critical_field_count(raw_rows)
+    graph_missing = _missing_critical_field_count(graph_rows)
+    raw_missing_fields = _missing_critical_field_names(raw_rows)
+    graph_missing_fields = _missing_critical_field_names(graph_rows)
+    is_graph_selected = selected_topology_source == "document_graph_candidate"
+    attempted = bool(is_graph_selected)
+    reasons = []
+    graph_has_more_field_types = len(graph_missing_fields) < len(raw_missing_fields)
+
+    if not is_graph_selected:
+        reasons.append("selected_topology_not_graph")
+    if is_graph_selected and selected_main_table is None:
+        reasons.append("missing_selected_graph_table")
+    if bridge_error:
+        reasons.append(f"graph_bridge_exception:{bridge_error}")
+    if is_graph_selected and not graph_rows:
+        reasons.append("graph_rows_unavailable")
+    if graph_rows and len(graph_rows) < len(raw_rows):
+        reasons.append("graph_row_count_lt_raw")
+    if graph_rows and not any(row.get("item_description") for row in graph_rows if isinstance(row, dict)):
+        reasons.append("graph_rows_missing_item_description")
+    if graph_rows and raw_rows and graph_missing >= raw_missing and not graph_has_more_field_types:
+        reasons.append("graph_missing_critical_not_better")
+
+    use_graph = (
+        is_graph_selected
+        and selected_main_table is not None
+        and not bridge_error
+        and bool(graph_rows)
+        and len(graph_rows) >= len(raw_rows)
+        and any(row.get("item_description") for row in graph_rows if isinstance(row, dict))
+        and (not raw_rows or graph_missing < raw_missing or graph_has_more_field_types)
+    )
+
+    chosen_rows = graph_rows if use_graph else raw_rows
+    chosen_source = "selected_graph_table" if use_graph else "raw_ocr_coordinate_reconstruction"
+    if use_graph:
+        if graph_missing >= raw_missing and graph_has_more_field_types:
+            reasons.append("graph_distinct_critical_fields_better")
+        reasons.append("selected_graph_rows_passed_guard")
+
+    return chosen_rows, {
+        "selected_topology_source": selected_topology_source or "unknown",
+        "raw_ocr_row_count": len(raw_rows),
+        "graph_row_count": len(graph_rows),
+        "chosen_source": chosen_source,
+        "graph_bridge_attempted": attempted,
+        "graph_bridge_used": use_graph,
+        "raw_missing_critical_fields": raw_missing,
+        "graph_missing_critical_fields": graph_missing,
+        "raw_missing_critical_field_types": raw_missing_fields,
+        "graph_missing_critical_field_types": graph_missing_fields,
+        "reasons": reasons,
+    }
+
+
 class TableSegmenter:
     """
     Handles robust segmentation of invoice tables and anchor-based medicine item reconstruction.
@@ -805,7 +1048,12 @@ class TableSegmenter:
                     
         return item_rows_clean
 
-    def process(self) -> Dict[str, Any]:
+    def process(
+        self,
+        selected_topology_source: Optional[str] = None,
+        selected_main_table: Optional[TableRegion] = None,
+        column_semantics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Executes classification, routing, reconstruction, and dumps diagnostic verification files.
         """
@@ -817,8 +1065,28 @@ class TableSegmenter:
         scheme_rows = self.reconstruct_generic_table(self.scheme_table) if self.scheme_table else []
         credit_note_rows = self.reconstruct_generic_table(self.credit_note_table) if self.credit_note_table else []
         
-        # 3. Reconstruct item rows directly from raw OCR token coordinates.
-        item_rows_clean = extract_item_rows_from_ocr_blocks(self.ocr_blocks, self.debug_output)
+        # 3. Reconstruct raw OCR fallback and optionally bridge to selected graph rows.
+        raw_item_rows_clean = extract_item_rows_from_ocr_blocks(self.ocr_blocks, self.debug_output)
+        graph_item_rows_clean = []
+        bridge_error = None
+        if selected_topology_source == "document_graph_candidate" and selected_main_table is not None:
+            try:
+                graph_item_rows_clean = selected_table_to_clean_item_rows(
+                    selected_main_table,
+                    column_semantics=column_semantics,
+                )
+            except Exception as exc:
+                bridge_error = str(exc)
+                log.warning("selected_graph_item_row_bridge_failed", error=bridge_error)
+
+        item_rows_clean, item_row_source_selection = select_item_rows_clean_source(
+            raw_item_rows_clean,
+            graph_item_rows_clean,
+            selected_topology_source=selected_topology_source,
+            selected_main_table=selected_main_table,
+            bridge_error=bridge_error,
+        )
+        self.debug_output["item_row_source_selection"] = item_row_source_selection
         
         # 4. Save item_rows_clean.json to file system for manual audit/verification (Requirement 8)
         debug_dir = "datasets/debug"
@@ -839,6 +1107,7 @@ class TableSegmenter:
         return {
             "tax_summary": tax_summary,
             "item_rows_clean": item_rows_clean,
+            "item_row_source_selection": item_row_source_selection,
             "scheme_rows": scheme_rows,
             "credit_note_rows": credit_note_rows,
             "debug": self.debug_output

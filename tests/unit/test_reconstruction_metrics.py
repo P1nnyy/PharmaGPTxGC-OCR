@@ -147,6 +147,32 @@ def test_row_handoff_summary_no_mismatch_when_sources_align():
     assert summary["dominant_item_rows_clean_source"] == "document_graph_candidate"
 
 
+def test_row_handoff_summary_treats_selected_graph_rows_as_handed_off():
+    summary = build_row_handoff_summary(
+        selected_topology_source="document_graph_candidate",
+        topology_source="document_graph_candidate",
+        selected_main_table=_candidate(rows=16, columns=13, cells=208, confidence=1.0),
+        item_rows_clean=[
+            {
+                "source": "selected_graph_table",
+                "hsn": "300490",
+                "qty": "",
+                "rate": "10.00",
+                "low_confidence": True,
+                "confidence_reasons": ["missing_qty"],
+            }
+        ],
+        clean_item_row_validation_errors=[],
+        reconciliation_result={"rows_math_failed": 7, "rows_math_passed": 0},
+        graph_metrics={"row_math_fail_count": 1},
+        heuristic_metrics={"row_math_fail_count": 0},
+    )
+
+    assert summary["handoff_mismatch"] is False
+    assert summary["handoff_mismatch_reasons"] == []
+    assert summary["dominant_item_rows_clean_source"] == "selected_graph_table"
+
+
 def test_row_handoff_summary_handles_missing_values():
     summary = build_row_handoff_summary()
 
