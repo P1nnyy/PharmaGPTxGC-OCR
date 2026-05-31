@@ -23,6 +23,7 @@ from services.layout_pipeline.reconstruction_diagnostics import (
     _token_flags,
 )
 from services.layout_pipeline.reconstruction_metrics import (
+    build_tsr_candidate_decision_summary,
     _compute_tsr_confidence,
     _invoice_footer_tax_source_counts,
 )
@@ -355,6 +356,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     heuristic_fallback_used = False
     ppstructure_regions_attempted = 0
     ppstructure_cells_attempted = 0
+    tsr_candidate_decision = None
     tsr_status_metric = {
         "ppstructure_enabled": ppstructure_enabled,
         "ppstructure_skipped_reason": None,
@@ -512,6 +514,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                     ),
                 },
                 "fast_fail": True,
+                "tsr_candidate_decision": build_tsr_candidate_decision_summary(
+                    selected_topology_source=selected_topology_source,
+                    selected_candidate_reason="zero_tables",
+                    tsr_status_metric=tsr_status_metric,
+                    tsr_metadata=tsr_metadata,
+                ),
                 **tsr_metadata,
                 "tsr_status": tsr_status_metric
             }
@@ -1099,6 +1107,19 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     tsr_metadata["selected_candidate_reason"] = selected_candidate_reason
     tsr_metadata["heuristic_row_math_fail_count"] = heuristic_metrics.get("row_math_fail_count", 0)
     tsr_metadata["graph_row_math_fail_count"] = graph_metrics.get("row_math_fail_count", 0)
+    tsr_candidate_decision = build_tsr_candidate_decision_summary(
+        heuristic_candidate=heuristic_candidate,
+        heuristic_metrics=heuristic_metrics,
+        heuristic_score=heuristic_score,
+        graph_candidate=graph_candidate,
+        graph_metrics=graph_metrics,
+        graph_score=graph_score,
+        graph_selection_blocked_reason=graph_selection_blocked_reason,
+        selected_topology_source=selected_topology_source,
+        selected_candidate_reason=selected_candidate_reason,
+        tsr_status_metric=tsr_status_metric,
+        tsr_metadata=tsr_metadata,
+    )
 
     # Promote graph candidate if selected
     if selected_topology_source == "document_graph_candidate":
@@ -1646,6 +1667,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "document_graph_metrics": document_graph.get("metrics", {}),
                 "vendor_template_prior": vendor_template_prior,
                 "fast_fail": True,
+                "tsr_candidate_decision": tsr_candidate_decision,
                 **tsr_metadata,
                 "tsr_status": tsr_status_metric
             }
@@ -1978,6 +2000,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 ),
             },
             "fast_fail": False,
+            "tsr_candidate_decision": tsr_candidate_decision,
             **tsr_metadata,
             "tsr_status": tsr_status_metric
         }
