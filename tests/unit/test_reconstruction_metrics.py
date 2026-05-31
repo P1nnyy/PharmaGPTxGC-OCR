@@ -1,7 +1,10 @@
 import json
 from types import SimpleNamespace
 
-from services.layout_pipeline.reconstruction_metrics import build_tsr_candidate_decision_summary
+from services.layout_pipeline.reconstruction_metrics import (
+    build_row_handoff_summary,
+    build_tsr_candidate_decision_summary,
+)
 
 
 def _candidate(rows=3, columns=4, cells=12, confidence=0.5):
@@ -82,3 +85,75 @@ def test_tsr_candidate_decision_summary_marks_ppstructure_disabled():
     assert ppstructure["enabled"] is False
     assert ppstructure["skipped_reason"] == "disabled_by_config"
     assert ppstructure["blocked_by"] == ["disabled_by_config"]
+
+
+def test_row_handoff_summary_flags_graph_to_raw_ocr_mismatch():
+    summary = build_row_handoff_summary(
+        selected_topology_source="document_graph_candidate",
+        topology_source="document_graph_candidate",
+        selected_main_table=_candidate(rows=16, columns=13, cells=208, confidence=1.0),
+        item_rows_clean=[
+            {
+                "source": "raw_ocr_coordinate_reconstruction",
+                "hsn": "",
+                "qty": "",
+                "rate": "",
+                "low_confidence": True,
+                "confidence_reasons": ["missing_hsn", "missing_qty", "missing_rate"],
+            }
+        ],
+        clean_item_row_validation_errors=[
+            {"reason": "missing_hsn;missing_qty"},
+        ],
+        reconciliation_result={"rows_math_failed": 7, "rows_math_passed": 0},
+        graph_metrics={"row_math_fail_count": 1},
+        heuristic_metrics={"row_math_fail_count": 0},
+    )
+
+    encoded = json.dumps(summary)
+    decoded = json.loads(encoded)
+
+    assert decoded["handoff_mismatch"] is True
+    assert "graph_selected_but_item_rows_clean_uses_raw_ocr" in decoded["handoff_mismatch_reasons"]
+    assert "final_reconciliation_math_failures_exceed_candidate_graph_failures" in decoded["handoff_mismatch_reasons"]
+    assert decoded["dominant_item_rows_clean_source"] == "raw_ocr_coordinate_reconstruction"
+    assert decoded["item_rows_clean_sources"] == {"raw_ocr_coordinate_reconstruction": 1}
+    assert decoded["clean_item_row_validation_error_reasons"] == {"missing_hsn": 1, "missing_qty": 1}
+
+
+def test_row_handoff_summary_no_mismatch_when_sources_align():
+    summary = build_row_handoff_summary(
+        selected_topology_source="document_graph_candidate",
+        topology_source="document_graph_candidate",
+        selected_main_table=_candidate(rows=2, columns=3, cells=6, confidence=0.8),
+        item_rows_clean=[
+            {
+                "source": "document_graph_candidate",
+                "hsn": "300490",
+                "qty": "1",
+                "rate": "10.00",
+                "low_confidence": False,
+                "confidence_reasons": [],
+            }
+        ],
+        clean_item_row_validation_errors=[],
+        reconciliation_result={"rows_math_failed": 1, "rows_math_passed": 2},
+        graph_metrics={"row_math_fail_count": 1},
+        heuristic_metrics={"row_math_fail_count": 2},
+    )
+
+    assert summary["handoff_mismatch"] is False
+    assert summary["handoff_mismatch_reasons"] == []
+    assert summary["dominant_item_rows_clean_source"] == "document_graph_candidate"
+
+
+def test_row_handoff_summary_handles_missing_values():
+    summary = build_row_handoff_summary()
+
+    assert summary["selected_topology_source"] == "unknown"
+    assert summary["selected_main_table_id"] == "unknown"
+    assert summary["selected_main_table_rows"] is None
+    assert summary["item_rows_clean_count"] is None
+    assert summary["dominant_item_rows_clean_source"] == "unknown"
+    assert summary["handoff_mismatch"] is False
+    json.dumps(summary)

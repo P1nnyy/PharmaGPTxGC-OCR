@@ -1,6 +1,15 @@
 from typing import Any, Dict
 
 
+def _count_or_none(value: Any):
+    if value is None:
+        return None
+    try:
+        return len(value)
+    except Exception:
+        return None
+
+
 def _safe_count(value: Any) -> int:
     try:
         return len(value)
@@ -13,6 +22,15 @@ def _safe_float(value: Any):
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any):
+    if value is None:
+        return None
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -144,6 +162,160 @@ def build_tsr_candidate_decision_summary(
         },
         "selected": selected_topology_source or "unknown",
         "reason": selected_candidate_reason or "unknown",
+        "notes": notes,
+    }
+
+
+def _count_item_row_sources(item_rows_clean: Any) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not isinstance(item_rows_clean, list):
+        return counts
+    for row in item_rows_clean:
+        if not isinstance(row, dict):
+            source = "unknown"
+        else:
+            source = row.get("source") or "unknown"
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _dominant_source(source_counts: Dict[str, int]) -> str:
+    if not source_counts:
+        return "unknown"
+    return sorted(source_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _validation_error_reasons(errors: Any) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not isinstance(errors, list):
+        return counts
+    for error in errors:
+        reason = error.get("reason") if isinstance(error, dict) else None
+        if not reason:
+            reason = "unknown"
+        for part in str(reason).split(";"):
+            key = part.strip() or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _missing_key_column_counts(item_rows_clean: Any) -> Dict[str, int]:
+    counts = {"hsn": 0, "qty": 0, "rate": 0}
+    if not isinstance(item_rows_clean, list):
+        return counts
+    for row in item_rows_clean:
+        if not isinstance(row, dict):
+            continue
+        reasons = set(row.get("confidence_reasons") or [])
+        if not row.get("hsn") or "missing_hsn" in reasons:
+            counts["hsn"] += 1
+        if not row.get("qty") or "missing_qty" in reasons:
+            counts["qty"] += 1
+        if not row.get("rate") or "missing_rate" in reasons:
+            counts["rate"] += 1
+    return counts
+
+
+def _non_empty_cell_count(table: Any):
+    cells = getattr(table, "cells", None)
+    if cells is None:
+        return None
+    count = 0
+    for cell in cells:
+        text = getattr(cell, "text", None)
+        mapped_ids = getattr(cell, "mapped_block_ids", None)
+        if (isinstance(text, str) and text.strip()) or bool(mapped_ids):
+            count += 1
+    return count
+
+
+def build_row_handoff_summary(
+    selected_topology_source: Any = None,
+    topology_source: Any = None,
+    selected_main_table: Any = None,
+    item_rows_clean: Any = None,
+    clean_item_row_validation_errors: Any = None,
+    reconciliation_result: Dict[str, Any] = None,
+    graph_metrics: Dict[str, Any] = None,
+    heuristic_metrics: Dict[str, Any] = None,
+) -> Dict[str, Any]:
+    """Build diagnostics explaining selected topology versus final clean item-row source."""
+    reconciliation_result = reconciliation_result or {}
+    graph_metrics = graph_metrics or {}
+    heuristic_metrics = heuristic_metrics or {}
+
+    rows = getattr(selected_main_table, "rows", None)
+    columns = getattr(selected_main_table, "columns", None)
+    cells = getattr(selected_main_table, "cells", None)
+    item_rows_clean_count = _count_or_none(item_rows_clean)
+    source_counts = _count_item_row_sources(item_rows_clean)
+    dominant_source = _dominant_source(source_counts)
+    validation_reason_counts = _validation_error_reasons(clean_item_row_validation_errors)
+    missing_key_counts = _missing_key_column_counts(item_rows_clean)
+
+    reconciliation_rows_math_failed = _safe_int(reconciliation_result.get("rows_math_failed"))
+    reconciliation_rows_math_passed = _safe_int(reconciliation_result.get("rows_math_passed"))
+    candidate_graph_math_failures = _safe_int(graph_metrics.get("row_math_fail_count"))
+    candidate_heuristic_math_failures = _safe_int(heuristic_metrics.get("row_math_fail_count"))
+    selected_column_count = _count_or_none(columns)
+
+    mismatch_reasons = []
+    if (
+        selected_topology_source == "document_graph_candidate"
+        and dominant_source == "raw_ocr_coordinate_reconstruction"
+    ):
+        mismatch_reasons.append("graph_selected_but_item_rows_clean_uses_raw_ocr")
+
+    if selected_column_count is not None and selected_column_count >= 4 and any(missing_key_counts.values()):
+        missing = [
+            field
+            for field, count in missing_key_counts.items()
+            if count > 0
+        ]
+        mismatch_reasons.append("selected_table_has_many_columns_but_clean_rows_missing_" + "_".join(missing))
+
+    if (
+        candidate_graph_math_failures is not None
+        and reconciliation_rows_math_failed is not None
+        and reconciliation_rows_math_failed > candidate_graph_math_failures + 1
+    ):
+        mismatch_reasons.append("final_reconciliation_math_failures_exceed_candidate_graph_failures")
+
+    notes = [
+        "item_rows_clean_source_is_generated_by_table_segmenter",
+        "candidate_graph_math_failures_are_from_row_validator_candidate_scoring",
+        "reconciliation_rows_math_failed_is_from_financial_reconciler",
+    ]
+    if selected_main_table is None:
+        notes.append("selected_main_table_unavailable")
+    if item_rows_clean_count is None:
+        notes.append("item_rows_clean_unavailable")
+
+    return {
+        "selected_topology_source": selected_topology_source or "unknown",
+        "topology_source": topology_source or "unknown",
+        "selected_main_table_id": getattr(selected_main_table, "table_id", None) or "unknown",
+        "selected_main_table_source": getattr(selected_main_table, "source_engine", None) or "unknown",
+        "selected_main_table_rows": _count_or_none(rows),
+        "selected_main_table_columns": selected_column_count,
+        "selected_main_table_cells": _count_or_none(cells),
+        "selected_main_table_non_empty_cells": _non_empty_cell_count(selected_main_table),
+        "item_rows_clean_count": item_rows_clean_count,
+        "item_rows_clean_sources": source_counts,
+        "dominant_item_rows_clean_source": dominant_source,
+        "item_rows_clean_low_confidence_count": (
+            sum(1 for row in item_rows_clean if isinstance(row, dict) and row.get("low_confidence"))
+            if isinstance(item_rows_clean, list)
+            else None
+        ),
+        "clean_item_row_validation_error_count": _count_or_none(clean_item_row_validation_errors),
+        "clean_item_row_validation_error_reasons": validation_reason_counts,
+        "reconciliation_rows_math_failed": reconciliation_rows_math_failed,
+        "reconciliation_rows_math_passed": reconciliation_rows_math_passed,
+        "candidate_graph_math_failures": candidate_graph_math_failures,
+        "candidate_heuristic_math_failures": candidate_heuristic_math_failures,
+        "handoff_mismatch": bool(mismatch_reasons),
+        "handoff_mismatch_reasons": mismatch_reasons,
         "notes": notes,
     }
 

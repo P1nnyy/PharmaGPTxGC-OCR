@@ -23,6 +23,7 @@ from services.layout_pipeline.reconstruction_diagnostics import (
     _token_flags,
 )
 from services.layout_pipeline.reconstruction_metrics import (
+    build_row_handoff_summary,
     build_tsr_candidate_decision_summary,
     _compute_tsr_confidence,
     _invoice_footer_tax_source_counts,
@@ -1838,6 +1839,16 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     segmenter_results = segmenter.process()
     
     seg_debug = segmenter_results["debug"]
+    row_handoff_summary = build_row_handoff_summary(
+        selected_topology_source=selected_topology_source,
+        topology_source=topology_source,
+        selected_main_table=table_bundle.main_table if table_bundle else None,
+        item_rows_clean=segmenter_results.get("item_rows_clean"),
+        clean_item_row_validation_errors=seg_debug.get("clean_item_row_validation_errors", []),
+        reconciliation_result=main_rec,
+        graph_metrics=graph_metrics,
+        heuristic_metrics=heuristic_metrics,
+    )
     
     # invoice_totals construction
     invoice_level = reconciliation_results.get("invoice_level") or {}
@@ -2001,6 +2012,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             },
             "fast_fail": False,
             "tsr_candidate_decision": tsr_candidate_decision,
+            "row_handoff_summary": row_handoff_summary,
             **tsr_metadata,
             "tsr_status": tsr_status_metric
         }
