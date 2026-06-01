@@ -270,6 +270,67 @@ def _amount_failure_reason(amount_cell: Optional[TableCell], amount: Optional[De
     return None
 
 
+def _qty_component_diagnostics(qty_obj: Any) -> Dict[str, Optional[float]]:
+    return {
+        "billed_qty": _decimal_diagnostic(getattr(qty_obj, "billed_qty", None)),
+        "free_qty": _decimal_diagnostic(getattr(qty_obj, "free_qty", None)),
+        "total_qty": _decimal_diagnostic(getattr(qty_obj, "total_qty", None)),
+    }
+
+
+def _compound_qty_interpretations(qty_obj: Any) -> List[Tuple[str, Decimal]]:
+    if qty_obj is None or _quantity_parse_failed(qty_obj):
+        return []
+
+    billed_qty = getattr(qty_obj, "billed_qty", None)
+    total_qty = getattr(qty_obj, "total_qty", None)
+    free_qty = getattr(qty_obj, "free_qty", None)
+    interpretations: List[Tuple[str, Decimal]] = []
+    if billed_qty is not None:
+        interpretations.append(("billed_qty", billed_qty))
+
+    is_compound = bool(getattr(qty_obj, "is_scheme", False)) or (
+        free_qty is not None and free_qty != 0
+    )
+    if is_compound and total_qty is not None:
+        interpretations.append(("total_qty", total_qty))
+    if is_compound:
+        interpretations.append(("unit_qty", Decimal("1")))
+
+    deduped: List[Tuple[str, Decimal]] = []
+    seen = set()
+    for label, value in interpretations:
+        key = (label, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, value))
+    return deduped
+
+
+def _verify_row_math_interpretations(
+    verifier: DiscountAwareVerifier,
+    qty_obj: Any,
+    rate: Decimal,
+    amount: Decimal,
+    discount_val: Optional[Decimal],
+) -> Tuple[bool, str, Optional[str], Optional[Decimal]]:
+    interpretations = _compound_qty_interpretations(qty_obj)
+    if not interpretations:
+        return False, "qty_parse_failed", None, None
+
+    first_formula = "math_failed"
+    first_label = interpretations[0][0]
+    first_qty = interpretations[0][1]
+    for index, (label, qty_value) in enumerate(interpretations):
+        success, formula = verifier.verify_row_math(qty_value, rate, amount, discount_val)
+        if index == 0:
+            first_formula = formula
+        if success:
+            return True, formula, label, qty_value
+    return False, first_formula, first_label, first_qty
+
+
 def _build_row_math_detail(
     table_id: str,
     row: RowRegion,
@@ -290,16 +351,19 @@ def _build_row_math_detail(
     amount_source_reason: str = "",
     status: str = "unknown",
     formula: Optional[str] = None,
+    selected_qty_interpretation: Optional[str] = None,
+    selected_qty_value: Optional[Decimal] = None,
     skipped_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     qty_parsed = getattr(qty_obj, "billed_qty", None)
+    expected_qty = selected_qty_value if selected_qty_value is not None else qty_parsed
     qty_raw = _cell_text(qty_cell) if qty_raw_override is None else qty_raw_override
     qty_source = (
         _cell_source(table_id, qty_cell, "semantic_quantity_column")
         if qty_source_override is None
         else qty_source_override
     )
-    expected_amount = qty_parsed * rate if qty_parsed is not None and rate is not None else None
+    expected_amount = expected_qty * rate if expected_qty is not None and rate is not None else None
     delta = amount - expected_amount if amount is not None and expected_amount is not None else None
 
     failure_reason = skipped_reason
@@ -323,6 +387,9 @@ def _build_row_math_detail(
         "qty_original_table_cell_raw": qty_original_table_cell_raw,
         "qty_normalized_candidate": qty_normalized_candidate,
         "qty_parsed": _decimal_diagnostic(qty_parsed),
+        **_qty_component_diagnostics(qty_obj),
+        "selected_qty_interpretation": selected_qty_interpretation,
+        "selected_qty_value": _decimal_diagnostic(selected_qty_value),
         "rate_raw": _cell_text(rate_cell),
         "rate_source": _cell_source(table_id, rate_cell, rate_source_reason),
         "rate_parsed": _decimal_diagnostic(rate),
@@ -593,6 +660,8 @@ class FinancialReconciler:
 
             row_math_status = "unknown"
             row_math_formula = None
+            selected_qty_interpretation = None
+            selected_qty_value = None
 
             if r_amt is not None and r_amt > 0:
                 derived_subtotal += r_amt
@@ -607,9 +676,13 @@ class FinancialReconciler:
                 
                 # If we have necessary variables, run verification
                 if r_qty_obj is not None and r_rate is not None:
-                     # USE BILLED QTY FROM QTY PARSER
-                     billed_qty = r_qty_obj.billed_qty
-                     success, formula = verifier.verify_row_math(billed_qty, r_rate, r_amt, r_disc)
+                     success, formula, selected_qty_interpretation, selected_qty_value = _verify_row_math_interpretations(
+                         verifier,
+                         r_qty_obj,
+                         r_rate,
+                         r_amt,
+                         r_disc,
+                     )
                      row_math_formula = formula
                      if success:
                          math_pass_count += 1
@@ -638,6 +711,8 @@ class FinancialReconciler:
                 amount_source_reason=amount_selection_reason,
                 status=row_math_status,
                 formula=row_math_formula,
+                selected_qty_interpretation=selected_qty_interpretation,
+                selected_qty_value=selected_qty_value,
             )
             row_math_details.append(row_math_detail)
             if row_math_detail["status"] == "fail" or (
@@ -654,6 +729,11 @@ class FinancialReconciler:
                         "qty_original_table_cell_raw",
                         "qty_normalized_candidate",
                         "qty_parsed",
+                        "billed_qty",
+                        "free_qty",
+                        "total_qty",
+                        "selected_qty_interpretation",
+                        "selected_qty_value",
                         "rate_raw",
                         "rate_source",
                         "rate_parsed",

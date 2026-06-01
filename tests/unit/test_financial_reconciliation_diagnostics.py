@@ -95,6 +95,59 @@ def test_amount_mismatch_emits_delta():
     assert detail["failure_reason"] == "math_failed"
 
 
+def test_compound_qty_amount_equal_rate_passes_unit_qty_interpretation():
+    result = _reconcile([
+        _cell("row_1", "c_product", "MONTICOPE SUSPENSION 60 ML", x=1),
+        _cell("row_1", "c_qty", "2.750+.250", x=2),
+        _cell("row_1", "c_rate", "178.32", x=3),
+        _cell("row_1", "c_amount", "178.32", x=4),
+    ])
+
+    detail = result["row_math_details"][0]
+    assert detail["status"] == "pass"
+    assert detail["qty_raw"] == "2.750+.250"
+    assert detail["billed_qty"] == 2.75
+    assert detail["free_qty"] == 0.25
+    assert detail["total_qty"] == 3.0
+    assert detail["selected_qty_interpretation"] == "unit_qty"
+    assert detail["selected_qty_value"] == 1.0
+    assert detail["expected_amount"] == 178.32
+
+
+def test_compound_qty_billed_amount_passes_billed_qty_interpretation():
+    result = _reconcile([
+        _cell("row_1", "c_product", "MONTICOPE SUSPENSION 60 ML", x=1),
+        _cell("row_1", "c_qty", "2.750+.250", x=2),
+        _cell("row_1", "c_rate", "178.32", x=3),
+        _cell("row_1", "c_amount", "490.38", x=4),
+    ])
+
+    detail = result["row_math_details"][0]
+    assert detail["status"] == "pass"
+    assert detail["selected_qty_interpretation"] == "billed_qty"
+    assert detail["selected_qty_value"] == 2.75
+    assert detail["expected_amount"] == 490.38
+    assert detail["delta"] == 0.0
+
+
+def test_compound_qty_without_matching_amount_remains_failed():
+    result = _reconcile([
+        _cell("row_1", "c_product", "RANIDOM-MPS SUSP", x=1),
+        _cell("row_1", "c_qty", "2.500+.500", x=2),
+        _cell("row_1", "c_rate", "71.34", x=3),
+        _cell("row_1", "c_amount", "196.19", x=4),
+    ])
+
+    detail = result["row_math_details"][0]
+    assert result["rows_math_passed"] == 0
+    assert result["rows_math_failed"] == 1
+    assert detail["status"] == "fail"
+    assert detail["selected_qty_interpretation"] == "billed_qty"
+    assert detail["expected_amount"] == 178.35
+    assert detail["delta"] == 17.84
+    assert detail["failure_reason"] == "math_failed"
+
+
 def test_financial_reconciliation_diagnostics_are_json_serializable():
     result = _reconcile([
         _cell("row_1", "c_product", "LUBIMOIST EYE DROPS", x=1),
