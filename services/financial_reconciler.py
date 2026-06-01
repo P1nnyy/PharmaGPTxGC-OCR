@@ -233,16 +233,25 @@ def _row_description(row_cells: List[TableCell], product_cols: List[str], row_te
     return row_text
 
 
-def _qty_failure_reason(qty_cell: Optional[TableCell], qty_obj: Any) -> Optional[str]:
-    if qty_cell is None or not _cell_text(qty_cell).strip():
+def _qty_failure_reason(
+    qty_cell: Optional[TableCell],
+    qty_obj: Any,
+    qty_raw_override: Optional[str] = None,
+) -> Optional[str]:
+    qty_raw = _cell_text(qty_cell) if qty_raw_override is None else qty_raw_override
+    if not qty_raw.strip():
         return "qty_missing"
-    rejected_reason = getattr(qty_obj, "qty_parse_rejected_reason", None)
-    parse_method = getattr(qty_obj, "parse_method", "")
-    if rejected_reason and rejected_reason != "empty":
-        return "qty_parse_failed"
-    if parse_method == "unparsed":
+    if _quantity_parse_failed(qty_obj):
         return "qty_parse_failed"
     return None
+
+
+def _quantity_parse_failed(qty_obj: Any) -> bool:
+    rejected_reason = getattr(qty_obj, "qty_parse_rejected_reason", None)
+    parse_method = getattr(qty_obj, "parse_method", "")
+    if rejected_reason:
+        return True
+    return parse_method in {"empty", "unparsed", "pack_size_alone"}
 
 
 def _rate_failure_reason(rate_cell: Optional[TableCell], rate: Optional[Decimal]) -> Optional[str]:
@@ -269,6 +278,10 @@ def _build_row_math_detail(
     row_text: str,
     qty_cell: Optional[TableCell] = None,
     qty_obj: Any = None,
+    qty_raw_override: Optional[str] = None,
+    qty_source_override: Optional[str] = None,
+    qty_original_table_cell_raw: Optional[str] = None,
+    qty_normalized_candidate: Optional[str] = None,
     rate_cell: Optional[TableCell] = None,
     rate: Optional[Decimal] = None,
     rate_source_reason: str = "semantic_rate_column",
@@ -280,13 +293,19 @@ def _build_row_math_detail(
     skipped_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     qty_parsed = getattr(qty_obj, "billed_qty", None)
+    qty_raw = _cell_text(qty_cell) if qty_raw_override is None else qty_raw_override
+    qty_source = (
+        _cell_source(table_id, qty_cell, "semantic_quantity_column")
+        if qty_source_override is None
+        else qty_source_override
+    )
     expected_amount = qty_parsed * rate if qty_parsed is not None and rate is not None else None
     delta = amount - expected_amount if amount is not None and expected_amount is not None else None
 
     failure_reason = skipped_reason
     if failure_reason is None and status in {"fail", "unknown"}:
         for reason in (
-            _qty_failure_reason(qty_cell, qty_obj),
+            _qty_failure_reason(qty_cell, qty_obj, qty_raw_override=qty_raw_override),
             _rate_failure_reason(rate_cell, rate),
             _amount_failure_reason(amount_cell, amount),
         ):
@@ -299,8 +318,10 @@ def _build_row_math_detail(
     return {
         "row_id": row.row_id,
         "description": _row_description(row_cells, product_cols, row_text),
-        "qty_raw": _cell_text(qty_cell),
-        "qty_source": _cell_source(table_id, qty_cell, "semantic_quantity_column"),
+        "qty_raw": qty_raw,
+        "qty_source": qty_source,
+        "qty_original_table_cell_raw": qty_original_table_cell_raw,
+        "qty_normalized_candidate": qty_normalized_candidate,
         "qty_parsed": _decimal_diagnostic(qty_parsed),
         "rate_raw": _cell_text(rate_cell),
         "rate_source": _cell_source(table_id, rate_cell, rate_source_reason),
@@ -385,8 +406,33 @@ class FinancialReconciler:
     Utilizes Decimal arithmetic, discount analysis and fuzzy Grand Total deduction.
     """
     
-    def __init__(self, semantic_column_cache: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        semantic_column_cache: Optional[Dict[str, Any]] = None,
+        item_rows_clean: Optional[List[Dict[str, Any]]] = None,
+    ):
         self.semantic_cache = semantic_column_cache or {}
+        self.normalized_item_row_by_visual_id = {
+            str(row.get("visual_row_id")): row
+            for row in (item_rows_clean or [])
+            if (
+                isinstance(row, dict)
+                and row.get("visual_row_id") is not None
+                and row.get("source") == "selected_graph_table"
+            )
+        }
+
+    def _normalized_qty_for_row(self, row_id: str) -> Tuple[Optional[Any], Optional[str], Optional[str]]:
+        normalized_row = self.normalized_item_row_by_visual_id.get(str(row_id))
+        if not normalized_row:
+            return None, None, None
+        qty_text = str(normalized_row.get("qty") or "").strip()
+        if not qty_text:
+            return None, None, qty_text
+        qty_obj = parse_quantity(qty_text)
+        if _quantity_parse_failed(qty_obj):
+            return None, None, qty_text
+        return qty_obj, f"normalized_item_rows_clean:{row_id}", qty_text
 
     def reconcile_table(self, region: TableRegion) -> ReconciliationResultV2:
         """Processes TableRegion (cell graph structure) through validation framework."""
@@ -483,6 +529,10 @@ class FinancialReconciler:
             # Extract candidate numeric values
             r_amt = r_qty_obj = r_rate = r_disc = None
             qty_cell = rate_cell = None
+            qty_original_table_cell_raw = None
+            qty_raw_override = None
+            qty_source_override = None
+            qty_normalized_candidate = None
             selected_amount_cell = None
             amount_selection_reason = "no_semantic_amount_column"
             rate_source_reason = "semantic_rate_column"
@@ -506,6 +556,7 @@ class FinancialReconciler:
                 if c.col_id in qty_cols:
                     r_qty_obj = parse_quantity(c.text)
                     qty_cell = c
+                    qty_original_table_cell_raw = _cell_text(c)
                 if c.col_id in rate_cols:
                     r_rate = _to_decimal(c.text)
                     rate_cell = c
@@ -532,6 +583,13 @@ class FinancialReconciler:
                      r_rate = _to_decimal(other_amts[0].text)
                      rate_cell = other_amts[0]
                      rate_source_reason = "fallback_other_amount_column_as_rate"
+
+            normalized_qty_obj, normalized_qty_source, normalized_qty_candidate = self._normalized_qty_for_row(row.row_id)
+            qty_normalized_candidate = normalized_qty_candidate
+            if normalized_qty_obj is not None:
+                r_qty_obj = normalized_qty_obj
+                qty_raw_override = normalized_qty_candidate
+                qty_source_override = normalized_qty_source
 
             row_math_status = "unknown"
             row_math_formula = None
@@ -568,6 +626,10 @@ class FinancialReconciler:
                 row_text,
                 qty_cell=qty_cell,
                 qty_obj=r_qty_obj,
+                qty_raw_override=qty_raw_override,
+                qty_source_override=qty_source_override,
+                qty_original_table_cell_raw=qty_original_table_cell_raw,
+                qty_normalized_candidate=qty_normalized_candidate,
                 rate_cell=rate_cell,
                 rate=r_rate,
                 rate_source_reason=rate_source_reason,
@@ -588,10 +650,15 @@ class FinancialReconciler:
                         "description",
                         "failure_reason",
                         "qty_raw",
+                        "qty_source",
+                        "qty_original_table_cell_raw",
+                        "qty_normalized_candidate",
                         "qty_parsed",
                         "rate_raw",
+                        "rate_source",
                         "rate_parsed",
                         "amount_raw",
+                        "amount_source",
                         "amount_parsed",
                         "expected_amount",
                         "actual_amount",

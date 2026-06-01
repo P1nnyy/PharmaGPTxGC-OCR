@@ -1465,11 +1465,35 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             row_validation_results = row_validator.validate_all(analysis_targets)
             break
 
+    # Build normalized item rows before financial reconciliation so row math can
+    # use guarded selected-graph quantity repairs without re-running reconciliation.
+    from services.table_segmenter import TableSegmenter, build_item_row_alignment_diagnostics
+    segmenter = TableSegmenter(table_regions, ocr_blocks)
+    selected_main_table = table_bundle.main_table if table_bundle else None
+    selected_main_table_semantics = (
+        final_column_semantics.get(selected_main_table.table_id, {})
+        if selected_main_table is not None
+        else {}
+    )
+    segmenter_results = segmenter.process(
+        selected_topology_source=selected_topology_source,
+        selected_main_table=selected_main_table,
+        column_semantics=selected_main_table_semantics,
+    )
+    seg_debug = segmenter_results["debug"]
+    item_row_source_selection = (
+        segmenter_results.get("item_row_source_selection")
+        or seg_debug.get("item_row_source_selection", {})
+    )
+
     # Step 8: Financial Reconciliation (subtotal/grand total verification)
     # Note: We reconcile the MAIN table specifically
     target_reconcile = [table_bundle.main_table]
 
-    reconciler = FinancialReconciler(semantic_column_cache=semantic_results)
+    reconciler = FinancialReconciler(
+        semantic_column_cache=semantic_results,
+        item_rows_clean=segmenter_results.get("item_rows_clean"),
+    )
     reconciliation_results = reconciler.reconcile_all(target_reconcile)
     main_table_id = table_bundle.main_table.table_id
     footer_reconcile_tables = [
@@ -1833,26 +1857,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "credit_notes": [tr.model_dump(mode='json') for tr in table_bundle.credit_notes],
         }
 
-    # Run the table region segmentation and anchor-based reconstruction
-    from services.table_segmenter import TableSegmenter, build_item_row_alignment_diagnostics
-    segmenter = TableSegmenter(table_regions, ocr_blocks)
-    selected_main_table = table_bundle.main_table if table_bundle else None
-    selected_main_table_semantics = (
-        final_column_semantics.get(selected_main_table.table_id, {})
-        if selected_main_table is not None
-        else {}
-    )
-    segmenter_results = segmenter.process(
-        selected_topology_source=selected_topology_source,
-        selected_main_table=selected_main_table,
-        column_semantics=selected_main_table_semantics,
-    )
-    
-    seg_debug = segmenter_results["debug"]
-    item_row_source_selection = (
-        segmenter_results.get("item_row_source_selection")
-        or seg_debug.get("item_row_source_selection", {})
-    )
     row_handoff_summary = build_row_handoff_summary(
         selected_topology_source=selected_topology_source,
         topology_source=topology_source,
