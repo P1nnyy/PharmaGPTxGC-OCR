@@ -1502,7 +1502,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     ]
     invoice_reconciliation_result = reconcile_invoice_financials(
         reconciliation_results.get(main_table_id, {}),
-        footer_reconcile_tables,
+        table_regions,
+        graph_candidate_rows=document_graph.get("graph_candidate_rows"),
     )
 
     # Map the unified invoice-level reconciliation result to its canonical structure
@@ -1527,6 +1528,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "igst_total": invoice_reconciliation_result.get("igst"),
         # Total GST tax sum (SGST + CGST + IGST)
         "gst_total": invoice_reconciliation_result.get("parsed_gst"),
+        # Consolidated credit/debit note adjustment
+        "cr_dr_note": invoice_reconciliation_result.get("cr_dr_note"),
         # Exact roundoff adjustment applied, preserving standard mathematical sign
         "roundoff": invoice_reconciliation_result.get("roundoff_effect"),
         # Mathematically derived grand total: subtotal - discount + taxes + roundoff
@@ -1543,6 +1546,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "warnings": invoice_reconciliation_result.get("warnings"),
         # Nested dictionary mapping labels/keys to the exact text sources and bounding boxes
         "source rows/cells used": invoice_reconciliation_result.get("sources"),
+        # Rich label-value pairing diagnostics tree for Indian pharma footer reconciliation
+        "footer_label_value_diagnostics": invoice_reconciliation_result.get("footer_label_value_diagnostics"),
 
         # Compatibility shims to allow validation/reporting engines to treat invoice_level
         # seamlessly as a standard table-level reconciliation output where required.
@@ -1883,7 +1888,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "sgst": invoice_level.get("sgst_total") or 0.0,
         "igst": invoice_level.get("igst_total") or 0.0,
         "gst_total": invoice_level.get("gst_total") or 0.0,
-        "roundoff": invoice_level.get("roundoff") or 0.0,
+        "roundoff": abs(invoice_level.get("roundoff") or 0.0),
+        "cr_dr_note": invoice_level.get("cr_dr_note") or 0.0,
         "grand_total": invoice_level.get("parsed_grand_total") or invoice_level.get("expected_grand_total") or 0.0
     }
     

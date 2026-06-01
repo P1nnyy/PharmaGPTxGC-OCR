@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from rapidfuzz import fuzz, process
 
 from core.logger import logger
-from models.layout_models import TableRegion, TableCell, RowRegion
+from models.layout_models import TableRegion, TableCell, RowRegion, GeometryBox
 from services.qty_parser import parse_quantity
 
 # --- Domain Definitions & Constants ---
@@ -1158,6 +1158,7 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
             if not row_labels:
                 continue
 
+            unique_row_decimals = set(_decimal_candidates(row_text))
             for label in row_labels:
                 pattern = _INVOICE_LABEL_PATTERNS[label]
                 label_idx = next(
@@ -1169,6 +1170,21 @@ def _collect_invoice_total_candidates(tables: List[TableRegion]) -> Dict[str, Li
                 value, extraction_strategy, source_metadata = _candidate_value_for_label(row_cells, label_idx, label, pattern)
                 if value is None:
                     continue
+
+                # Check for same row/cell label-value sharing conflicts:
+                # If there is only one unique numeric value in the entire row,
+                # and this label is one of the adjustment labels (discount, taxes, roundoff, cr_dr_note),
+                # and the row also matches a main total label (parsed_subtotal, parsed_grand_total),
+                # then we should NOT assign this value to this adjustment label.
+                if len(row_labels) > 1 and len(unique_row_decimals) == 1:
+                    main_totals_in_row = {"parsed_subtotal", "parsed_grand_total"} & set(row_labels)
+                    adjustments_in_row = {"discount", "sgst", "cgst", "igst", "roundoff", "cr_dr_note"}
+                    if main_totals_in_row and label in adjustments_in_row:
+                        logger.debug(
+                            f"[FOOTER CONFLICT] Skipping adjustment label '{label}' for value {value} in row '{row_text}' "
+                            f"because it shares a single value with main total."
+                        )
+                        continue
 
                 label_cell = row_cells[label_idx]
                 labels_in_cell = sum(
@@ -1246,13 +1262,44 @@ def _is_igst_summary_noise(source: Optional[Dict[str, Any]]) -> bool:
 def reconcile_invoice_financials(
     main_reconciliation: Dict[str, Any],
     footer_tables: List[TableRegion],
+    graph_candidate_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Invoice-level reconciliation over non-main routed tables.
+    Invoice-level reconciliation over non-main routed tables and raw candidate rows.
 
     Main item subtotal remains owned by table-level reconciliation; this only
     reads footer/tax/summary regions that routing already isolated.
     """
+    # If graph_candidate_rows are provided, create a pseudo TableRegion for them
+    # so they are seamlessly integrated into the footer extraction pipeline.
+    if graph_candidate_rows:
+        pseudo_cells = []
+        pseudo_rows = []
+        for idx, r in enumerate(graph_candidate_rows):
+            row_id = r.get("row_id") or f"graph_row_{idx}"
+            text = r.get("text") or ""
+            # Safely extract center_y for positional candidate scoring
+            center_y = 0.0
+            geom_dict = r.get("geometry")
+            if isinstance(geom_dict, dict):
+                center_y = float(geom_dict.get("center_y") or 0.0)
+            elif hasattr(geom_dict, "center_y"):
+                center_y = float(geom_dict.center_y)
+                
+            geom = GeometryBox(min_x=0.0, max_x=1000.0, min_y=center_y - 5.0, max_y=center_y + 5.0, center_x=500.0, center_y=center_y)
+            row_reg = RowRegion(row_id=row_id, row_role="footer_summary_row", geometry=geom)
+            pseudo_rows.append(row_reg)
+            cell = TableCell(row_id=row_id, col_id="col_0", text=text, geometry=geom)
+            pseudo_cells.append(cell)
+            
+        pseudo_table = TableRegion(
+            table_id="pseudo_graph_rows_table",
+            rows=pseudo_rows,
+            cells=pseudo_cells,
+            geometry=GeometryBox(min_x=0.0, max_x=1000.0, min_y=0.0, max_y=2000.0, center_x=500.0, center_y=1000.0)
+        )
+        footer_tables = list(footer_tables) + [pseudo_table]
+
     derived_subtotal = _to_decimal(main_reconciliation.get("derived_subtotal"))
     candidates = _collect_invoice_total_candidates(footer_tables)
     candidates, ignored_sources, source_warnings = _filter_invoice_candidates(candidates, derived_subtotal)
@@ -1335,6 +1382,41 @@ def reconcile_invoice_financials(
     if parsed_grand_total is not None and not grand_total_match:
         status = ValidationStatus.FAIL
 
+    # Build JSON-serializable diagnostics tree
+    diag_candidates = []
+    for label, label_candidates in candidates.items():
+        for cand in label_candidates:
+            diag_candidates.append({
+                "label": label,
+                "value": _money_float(cand["value"]),
+                "ambiguity": cand["ambiguity"],
+                "cell_ambiguity": cand["cell_ambiguity"],
+                "center_y": float(cand["center_y"]),
+                "source": {
+                    "table_id": cand["source"].get("table_id"),
+                    "row_id": cand["source"].get("row_id"),
+                    "text": cand["source"].get("text"),
+                    "row_text": cand["source"].get("row_text"),
+                    "extraction_strategy": cand["source"].get("extraction_strategy"),
+                }
+            })
+
+    diag_selected = {}
+    for label, sel in selected.items():
+        if sel:
+            diag_selected[label] = {
+                "value": _money_float(sel["value"]),
+                "source": {
+                    "table_id": sel["source"].get("table_id"),
+                    "row_id": sel["source"].get("row_id"),
+                    "text": sel["source"].get("text"),
+                    "row_text": sel["source"].get("row_text"),
+                    "extraction_strategy": sel["source"].get("extraction_strategy"),
+                }
+            }
+        else:
+            diag_selected[label] = None
+
     return {
         "item_derived_subtotal": _money_float(derived_subtotal),
         "derived_subtotal": _money_float(derived_subtotal),
@@ -1357,6 +1439,11 @@ def reconcile_invoice_financials(
         "warnings": warnings,
         "sources": sources,
         "ignored_sources": ignored_sources,
+        "footer_label_value_diagnostics": {
+            "candidates": diag_candidates,
+            "selected": diag_selected,
+            "warnings": warnings,
+        }
     }
 
 # --- New Multi-Dimensional Scoring Logic ---
