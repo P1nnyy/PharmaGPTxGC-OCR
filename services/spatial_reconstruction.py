@@ -1834,7 +1834,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         }
 
     # Run the table region segmentation and anchor-based reconstruction
-    from services.table_segmenter import TableSegmenter
+    from services.table_segmenter import TableSegmenter, build_item_row_alignment_diagnostics
     segmenter = TableSegmenter(table_regions, ocr_blocks)
     selected_main_table = table_bundle.main_table if table_bundle else None
     selected_main_table_semantics = (
@@ -1862,6 +1862,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         reconciliation_result=main_rec,
         graph_metrics=graph_metrics,
         heuristic_metrics=heuristic_metrics,
+    )
+    item_row_alignment_diagnostics = build_item_row_alignment_diagnostics(
+        selected_topology_source=selected_topology_source,
+        selected_main_table=selected_main_table,
+        item_rows_clean=segmenter_results.get("item_rows_clean"),
+        column_semantics=selected_main_table_semantics,
     )
     
     # invoice_totals construction
@@ -2028,6 +2034,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "tsr_candidate_decision": tsr_candidate_decision,
             "item_row_source_selection": item_row_source_selection,
             "row_handoff_summary": row_handoff_summary,
+            "item_row_alignment_diagnostics": item_row_alignment_diagnostics,
             **tsr_metadata,
             "tsr_status": tsr_status_metric
         }

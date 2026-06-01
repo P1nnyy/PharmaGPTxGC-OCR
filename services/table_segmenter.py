@@ -420,6 +420,25 @@ _GRAPH_CLEAN_ROW_FIELDS = [
 ]
 
 _CRITICAL_CLEAN_ROW_FIELDS = ("hsn", "qty", "rate", "net_amt")
+_KNOWN_MANUFACTURER_TOKENS = {
+    "MANKIN",
+    "MERCK",
+    "TROIKA",
+    "BIOCON",
+    "ERIS",
+    "IND-SWIFT",
+    "IND",
+    "SWIFT",
+    "CORONA",
+    "MOREPEN",
+    "MANEESH",
+}
+
+_BATCH_LIKE_RE = re.compile(r"\b(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9]{2,}[A-Z0-9-]{2,}\b")
+_EXPIRY_RE = re.compile(r"\b(?:0?[1-9]|1[0-2])[/-]\d{2,4}\b")
+_HSN_RE = re.compile(r"\b\d{6,8}\b")
+_MONEY_RE = re.compile(r"\d+(?:[.,]\d{2})")
+_ALPHA_RE = re.compile(r"[A-Za-z]")
 
 
 def _read_attr(value: Any, key: str, default: Any = None) -> Any:
@@ -630,6 +649,188 @@ def select_item_rows_clean_source(
         "raw_missing_critical_field_types": raw_missing_fields,
         "graph_missing_critical_field_types": graph_missing_fields,
         "reasons": reasons,
+    }
+
+
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _parse_decimal(value: Any) -> Optional[float]:
+    text = _safe_text(value).replace(",", ".")
+    match = _MONEY_RE.search(text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _parse_quantity_total(value: Any) -> Optional[float]:
+    text = _safe_text(value).replace(",", ".")
+    if not text or _ALPHA_RE.search(text):
+        return None
+    parts = re.findall(r"\d+(?:\.\d+)?", text)
+    if not parts:
+        return None
+    try:
+        return sum(float(part) for part in parts)
+    except ValueError:
+        return None
+
+
+def _tokens_from_text(text: str, pattern: re.Pattern) -> List[str]:
+    return pattern.findall(_safe_text(text))
+
+
+def build_item_row_alignment_diagnostics(
+    selected_topology_source: Any = None,
+    selected_main_table: Any = None,
+    item_rows_clean: Any = None,
+    column_semantics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Diagnostics-only view of product/amount alignment in selected graph item rows.
+
+    This helper deliberately does not alter rows, cells, semantics, or financial
+    reconciliation. It only summarizes already-computed selected table data.
+    """
+    column_semantics = column_semantics or {}
+    clean_rows = item_rows_clean if isinstance(item_rows_clean, list) else []
+    clean_by_visual_id = {
+        str(row.get("visual_row_id")): row
+        for row in clean_rows
+        if isinstance(row, dict) and row.get("visual_row_id") is not None
+    }
+
+    rows = list(_read_attr(selected_main_table, "rows", []) or []) if selected_main_table is not None else []
+    cells = list(_read_attr(selected_main_table, "cells", []) or []) if selected_main_table is not None else []
+    cells_by_row: Dict[str, List[Any]] = {}
+    for cell in cells:
+        row_id = str(_read_attr(cell, "row_id", "") or "")
+        if row_id:
+            cells_by_row.setdefault(row_id, []).append(cell)
+
+    diagnostics_rows = []
+    item_row_count = 0
+    merged_row_suspicions = 0
+    sorted_rows = sorted(rows, key=_row_sort_key)
+    for index, row in enumerate(sorted_rows):
+        row_role = str(_read_attr(row, "row_role", "") or "").lower()
+        if row_role != "item_row":
+            continue
+
+        item_row_count += 1
+        row_id = str(_read_attr(row, "row_id", "") or "")
+        row_cells = sorted(cells_by_row.get(row_id, []), key=_cell_sort_key)
+        tokens_by_field: Dict[str, List[str]] = {field: [] for field in _GRAPH_CLEAN_ROW_FIELDS}
+        col_ids_by_field: Dict[str, List[str]] = {field: [] for field in _GRAPH_CLEAN_ROW_FIELDS}
+        all_tokens = []
+        for cell in row_cells:
+            text = _safe_text(_read_attr(cell, "text", ""))
+            if not text:
+                continue
+            all_tokens.append(text)
+            col_id = str(_read_attr(cell, "col_id", "") or "")
+            field = _field_for_semantic(column_semantics.get(col_id))
+            if field:
+                tokens_by_field[field].append(text)
+                col_ids_by_field[field].append(col_id)
+
+        clean_row = clean_by_visual_id.get(row_id, {})
+        row_text = " ".join(all_tokens).strip()
+        item_description = _safe_text(clean_row.get("item_description")) or _join_cell_values(tokens_by_field["item_description"])
+        qty_raw = _safe_text(clean_row.get("qty")) or _join_cell_values(tokens_by_field["qty"])
+        rate_raw = _safe_text(clean_row.get("rate")) or _join_cell_values(tokens_by_field["rate"])
+        amount_raw = _safe_text(clean_row.get("net_amt")) or _join_cell_values(tokens_by_field["net_amt"])
+        hsn_raw = _safe_text(clean_row.get("hsn")) or _join_cell_values(tokens_by_field["hsn"])
+
+        product_tokens = tokens_by_field["item_description"] or ([item_description] if item_description else [])
+        batch_tokens = tokens_by_field["batch"] or _tokens_from_text(row_text, _BATCH_LIKE_RE)
+        expiry_tokens = _tokens_from_text(row_text, _EXPIRY_RE)
+        hsn_tokens = _tokens_from_text(hsn_raw or row_text, _HSN_RE)
+        expiry_hsn_tokens = [*expiry_tokens, *hsn_tokens]
+        manufacturer_hits = [
+            token for token in re.findall(r"[A-Z][A-Z-]{2,}", row_text.upper())
+            if token in _KNOWN_MANUFACTURER_TOKENS
+        ]
+
+        qty_value = _parse_quantity_total(qty_raw)
+        rate_value = _parse_decimal(rate_raw)
+        amount_value = _parse_decimal(amount_raw)
+        math_check = "unknown"
+        if qty_value is not None and rate_value is not None and amount_value is not None:
+            math_check = "pass" if abs((qty_value * rate_value) - amount_value) <= max(1.0, amount_value * 0.03) else "fail"
+
+        issues = []
+        if len(product_tokens) > 1:
+            issues.append("multiple_product_semantic_cells")
+        if len(set(manufacturer_hits)) > 1 or len(manufacturer_hits) > 1:
+            issues.append("multiple_manufacturer_tokens")
+        if item_description and _BATCH_LIKE_RE.search(item_description):
+            issues.append("batch_like_token_inside_item_description")
+        if hsn_raw and _EXPIRY_RE.search(hsn_raw) and _HSN_RE.search(hsn_raw):
+            issues.append("expiry_and_hsn_combined")
+        if qty_raw and _ALPHA_RE.search(qty_raw):
+            issues.append("qty_contains_alpha_text")
+        if math_check == "fail":
+            issues.append("qty_rate_amount_math_failed")
+
+        shifted_amount = False
+        if amount_raw and (not qty_raw or not rate_raw):
+            shifted_amount = True
+            issues.append("amount_present_with_missing_qty_or_rate")
+        if amount_value is not None and rate_value is not None and abs(amount_value - rate_value) <= 0.01 and qty_value is None:
+            shifted_amount = True
+            issues.append("rate_equals_amount_with_missing_qty")
+        if qty_value is None and index + 1 < len(sorted_rows):
+            next_row_id = str(_read_attr(sorted_rows[index + 1], "row_id", "") or "")
+            next_clean = clean_by_visual_id.get(next_row_id, {})
+            if _safe_text(next_clean.get("qty")):
+                shifted_amount = True
+                issues.append("adjacent_next_row_has_qty")
+
+        suspected_merged_row = any(issue in issues for issue in (
+            "multiple_product_semantic_cells",
+            "multiple_manufacturer_tokens",
+            "batch_like_token_inside_item_description",
+            "expiry_and_hsn_combined",
+            "qty_contains_alpha_text",
+        ))
+        if suspected_merged_row:
+            merged_row_suspicions += 1
+
+        diagnostics_rows.append({
+            "visual_row_id": row_id or None,
+            "row_text": row_text or None,
+            "item_description": item_description or None,
+            "product_token_count": len(product_tokens),
+            "product_tokens": product_tokens,
+            "batch_tokens": batch_tokens,
+            "expiry_hsn_tokens": expiry_hsn_tokens,
+            "qty_raw": qty_raw or None,
+            "rate_raw": rate_raw or None,
+            "amount_raw": amount_raw or None,
+            "qty_col_id": col_ids_by_field["qty"][0] if col_ids_by_field["qty"] else None,
+            "rate_col_id": col_ids_by_field["rate"][0] if col_ids_by_field["rate"] else None,
+            "amount_col_id": col_ids_by_field["net_amt"][0] if col_ids_by_field["net_amt"] else None,
+            "semantic_column_ids_used": {
+                field: sorted(set(col_ids))
+                for field, col_ids in col_ids_by_field.items()
+                if col_ids
+            },
+            "math_check": math_check,
+            "suspected_merged_row": suspected_merged_row,
+            "suspected_shifted_amount": shifted_amount,
+            "issues": issues,
+        })
+
+    return {
+        "selected_topology_source": selected_topology_source or "unknown",
+        "item_row_count": item_row_count,
+        "merged_row_suspicions": merged_row_suspicions,
+        "rows": diagnostics_rows,
     }
 
 
