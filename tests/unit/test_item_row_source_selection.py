@@ -81,6 +81,63 @@ def test_graph_table_missing_fields_sets_low_confidence():
     assert "missing_net_amt" in rows[0]["confidence_reasons"]
 
 
+def test_graph_table_recovers_header_trapped_first_item_without_overwriting_next_row():
+    diagnostics = []
+    table = _table(
+        [
+            _row("graph_row_16", role="tax_summary_row", y=10),
+            _row("graph_row_17", role="item_row", y=20),
+        ],
+        [
+            _cell(
+                "graph_row_16",
+                "c_product",
+                "Batch Exp HSN MRP Rate T.D% MANKIN LUBIMOIST EYE DROPS GST Amount",
+                x=10,
+            ),
+            _cell("graph_row_17", "c_product", "B4MVY018 MANKIN MAHAFLOX-LP EYE DROPS", x=10),
+            _cell("graph_row_17", "c_batch", "B4MVY018", x=20),
+            _cell("graph_row_17", "c_expiry", "10/25", x=30),
+            _cell("graph_row_17", "c_hsn", "30049099", x=40),
+            _cell("graph_row_17", "c_mrp", "306.90", x=50),
+            _cell("graph_row_17", "c_rate", "250.64", x=60),
+            _cell("graph_row_17", "c_gst", "5.00", x=70),
+            _cell("graph_row_17", "c_amount", "250.64", x=80),
+        ],
+    )
+
+    rows = selected_table_to_clean_item_rows(
+        table,
+        {
+            "c_product": "product",
+            "c_batch": "batch",
+            "c_expiry": "expiry",
+            "c_hsn": "hsn",
+            "c_mrp": "mrp",
+            "c_rate": "rate",
+            "c_gst": "gst",
+            "c_amount": "amount",
+        },
+        diagnostics=diagnostics,
+    )
+
+    assert [row["item_description"] for row in rows] == [
+        "MANKIN LUBIMOIST EYE DROPS",
+        "MANKIN MAHAFLOX-LP EYE DROPS",
+    ]
+    assert rows[0]["visual_row_id"] == "graph_row_16"
+    assert rows[0]["batch"] == "B4MVY018"
+    assert rows[0]["expiry"] == "10/25"
+    assert rows[0]["hsn"] == "30049099"
+    assert rows[0]["rate"] == "250.64"
+    assert rows[0]["net_amt"] == "250.64"
+    assert rows[1]["visual_row_id"] == "graph_row_17"
+    assert rows[1]["batch"] == "B4MVY018"
+    assert diagnostics[0]["reason"] == "header_trapped_first_item_recovered"
+    assert diagnostics[0]["combined_with_visual_row_id"] == "graph_row_17"
+    json.dumps({"rows": rows, "diagnostics": diagnostics})
+
+
 def test_normalize_selected_graph_item_row_strips_manufacturer_from_qty():
     row = normalize_selected_graph_item_row({
         "item_description": "RANIDOM-MPS SUSP",

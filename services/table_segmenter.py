@@ -440,6 +440,14 @@ _HSN_RE = re.compile(r"\b\d{6,8}\b")
 _MONEY_RE = re.compile(r"\d+(?:[.,]\d{2})")
 _ALPHA_RE = re.compile(r"[A-Za-z]")
 _SERIAL_PREFIX_RE = re.compile(r"^\s*(?:\d+[\.)]?|[A-Z][\.)])\s+")
+_TABLE_HEADER_TOKEN_RE = re.compile(
+    r"\b(?:S|QTY|MFG|PRODUCT|BATCH|EXP|HSN|MRP|RATE|T\.?D%?|GST|AMOUNT)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_FORM_TOKEN_RE = re.compile(
+    r"\b(?:DROPS?|TAB(?:LET)?S?|CAP(?:SULE)?S?|SUSP(?:ENSION)?|SOLUTION|SYRUP|INJ(?:ECTION)?|CREAM|OINTMENT|GEL)\b",
+    re.IGNORECASE,
+)
 
 
 def _read_attr(value: Any, key: str, default: Any = None) -> Any:
@@ -538,9 +546,172 @@ def normalize_selected_graph_item_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _make_graph_clean_row_from_cells(
+    row_id: str,
+    row_cells: List[Any],
+    column_semantics: Dict[str, Any],
+) -> Dict[str, str]:
+    values_by_field: Dict[str, List[str]] = {field: [] for field in _GRAPH_CLEAN_ROW_FIELDS}
+    for cell in row_cells:
+        text = str(_read_attr(cell, "text", "") or "").strip()
+        if not text:
+            continue
+        col_id = str(_read_attr(cell, "col_id", "") or "")
+        field = _field_for_semantic(column_semantics.get(col_id))
+        if field:
+            values_by_field[field].append(text)
+
+    return {
+        field: _join_cell_values(values_by_field[field])
+        for field in _GRAPH_CLEAN_ROW_FIELDS
+    }
+
+
+def _clean_row_confidence_reasons(clean_row: Dict[str, Any]) -> List[str]:
+    confidence_reasons = []
+    if not clean_row["pcode"]:
+        confidence_reasons.append("missing_pcode")
+    if not clean_row["item_description"]:
+        confidence_reasons.append("empty_description")
+    if not clean_row["hsn"]:
+        confidence_reasons.append("missing_hsn")
+    if not clean_row["qty"]:
+        confidence_reasons.append("missing_qty")
+    if not clean_row["rate"]:
+        confidence_reasons.append("missing_rate")
+    if not clean_row["net_amt"]:
+        confidence_reasons.append("missing_net_amt")
+    return confidence_reasons
+
+
+def _strip_header_terms_from_product_text(text: str) -> str:
+    cleaned = _TABLE_HEADER_TOKEN_RE.sub(" ", _safe_text(text))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:|")
+    cleaned = re.sub(r"^[^A-Za-z0-9]+", "", cleaned).strip()
+    return cleaned
+
+
+def _extract_header_trapped_product_text(row_cells: List[Any], column_semantics: Dict[str, Any]) -> str:
+    semantic_product_tokens = []
+    all_tokens = []
+    for cell in sorted(row_cells, key=_cell_sort_key):
+        text = _safe_text(_read_attr(cell, "text", ""))
+        if not text:
+            continue
+        all_tokens.append(text)
+        col_id = str(_read_attr(cell, "col_id", "") or "")
+        if _field_for_semantic(column_semantics.get(col_id)) == "item_description":
+            semantic_product_tokens.append(text)
+
+    candidates = semantic_product_tokens or all_tokens
+    return _strip_header_terms_from_product_text(" ".join(candidates))
+
+
+def _is_strong_header_trapped_product_candidate(row_text: str, product_text: str, next_clean_row: Dict[str, Any]) -> bool:
+    header_hits = len(_TABLE_HEADER_TOKEN_RE.findall(row_text))
+    manufacturer_hits = [
+        token for token in re.findall(r"[A-Z][A-Z-]{2,}", product_text.upper())
+        if token in _KNOWN_MANUFACTURER_TOKENS
+    ]
+    product_words = re.findall(r"[A-Za-z][A-Za-z-]+", product_text)
+    product_like = bool(manufacturer_hits) and (
+        bool(_PRODUCT_FORM_TOKEN_RE.search(product_text)) or len(product_words) >= 3
+    )
+    next_has_numeric_skeleton = bool(
+        _safe_text(next_clean_row.get("rate"))
+        and _safe_text(next_clean_row.get("net_amt"))
+        and (
+            _safe_text(next_clean_row.get("hsn"))
+            or _safe_text(next_clean_row.get("batch"))
+            or _safe_text(next_clean_row.get("expiry"))
+        )
+    )
+    return header_hits >= 3 and product_like and next_has_numeric_skeleton
+
+
+def _has_description(rows: List[Dict[str, Any]], description: str) -> bool:
+    target = re.sub(r"[^A-Z0-9]+", " ", _safe_text(description).upper()).strip()
+    if not target:
+        return False
+    for row in rows:
+        current = re.sub(r"[^A-Z0-9]+", " ", _safe_text(row.get("item_description")).upper()).strip()
+        if current and (target in current or current in target):
+            return True
+    return False
+
+
+def _recover_header_trapped_first_item_row(
+    sorted_rows: List[Any],
+    cells_by_row: Dict[str, List[Any]],
+    column_semantics: Dict[str, Any],
+    item_rows: List[Dict[str, Any]],
+    diagnostics: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not item_rows:
+        return item_rows
+
+    first_item_index = None
+    for index, row in enumerate(sorted_rows):
+        if str(_read_attr(row, "row_role", "") or "").lower() == "item_row":
+            first_item_index = index
+            break
+    if first_item_index is None or first_item_index <= 0:
+        return item_rows
+
+    previous_row = sorted_rows[first_item_index - 1]
+    previous_role = str(_read_attr(previous_row, "row_role", "") or "").lower()
+    if previous_role == "item_row":
+        return item_rows
+
+    previous_row_id = str(_read_attr(previous_row, "row_id", "") or "")
+    previous_cells = sorted(cells_by_row.get(previous_row_id, []), key=_cell_sort_key)
+    previous_row_text = " ".join(
+        _safe_text(_read_attr(cell, "text", ""))
+        for cell in previous_cells
+        if _safe_text(_read_attr(cell, "text", ""))
+    ).strip()
+    product_text = _extract_header_trapped_product_text(previous_cells, column_semantics)
+    next_row = item_rows[0]
+
+    if not _is_strong_header_trapped_product_candidate(previous_row_text, product_text, next_row):
+        return item_rows
+    if _has_description(item_rows, product_text):
+        return item_rows
+
+    recovered = {field: "" for field in _GRAPH_CLEAN_ROW_FIELDS}
+    recovered["item_description"] = product_text
+    for field in ("batch", "expiry", "hsn", "mrp", "rate", "discount", "gst", "net_amt"):
+        recovered[field] = _safe_text(next_row.get(field))
+    recovered = normalize_selected_graph_item_row(recovered)
+    confidence_reasons = _clean_row_confidence_reasons(recovered)
+    recovered.update({
+        "low_confidence": bool(confidence_reasons),
+        "confidence_reasons": confidence_reasons,
+        "visual_row_id": previous_row_id,
+        "source": "selected_graph_table",
+    })
+    diagnostics.append({
+        "used": True,
+        "reason": "header_trapped_first_item_recovered",
+        "source_row_id": previous_row_id,
+        "source_row_role": previous_role or "unknown",
+        "source_row_text": previous_row_text,
+        "recovered_visual_row_id": previous_row_id,
+        "recovered_description": recovered["item_description"],
+        "combined_with_visual_row_id": next_row.get("visual_row_id"),
+        "combined_fields": {
+            field: recovered.get(field)
+            for field in ("batch", "expiry", "hsn", "mrp", "rate", "discount", "gst", "net_amt")
+            if recovered.get(field)
+        },
+    })
+    return [recovered, *item_rows]
+
+
 def selected_table_to_clean_item_rows(
     selected_table: Any,
     column_semantics: Optional[Dict[str, Any]] = None,
+    diagnostics: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Convert an already-selected graph/structured table into clean item rows.
@@ -552,6 +723,7 @@ def selected_table_to_clean_item_rows(
         return []
 
     column_semantics = column_semantics or {}
+    diagnostics = diagnostics if diagnostics is not None else []
     rows = list(_read_attr(selected_table, "rows", []) or [])
     cells = list(_read_attr(selected_table, "cells", []) or [])
     cells_by_row: Dict[str, List[Any]] = {}
@@ -561,41 +733,17 @@ def selected_table_to_clean_item_rows(
             cells_by_row.setdefault(row_id, []).append(cell)
 
     item_rows = []
-    for row in sorted(rows, key=_row_sort_key):
+    sorted_rows = sorted(rows, key=_row_sort_key)
+    for row in sorted_rows:
         row_role = str(_read_attr(row, "row_role", "") or "").lower()
         if row_role != "item_row":
             continue
 
         row_id = str(_read_attr(row, "row_id", "") or "")
         row_cells = sorted(cells_by_row.get(row_id, []), key=_cell_sort_key)
-        values_by_field: Dict[str, List[str]] = {field: [] for field in _GRAPH_CLEAN_ROW_FIELDS}
-        for cell in row_cells:
-            text = str(_read_attr(cell, "text", "") or "").strip()
-            if not text:
-                continue
-            col_id = str(_read_attr(cell, "col_id", "") or "")
-            field = _field_for_semantic(column_semantics.get(col_id))
-            if field:
-                values_by_field[field].append(text)
-
-        clean_row = {
-            field: _join_cell_values(values_by_field[field])
-            for field in _GRAPH_CLEAN_ROW_FIELDS
-        }
+        clean_row = _make_graph_clean_row_from_cells(row_id, row_cells, column_semantics)
         clean_row = normalize_selected_graph_item_row(clean_row)
-        confidence_reasons = []
-        if not clean_row["pcode"]:
-            confidence_reasons.append("missing_pcode")
-        if not clean_row["item_description"]:
-            confidence_reasons.append("empty_description")
-        if not clean_row["hsn"]:
-            confidence_reasons.append("missing_hsn")
-        if not clean_row["qty"]:
-            confidence_reasons.append("missing_qty")
-        if not clean_row["rate"]:
-            confidence_reasons.append("missing_rate")
-        if not clean_row["net_amt"]:
-            confidence_reasons.append("missing_net_amt")
+        confidence_reasons = _clean_row_confidence_reasons(clean_row)
 
         clean_row.update({
             "low_confidence": bool(confidence_reasons),
@@ -605,7 +753,13 @@ def selected_table_to_clean_item_rows(
         })
         item_rows.append(clean_row)
 
-    return item_rows
+    return _recover_header_trapped_first_item_row(
+        sorted_rows,
+        cells_by_row,
+        column_semantics,
+        item_rows,
+        diagnostics,
+    )
 
 
 def _missing_critical_field_count(rows: Any) -> int:
@@ -1451,12 +1605,14 @@ class TableSegmenter:
         # 3. Reconstruct raw OCR fallback and optionally bridge to selected graph rows.
         raw_item_rows_clean = extract_item_rows_from_ocr_blocks(self.ocr_blocks, self.debug_output)
         graph_item_rows_clean = []
+        header_trapped_item_recovery = []
         bridge_error = None
         if selected_topology_source == "document_graph_candidate" and selected_main_table is not None:
             try:
                 graph_item_rows_clean = selected_table_to_clean_item_rows(
                     selected_main_table,
                     column_semantics=column_semantics,
+                    diagnostics=header_trapped_item_recovery,
                 )
             except Exception as exc:
                 bridge_error = str(exc)
@@ -1471,6 +1627,11 @@ class TableSegmenter:
         )
         item_rows_clean, qty_inference_summary = infer_missing_quantities_for_item_rows(item_rows_clean)
         self.debug_output["qty_inference_summary"] = qty_inference_summary
+        self.debug_output["header_trapped_item_recovery"] = {
+            "attempted": bool(header_trapped_item_recovery),
+            "recovered_count": sum(1 for row in header_trapped_item_recovery if row.get("used")),
+            "rows": header_trapped_item_recovery,
+        }
         self.debug_output["item_row_source_selection"] = item_row_source_selection
         
         # 4. Save item_rows_clean.json to file system for manual audit/verification (Requirement 8)
