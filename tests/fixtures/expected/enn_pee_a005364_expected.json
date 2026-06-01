@@ -1,0 +1,35 @@
+{
+  "invoice_no": "A005364",
+  "date": "28-11-2025",
+  "seller": "ENN PEE MEDICAL AGENCIES",
+  "seller_gstin": "03AAKFE8451D1ZN",
+  "buyer": "RAM CHAND & SONS, PTK",
+  "buyer_gstin": "03AAJFR4013K1ZE",
+  "expected_totals": {
+    "subtotal": 2229.34,
+    "discount": 133.75,
+    "sgst": 52.38,
+    "cgst": 52.38,
+    "roundoff": 0.35,
+    "cr_dr_note": 0.0,
+    "grand_total": 2200.0
+  },
+  "expected_products_present": [
+    "LUBIMOIST EYE DROPS",
+    "MAHAFLOX-LP EYE DROPS",
+    "LIPIGO 10 MG",
+    "LIVO-LUK SOLUTION 200ML",
+    "MONTICOPE SUSPENSION 60 ML",
+    "RANIDOM-MPS SUSP",
+    "DYNAPAR QPS 30 ML",
+    "DYNAPAR QPS PLUS 30 ML",
+    "NUROKIND LC TAB"
+  ],
+  "known_item_level_issues": [
+    "LUBIMOIST EYE DROPS is visible in image/OCR but not cleanly extracted.",
+    "Rows 1 and 2 are likely merged/shifted around B4MVY018 / MAHAFLOX-LP.",
+    "Qty column is missing for many rows.",
+    "Compound qty values like 2.750+.250 and 2.500+.500 need domain-aware parsing later.",
+    "Footer label/value pairing is wrong: discount is parsed as subtotal value 2229.34 instead of 133.75."
+  ]
+}
