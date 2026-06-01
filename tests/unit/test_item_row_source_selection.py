@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from services.table_segmenter import (
+    normalize_selected_graph_item_row,
     select_item_rows_clean_source,
     selected_table_to_clean_item_rows,
 )
@@ -78,6 +79,71 @@ def test_graph_table_missing_fields_sets_low_confidence():
     assert "missing_qty" in rows[0]["confidence_reasons"]
     assert "missing_rate" in rows[0]["confidence_reasons"]
     assert "missing_net_amt" in rows[0]["confidence_reasons"]
+
+
+def test_normalize_selected_graph_item_row_strips_manufacturer_from_qty():
+    row = normalize_selected_graph_item_row({
+        "item_description": "RANIDOM-MPS SUSP",
+        "batch": "",
+        "expiry": "",
+        "hsn": "30049099",
+        "qty": "2.500+.500 MANKIN",
+    })
+
+    assert row["qty"] == "2.500+.500"
+
+
+def test_normalize_selected_graph_item_row_splits_expiry_and_hsn():
+    row = normalize_selected_graph_item_row({
+        "item_description": "LUBIMOIST EYE DROPS",
+        "batch": "",
+        "expiry": "",
+        "hsn": "10/25 30049099",
+        "qty": "1",
+    })
+
+    assert row["expiry"] == "10/25"
+    assert row["hsn"] == "30049099"
+
+
+def test_normalize_selected_graph_item_row_moves_batch_prefix_from_description():
+    row = normalize_selected_graph_item_row({
+        "item_description": "B4MVY018 MANKIN MAHAFLOX-LP EYE DROPS",
+        "batch": "",
+        "expiry": "",
+        "hsn": "30049099",
+        "qty": "1",
+    })
+
+    assert row["batch"] == "B4MVY018"
+    assert row["item_description"] == "MANKIN MAHAFLOX-LP EYE DROPS"
+
+
+def test_normalize_selected_graph_item_row_removes_serial_prefix_without_serial_field():
+    row = normalize_selected_graph_item_row({
+        "item_description": "8 TROIKA DYNAPAR QPS PLUS 30 ML",
+        "batch": "",
+        "expiry": "",
+        "hsn": "30049099",
+        "qty": "1",
+    })
+
+    assert "serial" not in row
+    assert row["item_description"] == "TROIKA DYNAPAR QPS PLUS 30 ML"
+
+
+def test_normalize_selected_graph_item_row_moves_serial_prefix_when_serial_field_exists():
+    row = normalize_selected_graph_item_row({
+        "serial": "",
+        "item_description": "9 NUROKIND LC TAB",
+        "batch": "",
+        "expiry": "",
+        "hsn": "30049099",
+        "qty": "1",
+    })
+
+    assert row["serial"] == "9"
+    assert row["item_description"] == "NUROKIND LC TAB"
 
 
 def test_guard_chooses_graph_when_graph_rows_are_better():

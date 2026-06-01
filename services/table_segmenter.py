@@ -439,6 +439,7 @@ _EXPIRY_RE = re.compile(r"\b(?:0?[1-9]|1[0-2])[/-]\d{2,4}\b")
 _HSN_RE = re.compile(r"\b\d{6,8}\b")
 _MONEY_RE = re.compile(r"\d+(?:[.,]\d{2})")
 _ALPHA_RE = re.compile(r"[A-Za-z]")
+_SERIAL_PREFIX_RE = re.compile(r"^\s*(?:\d+[\.)]?|[A-Z][\.)])\s+")
 
 
 def _read_attr(value: Any, key: str, default: Any = None) -> Any:
@@ -485,6 +486,58 @@ def _join_cell_values(values: List[str]) -> str:
     return " ".join(value for value in values if value).strip()
 
 
+def _strip_known_manufacturer_tokens(value: Any) -> str:
+    tokens = _safe_text(value).split()
+    cleaned = [
+        token for token in tokens
+        if token.upper().strip(".,;:()[]{}") not in _KNOWN_MANUFACTURER_TOKENS
+    ]
+    return " ".join(cleaned).strip()
+
+
+def _append_unique_token(existing: str, token: str) -> str:
+    existing = _safe_text(existing)
+    token = _safe_text(token)
+    if not token:
+        return existing
+    parts = existing.split()
+    if token in parts:
+        return existing
+    return " ".join([*parts, token]).strip()
+
+
+def normalize_selected_graph_item_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize selected graph item-row fields without changing financial math."""
+    normalized = dict(row or {})
+
+    description = _safe_text(normalized.get("item_description"))
+    serial_match = _SERIAL_PREFIX_RE.match(description)
+    if serial_match:
+        serial = serial_match.group(0).strip().rstrip(".)")
+        if "serial" in normalized:
+            normalized["serial"] = normalized.get("serial") or serial
+        description = description[serial_match.end():].strip()
+
+    batch_match = _BATCH_LIKE_RE.match(description)
+    if batch_match:
+        batch = batch_match.group(0)
+        normalized["batch"] = _append_unique_token(_safe_text(normalized.get("batch")), batch)
+        description = description[batch_match.end():].strip(" -")
+
+    normalized["item_description"] = description
+    normalized["qty"] = _strip_known_manufacturer_tokens(normalized.get("qty"))
+
+    hsn_text = _safe_text(normalized.get("hsn"))
+    expiry_tokens = _tokens_from_text(hsn_text, _EXPIRY_RE)
+    hsn_tokens = _tokens_from_text(hsn_text, _HSN_RE)
+    if expiry_tokens and hsn_tokens:
+        if not _safe_text(normalized.get("expiry")):
+            normalized["expiry"] = " ".join(expiry_tokens)
+        normalized["hsn"] = " ".join(hsn_tokens)
+
+    return normalized
+
+
 def selected_table_to_clean_item_rows(
     selected_table: Any,
     column_semantics: Optional[Dict[str, Any]] = None,
@@ -529,6 +582,7 @@ def selected_table_to_clean_item_rows(
             field: _join_cell_values(values_by_field[field])
             for field in _GRAPH_CLEAN_ROW_FIELDS
         }
+        clean_row = normalize_selected_graph_item_row(clean_row)
         confidence_reasons = []
         if not clean_row["pcode"]:
             confidence_reasons.append("missing_pcode")
@@ -740,11 +794,19 @@ def build_item_row_alignment_diagnostics(
 
         clean_row = clean_by_visual_id.get(row_id, {})
         row_text = " ".join(all_tokens).strip()
-        item_description = _safe_text(clean_row.get("item_description")) or _join_cell_values(tokens_by_field["item_description"])
-        qty_raw = _safe_text(clean_row.get("qty")) or _join_cell_values(tokens_by_field["qty"])
-        rate_raw = _safe_text(clean_row.get("rate")) or _join_cell_values(tokens_by_field["rate"])
-        amount_raw = _safe_text(clean_row.get("net_amt")) or _join_cell_values(tokens_by_field["net_amt"])
-        hsn_raw = _safe_text(clean_row.get("hsn")) or _join_cell_values(tokens_by_field["hsn"])
+        raw_field_values = {
+            field: _join_cell_values(tokens_by_field[field])
+            for field in _GRAPH_CLEAN_ROW_FIELDS
+        }
+        normalized_field_values = {
+            field: _safe_text(clean_row.get(field))
+            for field in _GRAPH_CLEAN_ROW_FIELDS
+        }
+        item_description = normalized_field_values["item_description"] or raw_field_values["item_description"]
+        qty_raw = raw_field_values["qty"] or normalized_field_values["qty"]
+        rate_raw = raw_field_values["rate"] or normalized_field_values["rate"]
+        amount_raw = raw_field_values["net_amt"] or normalized_field_values["net_amt"]
+        hsn_raw = raw_field_values["hsn"] or normalized_field_values["hsn"]
 
         product_tokens = tokens_by_field["item_description"] or ([item_description] if item_description else [])
         batch_tokens = tokens_by_field["batch"] or _tokens_from_text(row_text, _BATCH_LIKE_RE)
@@ -812,6 +874,8 @@ def build_item_row_alignment_diagnostics(
             "qty_raw": qty_raw or None,
             "rate_raw": rate_raw or None,
             "amount_raw": amount_raw or None,
+            "raw_field_values": {field: value for field, value in raw_field_values.items() if value},
+            "normalized_field_values": {field: value for field, value in normalized_field_values.items() if value},
             "qty_col_id": col_ids_by_field["qty"][0] if col_ids_by_field["qty"] else None,
             "rate_col_id": col_ids_by_field["rate"][0] if col_ids_by_field["rate"] else None,
             "amount_col_id": col_ids_by_field["net_amt"][0] if col_ids_by_field["net_amt"] else None,
