@@ -890,15 +890,36 @@ def _format_inferred_qty(value: float) -> str:
     return f"{value:g}"
 
 
+def _is_batch_only_description(description: str, batch: str) -> bool:
+    description = _safe_text(description)
+    batch = _safe_text(batch)
+    if not description:
+        return True
+
+    normalized_description = re.sub(r"[^A-Z0-9]+", "", description.upper())
+    normalized_batch = re.sub(r"[^A-Z0-9]+", "", batch.upper())
+    if normalized_batch and normalized_description == normalized_batch:
+        return True
+
+    batch_match = _BATCH_LIKE_RE.search(description.upper())
+    if not batch_match:
+        return False
+    remainder = (description[:batch_match.start()] + description[batch_match.end():]).strip(" -.,;:/")
+    return not remainder
+
+
 def infer_missing_qty_from_rate_amount(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     updated = dict(row)
     amount_text = _safe_text(row.get("net_amt") or row.get("amount"))
     rate_text = _safe_text(row.get("rate"))
     description = _safe_text(row.get("item_description"))
+    batch = _safe_text(row.get("batch"))
     visual_row_id = _safe_text(row.get("visual_row_id"))
+    batch_only_description = _is_batch_only_description(description, batch)
     inference_row: Dict[str, Any] = {
         "visual_row_id": visual_row_id or None,
         "description": description,
+        "batch": batch,
         "rate": rate_text,
         "amount": amount_text,
         "implied_qty": None,
@@ -914,8 +935,16 @@ def infer_missing_qty_from_rate_amount(row: Dict[str, Any]) -> Tuple[Dict[str, A
         inference_row["reason"] = "qty_already_present"
         return updated, inference_row
     if not description:
-        inference_row["reason"] = "empty_description"
-        return updated, inference_row
+        if not batch:
+            inference_row["reason"] = "empty_description"
+            return updated, inference_row
+    if batch_only_description:
+        if not batch:
+            inference_row["reason"] = "batch_only_missing_batch"
+            return updated, inference_row
+        if not visual_row_id:
+            inference_row["reason"] = "batch_only_missing_visual_row_id"
+            return updated, inference_row
 
     rate = _parse_inference_number(rate_text)
     amount = _parse_inference_number(amount_text)
@@ -956,12 +985,18 @@ def infer_missing_qty_from_rate_amount(row: Dict[str, Any]) -> Tuple[Dict[str, A
     ]
     if "qty_inferred_from_amount_rate" not in confidence_reasons:
         confidence_reasons.append("qty_inferred_from_amount_rate")
+    if batch_only_description and "qty_inferred_from_amount_rate_batch_only" not in confidence_reasons:
+        confidence_reasons.append("qty_inferred_from_amount_rate_batch_only")
     updated["confidence_reasons"] = confidence_reasons
-    updated["low_confidence"] = bool(confidence_reasons)
+    updated["low_confidence"] = True if batch_only_description else bool(confidence_reasons)
 
     inference_row["inferred_qty"] = inferred_qty_text
     inference_row["used"] = True
-    inference_row["reason"] = "qty_inferred_from_amount_rate"
+    inference_row["reason"] = (
+        "batch_only_qty_inferred_from_amount_rate"
+        if batch_only_description
+        else "qty_inferred_from_amount_rate"
+    )
     return updated, inference_row
 
 

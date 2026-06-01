@@ -78,6 +78,66 @@ def test_empty_description_is_skipped():
     assert diagnostic["reason"] == "empty_description"
 
 
+def test_batch_only_row_with_batch_rate_amount_infers_qty_without_inventing_description():
+    row, diagnostic = infer_missing_qty_from_rate_amount(_graph_row(
+        item_description="B95Y104-",
+        batch="B95Y104",
+        rate="182.03",
+        net_amt="500.58",
+    ))
+
+    assert row["qty"] == "2.75"
+    assert row["item_description"] == "B95Y104-"
+    assert row["low_confidence"] is True
+    assert "qty_inferred_from_amount_rate_batch_only" in row["confidence_reasons"]
+    assert diagnostic["used"] is True
+    assert diagnostic["reason"] == "batch_only_qty_inferred_from_amount_rate"
+    assert diagnostic["batch"] == "B95Y104"
+
+
+def test_batch_only_row_without_batch_is_skipped():
+    row, diagnostic = infer_missing_qty_from_rate_amount(_graph_row(
+        item_description="B95Y104-",
+        batch="",
+        rate="182.03",
+        net_amt="500.58",
+    ))
+
+    assert row["qty"] == ""
+    assert diagnostic["used"] is False
+    assert diagnostic["reason"] == "batch_only_missing_batch"
+
+
+def test_batch_only_row_with_bad_ratio_is_skipped():
+    row, diagnostic = infer_missing_qty_from_rate_amount(_graph_row(
+        item_description="B95Y104-",
+        batch="B95Y104",
+        rate="182.03",
+        net_amt="460.00",
+    ))
+
+    assert row["qty"] == ""
+    assert diagnostic["used"] is False
+    assert diagnostic["reason"] == "implied_qty_not_safe"
+
+
+def test_batch_only_summary_reports_batch_only_reason():
+    rows, summary = infer_missing_quantities_for_item_rows([
+        _graph_row(
+            visual_row_id="graph_row_25",
+            item_description="B95Y104-",
+            batch="B95Y104",
+            rate="182.03",
+            net_amt="500.58",
+        )
+    ])
+
+    assert rows[0]["qty"] == "2.75"
+    assert summary["attempted"] == 1
+    assert summary["inferred_count"] == 1
+    assert summary["rows"][0]["reason"] == "batch_only_qty_inferred_from_amount_rate"
+
+
 def test_inference_summary_is_json_serializable():
     rows, summary = infer_missing_quantities_for_item_rows([
         _graph_row(visual_row_id="graph_row_17", rate="250.64", net_amt="250.64"),
