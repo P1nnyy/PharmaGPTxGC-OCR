@@ -721,6 +721,124 @@ def _parse_decimal(value: Any) -> Optional[float]:
         return None
 
 
+def _parse_inference_number(value: Any) -> Optional[float]:
+    text = _safe_text(value).replace(",", ".")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _format_inferred_qty(value: float) -> str:
+    return f"{value:g}"
+
+
+def infer_missing_qty_from_rate_amount(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    updated = dict(row)
+    amount_text = _safe_text(row.get("net_amt") or row.get("amount"))
+    rate_text = _safe_text(row.get("rate"))
+    description = _safe_text(row.get("item_description"))
+    visual_row_id = _safe_text(row.get("visual_row_id"))
+    inference_row: Dict[str, Any] = {
+        "visual_row_id": visual_row_id or None,
+        "description": description,
+        "rate": rate_text,
+        "amount": amount_text,
+        "implied_qty": None,
+        "inferred_qty": None,
+        "used": False,
+        "reason": "",
+    }
+
+    if row.get("source") != "selected_graph_table":
+        inference_row["reason"] = "non_selected_graph_table_source"
+        return updated, inference_row
+    if _safe_text(row.get("qty")):
+        inference_row["reason"] = "qty_already_present"
+        return updated, inference_row
+    if not description:
+        inference_row["reason"] = "empty_description"
+        return updated, inference_row
+
+    rate = _parse_inference_number(rate_text)
+    amount = _parse_inference_number(amount_text)
+    if rate is None:
+        inference_row["reason"] = "unparseable_rate"
+        return updated, inference_row
+    if amount is None:
+        inference_row["reason"] = "unparseable_amount"
+        return updated, inference_row
+    if rate <= 0:
+        inference_row["reason"] = "non_positive_rate"
+        return updated, inference_row
+    if amount <= 0:
+        inference_row["reason"] = "non_positive_amount"
+        return updated, inference_row
+
+    implied_qty = amount / rate
+    inference_row["implied_qty"] = round(implied_qty, 6)
+    safe_values = (1.0, 2.0, 2.5, 2.75, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0)
+    tolerance = 0.02
+    issues = set(row.get("issues") or [])
+    if row.get("suspected_shifted_amount") or "adjacent_next_row_has_qty" in issues:
+        tolerance = 0.005
+
+    if abs(amount - rate) <= 0.02:
+        inferred_qty = 1.0
+    else:
+        inferred_qty = min(safe_values, key=lambda candidate: abs(implied_qty - candidate))
+        if abs(implied_qty - inferred_qty) > tolerance:
+            inference_row["reason"] = "implied_qty_not_safe"
+            return updated, inference_row
+
+    inferred_qty_text = _format_inferred_qty(inferred_qty)
+    updated["qty"] = inferred_qty_text
+    confidence_reasons = [
+        reason for reason in row.get("confidence_reasons", [])
+        if reason != "missing_qty"
+    ]
+    if "qty_inferred_from_amount_rate" not in confidence_reasons:
+        confidence_reasons.append("qty_inferred_from_amount_rate")
+    updated["confidence_reasons"] = confidence_reasons
+    updated["low_confidence"] = bool(confidence_reasons)
+
+    inference_row["inferred_qty"] = inferred_qty_text
+    inference_row["used"] = True
+    inference_row["reason"] = "qty_inferred_from_amount_rate"
+    return updated, inference_row
+
+
+def infer_missing_quantities_for_item_rows(rows: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    clean_rows = rows if isinstance(rows, list) else []
+    updated_rows: List[Dict[str, Any]] = []
+    summary_rows: List[Dict[str, Any]] = []
+    attempted = 0
+    inferred_count = 0
+
+    for row in clean_rows:
+        if not isinstance(row, dict):
+            updated_rows.append(row)
+            continue
+        updated_row, inference_row = infer_missing_qty_from_rate_amount(row)
+        should_report = row.get("source") == "selected_graph_table" and not _safe_text(row.get("qty"))
+        if should_report:
+            attempted += 1
+            summary_rows.append(inference_row)
+            if inference_row["used"]:
+                inferred_count += 1
+        updated_rows.append(updated_row)
+
+    return updated_rows, {
+        "attempted": attempted,
+        "inferred_count": inferred_count,
+        "skipped_count": attempted - inferred_count,
+        "rows": summary_rows,
+    }
+
+
 def _parse_quantity_total(value: Any) -> Optional[float]:
     text = _safe_text(value).replace(",", ".")
     if not text or _ALPHA_RE.search(text):
@@ -1351,6 +1469,8 @@ class TableSegmenter:
             selected_main_table=selected_main_table,
             bridge_error=bridge_error,
         )
+        item_rows_clean, qty_inference_summary = infer_missing_quantities_for_item_rows(item_rows_clean)
+        self.debug_output["qty_inference_summary"] = qty_inference_summary
         self.debug_output["item_row_source_selection"] = item_row_source_selection
         
         # 4. Save item_rows_clean.json to file system for manual audit/verification (Requirement 8)

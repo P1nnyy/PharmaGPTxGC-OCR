@@ -2033,6 +2033,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "fast_fail": False,
             "tsr_candidate_decision": tsr_candidate_decision,
             "item_row_source_selection": item_row_source_selection,
+            "qty_inference_summary": seg_debug.get("qty_inference_summary", {}),
             "row_handoff_summary": row_handoff_summary,
             "item_row_alignment_diagnostics": item_row_alignment_diagnostics,
             **tsr_metadata,

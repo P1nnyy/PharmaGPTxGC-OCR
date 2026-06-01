@@ -154,3 +154,25 @@ def test_alignment_diagnostics_output_is_json_serializable():
     assert diagnostics["item_row_count"] == 1
     assert diagnostics["rows"][0]["math_check"] == "pass"
     json.dumps(diagnostics)
+
+
+def test_alignment_diagnostics_keeps_raw_qty_blank_when_qty_is_inferred():
+    diagnostics = _diagnose(
+        [
+            _cell("r1", "c_product", "LUBIMOIST EYE DROPS", x=1),
+            _cell("r1", "c_rate", "250.64", x=3),
+            _cell("r1", "c_amount", "250.64", x=4),
+        ],
+        clean_row={
+            "visual_row_id": "r1",
+            "item_description": "LUBIMOIST EYE DROPS",
+            "qty": "1",
+            "rate": "250.64",
+            "net_amt": "250.64",
+            "hsn": "30049099",
+        },
+    )
+
+    row = diagnostics["rows"][0]
+    assert "qty" not in row["raw_field_values"]
+    assert row["normalized_field_values"]["qty"] == "1"
