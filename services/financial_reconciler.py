@@ -202,6 +202,119 @@ class DiscountAwareVerifier:
             
         return False, "all_formulas_failed"
 
+
+def _cell_text(cell: Optional[TableCell]) -> str:
+    return str(getattr(cell, "text", "") or "")
+
+
+def _cell_source(table_id: str, cell: Optional[TableCell], reason: str = "") -> str:
+    if cell is None:
+        return reason or "missing"
+    source = f"table_cell:{table_id}:{cell.row_id}:{cell.col_id}"
+    if reason:
+        source = f"{source}:{reason}"
+    return source
+
+
+def _decimal_diagnostic(value: Optional[Decimal]) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _row_description(row_cells: List[TableCell], product_cols: List[str], row_text: str) -> str:
+    product_texts = [
+        c.text.strip()
+        for c in row_cells
+        if c.col_id in product_cols and c.text and not getattr(c, "semantic_outlier", False)
+    ]
+    if product_texts:
+        return " ".join(product_texts).strip()
+    return row_text
+
+
+def _qty_failure_reason(qty_cell: Optional[TableCell], qty_obj: Any) -> Optional[str]:
+    if qty_cell is None or not _cell_text(qty_cell).strip():
+        return "qty_missing"
+    rejected_reason = getattr(qty_obj, "qty_parse_rejected_reason", None)
+    parse_method = getattr(qty_obj, "parse_method", "")
+    if rejected_reason and rejected_reason != "empty":
+        return "qty_parse_failed"
+    if parse_method == "unparsed":
+        return "qty_parse_failed"
+    return None
+
+
+def _rate_failure_reason(rate_cell: Optional[TableCell], rate: Optional[Decimal]) -> Optional[str]:
+    if rate_cell is None or not _cell_text(rate_cell).strip():
+        return "rate_missing"
+    if rate == 0 and not re.search(r"\d", _cell_text(rate_cell)):
+        return "rate_parse_failed"
+    return None
+
+
+def _amount_failure_reason(amount_cell: Optional[TableCell], amount: Optional[Decimal]) -> Optional[str]:
+    if amount_cell is None or not _cell_text(amount_cell).strip():
+        return "amount_missing"
+    if amount is None:
+        return "amount_parse_failed"
+    return None
+
+
+def _build_row_math_detail(
+    table_id: str,
+    row: RowRegion,
+    row_cells: List[TableCell],
+    product_cols: List[str],
+    row_text: str,
+    qty_cell: Optional[TableCell] = None,
+    qty_obj: Any = None,
+    rate_cell: Optional[TableCell] = None,
+    rate: Optional[Decimal] = None,
+    rate_source_reason: str = "semantic_rate_column",
+    amount_cell: Optional[TableCell] = None,
+    amount: Optional[Decimal] = None,
+    amount_source_reason: str = "",
+    status: str = "unknown",
+    formula: Optional[str] = None,
+    skipped_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    qty_parsed = getattr(qty_obj, "billed_qty", None)
+    expected_amount = qty_parsed * rate if qty_parsed is not None and rate is not None else None
+    delta = amount - expected_amount if amount is not None and expected_amount is not None else None
+
+    failure_reason = skipped_reason
+    if failure_reason is None and status in {"fail", "unknown"}:
+        for reason in (
+            _qty_failure_reason(qty_cell, qty_obj),
+            _rate_failure_reason(rate_cell, rate),
+            _amount_failure_reason(amount_cell, amount),
+        ):
+            if reason:
+                failure_reason = reason
+                break
+        if failure_reason is None and status == "fail":
+            failure_reason = formula or "math_failed"
+
+    return {
+        "row_id": row.row_id,
+        "description": _row_description(row_cells, product_cols, row_text),
+        "qty_raw": _cell_text(qty_cell),
+        "qty_source": _cell_source(table_id, qty_cell, "semantic_quantity_column"),
+        "qty_parsed": _decimal_diagnostic(qty_parsed),
+        "rate_raw": _cell_text(rate_cell),
+        "rate_source": _cell_source(table_id, rate_cell, rate_source_reason),
+        "rate_parsed": _decimal_diagnostic(rate),
+        "amount_raw": _cell_text(amount_cell),
+        "amount_source": _cell_source(table_id, amount_cell, amount_source_reason),
+        "amount_parsed": _decimal_diagnostic(amount),
+        "expected_amount": _decimal_diagnostic(expected_amount),
+        "actual_amount": _decimal_diagnostic(amount),
+        "delta": _decimal_diagnostic(delta),
+        "status": status,
+        "failure_reason": failure_reason or "",
+    }
+
 # --- Revised Reconciliation Result Structs ---
 
 class ReconciliationResultV2(BaseModel):
@@ -233,6 +346,8 @@ class ReconciliationResultV2(BaseModel):
     sub_scores: Dict[str, SubScore] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     item_amount_sources: List[Dict[str, Any]] = Field(default_factory=dict)
+    row_math_details: List[Dict[str, Any]] = Field(default_factory=list)
+    row_math_failures: List[Dict[str, Any]] = Field(default_factory=list)
 
     def to_legacy_dict(self) -> Dict[str, Any]:
         """Maintains backward compatibility with legacy dashboard keys."""
@@ -257,6 +372,8 @@ class ReconciliationResultV2(BaseModel):
             },
             "warnings": self.warnings,
             "item_amount_sources": self.item_amount_sources,
+            "row_math_details": self.row_math_details,
+            "row_math_failures": self.row_math_failures,
             "status": self.status.value
         }
 
@@ -281,6 +398,7 @@ class FinancialReconciler:
         rate_cols = []
         tax_cols = []
         disc_cols = []
+        product_cols = []
         
         for cid, meta in table_semantics.items():
             ctype = meta.get("type", "").upper() if isinstance(meta, dict) else str(meta).upper()
@@ -289,6 +407,7 @@ class FinancialReconciler:
             elif ctype == "RATE": rate_cols.append(cid)
             elif ctype in ("TAX", "GST"): tax_cols.append(cid)
             elif "DISC" in ctype or "DISCOUNT" in ctype: disc_cols.append(cid)
+            elif ctype in ("PRODUCT", "DESCRIPTION", "ITEM", "ITEM_DESCRIPTION"): product_cols.append(cid)
             
         # 2. Group Cells by Row
         cells_by_row = {}
@@ -304,6 +423,8 @@ class FinancialReconciler:
         rows_valid_total = 0
         low_stability_item_rows = 0
         item_amount_sources = []
+        row_math_details = []
+        row_math_failures = []
         
         verifier = DiscountAwareVerifier()
         footer_row_pattern = re.compile(
@@ -316,26 +437,55 @@ class FinancialReconciler:
         
         for row in region.rows:
             row_cells = cells_by_row.get(row.row_id, [])
+            row_text = " ".join(c.text for c in row_cells if c.text).strip()
             row_role = getattr(row, "row_role", "unknown_row")
             if row_role in ("header_row", "footer_summary_row", "tax_summary_row", "metadata_row"):
                 logger.debug(f"[RECONCILE ROW SKIP] Skipping row '{row.row_id}' role={row_role}")
+                row_math_details.append(_build_row_math_detail(
+                    region.table_id,
+                    row,
+                    row_cells,
+                    product_cols,
+                    row_text,
+                    status="skipped",
+                    skipped_reason=f"skipped_role:{row_role}",
+                ))
                 continue
             if row.stability < 0.4 and row_role != "item_row":
+                row_math_details.append(_build_row_math_detail(
+                    region.table_id,
+                    row,
+                    row_cells,
+                    product_cols,
+                    row_text,
+                    status="skipped",
+                    skipped_reason="low_stability_non_item_row",
+                ))
                 continue
             if row.stability < 0.4:
                 low_stability_item_rows += 1
-            row_text = " ".join(c.text for c in row_cells if c.text).strip()
             if footer_row_pattern.search(row_text):
                 logger.debug(
                     f"[FOOTER ROW REJECTED] Skipping row '{row.row_id}' from item subtotal derivation: "
                     f"'{row_text[:120]}'"
                 )
+                row_math_details.append(_build_row_math_detail(
+                    region.table_id,
+                    row,
+                    row_cells,
+                    product_cols,
+                    row_text,
+                    status="skipped",
+                    skipped_reason="footer_like_row_text",
+                ))
                 continue
             
             # Extract candidate numeric values
             r_amt = r_qty_obj = r_rate = r_disc = None
+            qty_cell = rate_cell = None
             selected_amount_cell = None
             amount_selection_reason = "no_semantic_amount_column"
+            rate_source_reason = "semantic_rate_column"
 
             if amt_cols:
                 for c in row_cells:
@@ -353,9 +503,14 @@ class FinancialReconciler:
             for c in row_cells:
                 if getattr(c, "semantic_outlier", False):
                     continue
-                if c.col_id in qty_cols: r_qty_obj = parse_quantity(c.text)
-                if c.col_id in rate_cols: r_rate = _to_decimal(c.text)
-                if c.col_id in disc_cols: r_disc = _to_decimal(c.text)
+                if c.col_id in qty_cols:
+                    r_qty_obj = parse_quantity(c.text)
+                    qty_cell = c
+                if c.col_id in rate_cols:
+                    r_rate = _to_decimal(c.text)
+                    rate_cell = c
+                if c.col_id in disc_cols:
+                    r_disc = _to_decimal(c.text)
 
             if not amt_cols:
                 numeric_cells = []
@@ -375,6 +530,11 @@ class FinancialReconciler:
                 other_amts = [c for c in row_cells if c.col_id in amt_cols and _to_decimal(c.text) != r_amt]
                 if other_amts:
                      r_rate = _to_decimal(other_amts[0].text)
+                     rate_cell = other_amts[0]
+                     rate_source_reason = "fallback_other_amount_column_as_rate"
+
+            row_math_status = "unknown"
+            row_math_formula = None
 
             if r_amt is not None and r_amt > 0:
                 derived_subtotal += r_amt
@@ -392,10 +552,53 @@ class FinancialReconciler:
                      # USE BILLED QTY FROM QTY PARSER
                      billed_qty = r_qty_obj.billed_qty
                      success, formula = verifier.verify_row_math(billed_qty, r_rate, r_amt, r_disc)
+                     row_math_formula = formula
                      if success:
                          math_pass_count += 1
+                         row_math_status = "pass"
                      else:
                          math_fail_count += 1
+                         row_math_status = "fail"
+
+            row_math_detail = _build_row_math_detail(
+                region.table_id,
+                row,
+                row_cells,
+                product_cols,
+                row_text,
+                qty_cell=qty_cell,
+                qty_obj=r_qty_obj,
+                rate_cell=rate_cell,
+                rate=r_rate,
+                rate_source_reason=rate_source_reason,
+                amount_cell=selected_amount_cell,
+                amount=r_amt,
+                amount_source_reason=amount_selection_reason,
+                status=row_math_status,
+                formula=row_math_formula,
+            )
+            row_math_details.append(row_math_detail)
+            if row_math_detail["status"] == "fail" or (
+                row_math_detail["status"] == "unknown" and row_math_detail["failure_reason"]
+            ):
+                row_math_failures.append({
+                    key: row_math_detail[key]
+                    for key in (
+                        "row_id",
+                        "description",
+                        "failure_reason",
+                        "qty_raw",
+                        "qty_parsed",
+                        "rate_raw",
+                        "rate_parsed",
+                        "amount_raw",
+                        "amount_parsed",
+                        "expected_amount",
+                        "actual_amount",
+                        "delta",
+                        "status",
+                    )
+                })
                           
         # 4. Global Metadata Extraction (Totals, GST Sum)
         # Total table span for positional heuristics
@@ -478,7 +681,9 @@ class FinancialReconciler:
             total_rows=rows_valid_total,
             rows_math_passed=math_pass_count,
             rows_math_failed=math_fail_count,
-            item_amount_sources=item_amount_sources
+            item_amount_sources=item_amount_sources,
+            row_math_details=row_math_details,
+            row_math_failures=row_math_failures,
         )
         if low_stability_item_rows:
             res.warnings.append(f"included_low_stability_item_rows:{low_stability_item_rows}")
