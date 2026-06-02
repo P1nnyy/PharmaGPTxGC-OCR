@@ -15,6 +15,7 @@ from services.layout_pipeline.column_anchor_detector import detect_column_anchor
 from services.layout_pipeline.column_band_rescue import build_column_band_rescue_candidate
 from services.layout_pipeline.document_graph import build_document_graph
 from services.layout_pipeline.graph_fallback import build_graph_fallback_table_region
+from services.layout_pipeline.invoice_diagnostics import attach_invoice_diagnostics
 from services.layout_pipeline.reconstruction_diagnostics import (
     _box_to_dict,
     _build_topology_debug,
@@ -464,7 +465,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     if not table_regions:
         logger.warning("[FAST FAIL] Zero table regions from selected topology path.")
         topology_debug = _build_topology_debug(ocr_blocks, [], [], {}, document_graph=document_graph)
-        return {
+        return attach_invoice_diagnostics({
             "reconstructed_rows": [],
             "detected_table_rows": [],
             "columns_extracted": False,
@@ -524,7 +525,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 **tsr_metadata,
                 "tsr_status": tsr_status_metric
             }
-        }
+        }, invoice_id="unknown")
 
     tsr_metadata["topology_source"] = topology_source
 
@@ -1636,7 +1637,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # --- FAST-FAIL CHECKPOINT 2: Critically low topology confidence ---
     if benchmark_mode and stability_metrics.get('overall', 100) < 30:
         logger.warning(f"[FAST FAIL] Topology confidence catastrophically low: {stability_metrics.get('overall', 0)}")
-        return {
+        return attach_invoice_diagnostics({
             "reconstructed_rows": [],
             "detected_table_rows": [],
             "columns_extracted": False,
@@ -1701,7 +1702,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 **tsr_metadata,
                 "tsr_status": tsr_status_metric
             }
-        }
+        }, invoice_id="unknown")
 
     # --- Graph Fallback Effectiveness Telemetry ---
     if graph_fallback_used and table_bundle.main_table:
@@ -1905,7 +1906,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "image_properties": tsr_metadata.get("image_properties") or {}
     }
 
-    return {
+    final_result = {
         "metadata": metadata_section,
         "tax_summary": segmenter_results["tax_summary"],
         "item_rows_clean": segmenter_results["item_rows_clean"],
@@ -2051,3 +2052,4 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "tsr_status": tsr_status_metric
         }
     }
+    return attach_invoice_diagnostics(final_result, invoice_id=metadata_section.get("invoice_id") or "unknown")
