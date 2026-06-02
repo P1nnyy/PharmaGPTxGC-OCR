@@ -1324,6 +1324,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     semantic_results = {}
     classifier = SemanticColumnClassifier()
+    
+    # Run semantic input sanitizer diagnostics before classification
+    from services.layout_pipeline.semantic_input_sanitizer import sanitize_rows_for_semantic_inference
+    sanitizer_diagnostics = {
+        "input_row_count": 0,
+        "item_row_count": 0,
+        "excluded_footer_tax_count": 0,
+        "excluded_examples": []
+    }
+    for tr in analysis_targets:
+        tr_roles = {r.row_id: getattr(r, "row_role", "unknown_row") for r in tr.rows}
+        san_res = sanitize_rows_for_semantic_inference(tr.rows, cells=tr.cells, row_roles=tr_roles)
+        metrics = san_res["metrics"]
+        sanitizer_diagnostics["input_row_count"] += metrics["input_row_count"]
+        sanitizer_diagnostics["item_row_count"] += metrics["item_row_count"]
+        sanitizer_diagnostics["excluded_footer_tax_count"] += metrics["excluded_count"]
+        sanitizer_diagnostics["excluded_examples"].extend(metrics["excluded_examples"])
+
     semantic_rejection_total = 0
     semantic_outlier_total = 0
     hard_deleted_cells_total = 0
@@ -1913,6 +1931,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "scheme_rows": segmenter_results["scheme_rows"],
         "credit_note_rows": segmenter_results["credit_note_rows"],
         "invoice_totals": invoice_totals,
+        "semantic_input_sanitizer": sanitizer_diagnostics,
         "table_region_debug": seg_debug["table_region_debug"],
         "detected_region_boundaries": seg_debug["detected_region_boundaries"],
         "rejected_item_rows_with_reason": seg_debug["rejected_item_rows_with_reason"],

@@ -356,11 +356,17 @@ class SemanticColumnClassifier:
         """
         analysis_results: Dict[str, Dict[str, Any]] = {}
         row_roles = {r.row_id: getattr(r, "row_role", "unknown_row") for r in region.rows}
+        
+        # Apply semantic input sanitizer to prevent footer/tax row leakage
+        from services.layout_pipeline.semantic_input_sanitizer import sanitize_rows_for_semantic_inference
+        sanitizer_res = sanitize_rows_for_semantic_inference(region.rows, cells=region.cells, row_roles=row_roles)
+        excluded_row_ids = set(sanitizer_res["excluded_row_ids"])
+        
         excluded_roles = {"header_row", "footer_summary_row", "tax_summary_row", "metadata_row"}
         item_row_ids: Set[str] = {
             row_id
             for row_id, role in row_roles.items()
-            if role == "item_row" and role not in excluded_roles
+            if role == "item_row" and role not in excluded_roles and row_id not in excluded_row_ids
         }
         columns_inferred_from_item_rows_only = bool(item_row_ids)
 
