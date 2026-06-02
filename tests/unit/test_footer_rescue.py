@@ -12,7 +12,10 @@ def test_footer_rescue_identifies_missing_grand_total_candidate_from_text():
     report = diagnose_footer_rescue(canonical, {"semantic_markdown": "Grand Total : 118.00"})
 
     assert "grand_total" in report["missing_fields"]
-    assert any(candidate["label"] == "grand_total" and candidate["value"] == 118.0 for candidate in report["candidate_fields"])
+    assert any(
+        candidate["label"] == "grand_total" and candidate["value"] == 118.0
+        for candidate in report["candidate_fields"]["grand_total"]
+    )
 
 
 def test_footer_rescue_does_not_apply_conflicting_candidates():
@@ -28,5 +31,5 @@ def test_footer_rescue_does_not_apply_conflicting_candidates():
     )
 
     assert report["applied_fields"] == []
-    assert "conflicting_candidates:grand_total" in report["warnings"]
+    assert "footer_rescue_conflicting_candidates:grand_total" in report["warnings"]
     assert canonical.get_footer_value("grand_total") is None

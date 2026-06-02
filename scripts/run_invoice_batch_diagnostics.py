@@ -66,6 +66,46 @@ def first_footer_value(canonical_invoice, label):
     return None
 
 
+def summarize_selected_candidates(selected_candidates):
+    if not isinstance(selected_candidates, dict):
+        return {}
+    summary = {}
+    for label, candidate in selected_candidates.items():
+        if not isinstance(candidate, dict):
+            continue
+        summary[label] = {
+            "value": candidate.get("value"),
+            "confidence": candidate.get("confidence"),
+            "line_text": candidate.get("line_text"),
+        }
+    return summary
+
+
+def format_selected_candidates(selected_candidates):
+    if not selected_candidates:
+        return "none"
+    parts = []
+    for label, candidate in sorted(selected_candidates.items()):
+        if not isinstance(candidate, dict):
+            continue
+        confidence = candidate.get("confidence")
+        confidence_text = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "n/a"
+        parts.append(f"{label}={candidate.get('value')} ({confidence_text})")
+    return ", ".join(parts) or "none"
+
+
+def format_applied_fields(applied_fields):
+    if not applied_fields:
+        return "none"
+    parts = []
+    for field in applied_fields:
+        if isinstance(field, dict):
+            parts.append(f"{field.get('label')}={field.get('value')}")
+        else:
+            parts.append(str(field))
+    return ", ".join(parts) or "none"
+
+
 def summarize_reconstruction(image_path: Path, original_status: str, reconstruction: dict, error: dict | None = None) -> dict:
     reconstruction = reconstruction if isinstance(reconstruction, dict) else {}
     canonical = reconstruction.get("canonical_invoice") or {}
@@ -83,6 +123,13 @@ def summarize_reconstruction(image_path: Path, original_status: str, reconstruct
         or q_metrics.get("missing_footer_fields")
         or []
     )
+    selected_candidates = summarize_selected_candidates(footer_rescue.get("selected_candidates"))
+    applied_fields = footer_rescue.get("applied_fields") or []
+    candidate_fields = footer_rescue.get("candidate_fields") or {}
+    if isinstance(candidate_fields, dict):
+        candidate_count = sum(len(candidates) for candidates in candidate_fields.values() if isinstance(candidates, list))
+    else:
+        candidate_count = len(candidate_fields)
 
     return {
         "filename": image_path.name,
@@ -107,8 +154,15 @@ def summarize_reconstruction(image_path: Path, original_status: str, reconstruct
         "layout_profile": layout_profile.get("profile"),
         "quality_reasons": quality_gate.get("reasons") or [],
         "footer_missing_fields": missing_footer_fields,
-        "footer_rescue_candidate_count": len(footer_rescue.get("candidate_fields") or []),
-        "footer_rescue_applied_count": len(footer_rescue.get("applied_fields") or []),
+        "footer_missing_before_rescue": footer_rescue.get("missing_fields") or [],
+        "footer_selected_candidates": selected_candidates,
+        "footer_applied_fields": applied_fields,
+        "footer_rescue_warnings": footer_rescue.get("warnings") or [],
+        "footer_conflicting_candidates": footer_rescue.get("conflicting_candidates") or {},
+        "footer_bottom_region_line_count": footer_rescue.get("bottom_region_line_count"),
+        "footer_lines_used": footer_rescue.get("footer_lines_used") or [],
+        "footer_rescue_candidate_count": candidate_count,
+        "footer_rescue_applied_count": len(applied_fields),
         "fast_fail": reconstruction.get("fast_fail"),
         "fast_fail_reason": reconstruction.get("fast_fail_reason"),
         "raw_token_count": metrics.get("raw_token_count"),
@@ -156,25 +210,22 @@ def render_markdown(rows: list[dict], json_path: Path) -> str:
         f"- JSON report: `{json_path.name}`",
         f"- Invoice count: {len(rows)}",
         "",
-        "| Filename | Original | Effective | Confidence | Items | Row math | Footer missing | Profile | Reasons |",
-        "| --- | --- | --- | ---: | ---: | --- | --- | --- | --- |",
+        "| Filename | Original | Effective | Confidence | Missing before rescue | Selected candidates | Applied fields | Warnings | Profile | Reasons |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         confidence = row.get("invoice_confidence")
         confidence_text = f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else "n/a"
-        if row.get("row_math_missing"):
-            row_math = "missing"
-        else:
-            row_math = f"{row.get('row_math_passed')}/{row.get('row_math_failed')}"
         lines.append(
-            "| {filename} | {original} | {effective} | {confidence} | {items} | {row_math} | {missing} | {profile} | {reasons} |".format(
+            "| {filename} | {original} | {effective} | {confidence} | {missing} | {selected} | {applied} | {warnings} | {profile} | {reasons} |".format(
                 filename=row.get("filename"),
                 original=row.get("original_status"),
                 effective=row.get("status_effective"),
                 confidence=confidence_text,
-                items=row.get("item_rows"),
-                row_math=row_math,
-                missing=", ".join(row.get("footer_missing_fields") or []) or "none",
+                missing=", ".join(row.get("footer_missing_before_rescue") or []) or "none",
+                selected=format_selected_candidates(row.get("footer_selected_candidates")),
+                applied=format_applied_fields(row.get("footer_applied_fields")),
+                warnings=", ".join(row.get("footer_rescue_warnings") or []) or "none",
                 profile=row.get("layout_profile") or "unknown",
                 reasons=", ".join(row.get("quality_reasons") or []) or "none",
             )
