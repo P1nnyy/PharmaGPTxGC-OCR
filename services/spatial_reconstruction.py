@@ -269,6 +269,263 @@ def _repair_product_numeric_phase_shift(
 def _dominance_score_confidence(score: float) -> float:
     return max(0.0, min(0.99, (float(score) + 200.0) / 700.0))
 
+
+def filter_graph_rows(raw_graph_rows: list, tsr_metadata: dict) -> list:
+    """
+    Filters graph candidate rows, blocking footer/tax rows from preservation override
+    and tracking them in diagnostics/telemetry.
+    """
+    import re
+    from core.logger import logger
+
+    graph_rows = []
+    graph_rows_raw_count = len(raw_graph_rows)
+    graph_rows_dropped_reasons = {}
+
+    # Telemetry & Override counters
+    graph_rows_preserved_by_header_evidence = 0
+    graph_rows_preserved_by_product_evidence = 0
+    graph_rows_dropped_detail_sample = []
+    graph_preservation_blocked_footer_tax_count = 0
+    graph_preservation_blocked_examples = []
+
+    # Compile patterns and filters for overrides
+    header_tokens_pattern = re.compile(
+        r"\b(PRODUCT|ITEM|DESCRIPTION|BATCH|EXP|EXPIRY|HSN|QTY|MRP|RATE|AMOUNT)\b"
+    )
+    footer_tax_labels_pattern = re.compile(
+        r"\b(CGST|SGST|IGST|GST|taxable|tax\s+amt|total|grand\s+total|net\s+amount|round\s+off|amount\s+in\s+words|less\s+td|add\s+sgst|add\s+cgst|non-taxable|taxable\s+amt)\b",
+        re.IGNORECASE
+    )
+    common_stops = {
+        "THE", "FOR", "AND", "GST", "TAX", "NET", "AMT", "SUB", "PCS", "QTY", "EXP", "LOT",
+        "IFSC", "BANK", "DATE", "INVOICE", "BILL", "TOTAL", "GRAND", "PAGE", "ONLY",
+        "RUPEES", "WORDS", "SIGN", "PROP", "JURIS", "TERMS", "GOODS", "SOLD", "DELAY", "INTER"
+    }
+
+    for r in raw_graph_rows:
+        row_id = r.get("row_id", "")
+        text = r.get("text", "")
+        text_upper = text.upper()
+        hint = r.get("row_type_hint", "unknown")
+
+        has_strong_header_tokens = header_tokens_pattern.search(text_upper) is not None
+
+        # Precedence 1: Check obvious noise drops
+        # A. Amount in words
+        is_amount_in_words = (
+            "AMOUNT IN WORDS" in text_upper or
+            "AMT IN WORDS" in text_upper or
+            "RUPEES ONLY" in text_upper or
+            "RUPEES" in text_upper or
+            "WORDS ONLY" in text_upper or
+            "RUPEES IN WORDS" in text_upper or
+            re.search(r"RUPEES\s+[A-Za-z\s]+ONLY", text_upper) is not None
+        )
+        if is_amount_in_words:
+            reason = "amount_in_words"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            graph_rows_dropped_detail_sample.append({
+                "row_id": row_id,
+                "row_type_hint": hint,
+                "text_preview": text[:100],
+                "drop_reason": reason
+            })
+            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
+            continue
+
+        # B. Terms and conditions
+        is_terms_conditions = (
+            "TERMS & CONDITIONS" in text_upper or
+            "TERMS AND CONDITIONS" in text_upper or
+            "SUBJECT TO" in text_upper or
+            "JURISDICTION" in text_upper or
+            "GOODS ONCE SOLD" in text_upper or
+            "INTEREST @" in text_upper or
+            "DELAYED PAYMENT" in text_upper
+        )
+        if is_terms_conditions:
+            reason = "terms_conditions"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            graph_rows_dropped_detail_sample.append({
+                "row_id": row_id,
+                "row_type_hint": hint,
+                "text_preview": text[:100],
+                "drop_reason": reason
+            })
+            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
+            continue
+
+        # C. Bank details and signature blocks
+        is_bank_signature = (
+            "SIGNATURE" in text_upper or
+            "AUTHORISED SIGN" in text_upper or
+            "AUTH. SIGN" in text_upper or
+            "BANK DETAIL" in text_upper or
+            "IFSC CODE" in text_upper or
+            "A/C NO" in text_upper or
+            "ACCOUNT NO" in text_upper or
+            "FOR AUTHORISED" in text_upper or
+            "PROP." in text_upper or
+            "PARTNER" in text_upper
+        )
+        if is_bank_signature:
+            reason = "bank_signature"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            graph_rows_dropped_detail_sample.append({
+                "row_id": row_id,
+                "row_type_hint": hint,
+                "text_preview": text[:100],
+                "drop_reason": reason
+            })
+            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
+            continue
+
+        # D. Pure GST/Tax footer rows (ensure we don't accidentally drop actual headers containing tax info)
+        is_tax_footer = (
+            "GST SUMMARY" in text_upper or
+            "TAX SUMMARY" in text_upper or
+            "TAXABLE VALUE" in text_upper or
+            "TAXABLE VAL" in text_upper or
+            ("CGST" in text_upper and "SGST" in text_upper and "TAXABLE" in text_upper) or
+            ("CGST RATE" in text_upper and not has_strong_header_tokens) or
+            ("SGST RATE" in text_upper and not has_strong_header_tokens) or
+            ("IGST RATE" in text_upper and not has_strong_header_tokens)
+        )
+        if is_tax_footer:
+            reason = "gst_summary_tax_footer"
+            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
+            graph_rows_dropped_detail_sample.append({
+                "row_id": row_id,
+                "row_type_hint": hint,
+                "text_preview": text[:100],
+                "drop_reason": reason
+            })
+            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
+            continue
+
+        # Precedence 2: Filter by row classification hint, applying preservation rules to overrides
+        normally_dropped = False
+        drop_reason = ""
+
+        if hint in ("footer_candidate", "metadata_candidate", "tax_candidate", "tax_summary_candidate", "footer_summary_row", "tax_summary_row"):
+            normally_dropped = True
+            drop_reason = f"row_type_hint_{hint}"
+        elif hint not in ("item_candidate", "header_candidate"):
+            normally_dropped = True
+            drop_reason = f"row_type_hint_{hint}"
+
+        if normally_dropped:
+            # Preservation Overrides
+            is_blocked_footer_tax = (
+                hint in ("footer_candidate", "tax_summary_candidate", "footer_summary_row", "tax_summary_row", "metadata_candidate") or
+                footer_tax_labels_pattern.search(text) is not None
+            )
+            is_real_item_header = has_strong_header_tokens and (
+                "PRODUCT" in text_upper or
+                "ITEM" in text_upper or
+                "DESCRIPTION" in text_upper or
+                "MEDICINE" in text_upper or
+                "DRUG" in text_upper or
+                "PARTICULARS" in text_upper
+            )
+
+            # Rule 1: Header Preservation Override
+            if has_strong_header_tokens:
+                if is_blocked_footer_tax and not is_real_item_header:
+                    graph_preservation_blocked_footer_tax_count += 1
+                    if len(graph_preservation_blocked_examples) < 10:
+                        graph_preservation_blocked_examples.append({
+                            "row_id": row_id,
+                            "text": text[:100],
+                            "hint": hint,
+                            "rule_blocked": "Header Rule"
+                        })
+                    logger.info(f"[PRESERVATION BLOCKED] Blocked row_id={row_id} from Header Rule due to footer/tax flag. Hint={hint}. Text={text[:60]}")
+                else:
+                    graph_rows_preserved_by_header_evidence += 1
+                    logger.info(f"[PRESERVATION OVERRIDE] Preserved row_id={row_id} via Header Rule. Hint={hint}. Text={text[:60]}")
+                    graph_rows.append(r)
+                    continue
+
+            # Rule 2: Product-Context Preservation Override
+            has_med_term = (
+                re.search(r"\b(TAB|CAP|INJ|SUSP|SYR|TABLET|CAPSULE|MG|ML|GM|STRIP)\b", text_upper) is not None or
+                any(w not in common_stops for w in re.findall(r"\b[A-Z]{3,}\b", text_upper))
+            )
+            has_batch = (
+                re.search(r"\bB\.?\s*NO\b", text_upper) is not None or
+                "BATCH" in text_upper or
+                "LOT" in text_upper or
+                re.search(r"\bB/N\b", text_upper) is not None or
+                re.search(r"\bB\.N\b", text_upper) is not None
+            )
+            has_expiry = (
+                re.search(r"\b\d{2}[/-]\d{2,4}\b", text_upper) is not None or
+                "EXP" in text_upper or
+                "EXPIRY" in text_upper
+            )
+            has_amount_dec = re.search(r"\b\d+\.\d{2}\b", text_upper) is not None
+
+            has_evidence = has_batch or has_expiry or has_amount_dec
+
+            if has_med_term and has_evidence:
+                if is_blocked_footer_tax:
+                    graph_preservation_blocked_footer_tax_count += 1
+                    if len(graph_preservation_blocked_examples) < 10:
+                        graph_preservation_blocked_examples.append({
+                            "row_id": row_id,
+                            "text": text[:100],
+                            "hint": hint,
+                            "rule_blocked": "Product Context Rule"
+                        })
+                    logger.info(f"[PRESERVATION BLOCKED] Blocked row_id={row_id} from Product Context Rule due to footer/tax flag. Hint={hint}. Text={text[:60]}")
+                else:
+                    graph_rows_preserved_by_product_evidence += 1
+                    logger.info(f"[PRESERVATION OVERRIDE] Preserved row_id={row_id} via Product Context Rule. Hint={hint}. Text={text[:60]}")
+                    graph_rows.append(r)
+                    continue
+
+            # Dropped completely
+            graph_rows_dropped_reasons[drop_reason] = graph_rows_dropped_reasons.get(drop_reason, 0) + 1
+            graph_rows_dropped_detail_sample.append({
+                "row_id": row_id,
+                "row_type_hint": hint,
+                "text_preview": text[:100],
+                "drop_reason": drop_reason
+            })
+            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={drop_reason} | text={text[:60]}")
+            continue
+
+        graph_rows.append(r)
+
+    graph_rows_filtered_count = len(graph_rows)
+    graph_rows_dropped_count = graph_rows_raw_count - graph_rows_filtered_count
+
+    logger.info(
+        f"[GRAPH FILTERING] Raw Count: {graph_rows_raw_count} | "
+        f"Filtered Count: {graph_rows_filtered_count} | "
+        f"Dropped Count: {graph_rows_dropped_count} | "
+        f"Dropped Reasons: {graph_rows_dropped_reasons} | "
+        f"Preserved Headers: {graph_rows_preserved_by_header_evidence} | "
+        f"Preserved Products: {graph_rows_preserved_by_product_evidence} | "
+        f"Blocked Footer/Tax Preservations: {graph_preservation_blocked_footer_tax_count}"
+    )
+
+    # Telemetry
+    tsr_metadata["graph_rows_raw_count"] = graph_rows_raw_count
+    tsr_metadata["graph_rows_filtered_count"] = graph_rows_filtered_count
+    tsr_metadata["graph_rows_dropped_count"] = graph_rows_dropped_count
+    tsr_metadata["graph_rows_dropped_reasons"] = graph_rows_dropped_reasons
+    tsr_metadata["graph_rows_preserved_by_header_evidence"] = graph_rows_preserved_by_header_evidence
+    tsr_metadata["graph_rows_preserved_by_product_evidence"] = graph_rows_preserved_by_product_evidence
+    tsr_metadata["graph_rows_dropped_detail_sample"] = graph_rows_dropped_detail_sample
+    tsr_metadata["graph_preservation_blocked_footer_tax_count"] = graph_preservation_blocked_footer_tax_count
+    tsr_metadata["graph_preservation_blocked_examples"] = graph_preservation_blocked_examples
+
+    return graph_rows
+
+
 def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
@@ -595,208 +852,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     raw_graph_rows = document_graph.get("graph_candidate_rows", [])
     graph_cols = document_graph.get("graph_candidate_columns", [])
 
-    import re
-    graph_rows = []
-    graph_rows_raw_count = len(raw_graph_rows)
-    graph_rows_dropped_reasons = {}
-
-    # Telemetry & Override counters
-    graph_rows_preserved_by_header_evidence = 0
-    graph_rows_preserved_by_product_evidence = 0
-    graph_rows_dropped_detail_sample = []
-
-    # Compile patterns and filters for overrides
-    header_tokens_pattern = re.compile(
-        r"\b(PRODUCT|ITEM|DESCRIPTION|BATCH|EXP|EXPIRY|HSN|QTY|MRP|RATE|AMOUNT)\b"
-    )
-    common_stops = {
-        "THE", "FOR", "AND", "GST", "TAX", "NET", "AMT", "SUB", "PCS", "QTY", "EXP", "LOT",
-        "IFSC", "BANK", "DATE", "INVOICE", "BILL", "TOTAL", "GRAND", "PAGE", "ONLY",
-        "RUPEES", "WORDS", "SIGN", "PROP", "JURIS", "TERMS", "GOODS", "SOLD", "DELAY", "INTER"
-    }
-
-    for r in raw_graph_rows:
-        row_id = r.get("row_id", "")
-        text = r.get("text", "")
-        text_upper = text.upper()
-        hint = r.get("row_type_hint", "unknown")
-
-        has_strong_header_tokens = header_tokens_pattern.search(text_upper) is not None
-
-        # Precedence 1: Check obvious noise drops
-        # A. Amount in words
-        is_amount_in_words = (
-            "AMOUNT IN WORDS" in text_upper or
-            "AMT IN WORDS" in text_upper or
-            "RUPEES ONLY" in text_upper or
-            "RUPEES" in text_upper or
-            "WORDS ONLY" in text_upper or
-            "RUPEES IN WORDS" in text_upper or
-            re.search(r"RUPEES\s+[A-Za-z\s]+ONLY", text_upper) is not None
-        )
-        if is_amount_in_words:
-            reason = "amount_in_words"
-            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
-            graph_rows_dropped_detail_sample.append({
-                "row_id": row_id,
-                "row_type_hint": hint,
-                "text_preview": text[:100],
-                "drop_reason": reason
-            })
-            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
-            continue
-
-        # B. Terms and conditions
-        is_terms_conditions = (
-            "TERMS & CONDITIONS" in text_upper or
-            "TERMS AND CONDITIONS" in text_upper or
-            "SUBJECT TO" in text_upper or
-            "JURISDICTION" in text_upper or
-            "GOODS ONCE SOLD" in text_upper or
-            "INTEREST @" in text_upper or
-            "DELAYED PAYMENT" in text_upper
-        )
-        if is_terms_conditions:
-            reason = "terms_conditions"
-            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
-            graph_rows_dropped_detail_sample.append({
-                "row_id": row_id,
-                "row_type_hint": hint,
-                "text_preview": text[:100],
-                "drop_reason": reason
-            })
-            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
-            continue
-
-        # C. Bank details and signature blocks
-        is_bank_signature = (
-            "SIGNATURE" in text_upper or
-            "AUTHORISED SIGN" in text_upper or
-            "AUTH. SIGN" in text_upper or
-            "BANK DETAIL" in text_upper or
-            "IFSC CODE" in text_upper or
-            "A/C NO" in text_upper or
-            "ACCOUNT NO" in text_upper or
-            "FOR AUTHORISED" in text_upper or
-            "PROP." in text_upper or
-            "PARTNER" in text_upper
-        )
-        if is_bank_signature:
-            reason = "bank_signature"
-            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
-            graph_rows_dropped_detail_sample.append({
-                "row_id": row_id,
-                "row_type_hint": hint,
-                "text_preview": text[:100],
-                "drop_reason": reason
-            })
-            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
-            continue
-
-        # D. Pure GST/Tax footer rows (ensure we don't accidentally drop actual headers containing tax info)
-        is_tax_footer = (
-            "GST SUMMARY" in text_upper or
-            "TAX SUMMARY" in text_upper or
-            "TAXABLE VALUE" in text_upper or
-            "TAXABLE VAL" in text_upper or
-            ("CGST" in text_upper and "SGST" in text_upper and "TAXABLE" in text_upper) or
-            ("CGST RATE" in text_upper and not has_strong_header_tokens) or
-            ("SGST RATE" in text_upper and not has_strong_header_tokens) or
-            ("IGST RATE" in text_upper and not has_strong_header_tokens)
-        )
-        if is_tax_footer:
-            reason = "gst_summary_tax_footer"
-            graph_rows_dropped_reasons[reason] = graph_rows_dropped_reasons.get(reason, 0) + 1
-            graph_rows_dropped_detail_sample.append({
-                "row_id": row_id,
-                "row_type_hint": hint,
-                "text_preview": text[:100],
-                "drop_reason": reason
-            })
-            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={reason} | text={text[:60]}")
-            continue
-
-        # Precedence 2: Filter by row classification hint, applying preservation rules to overrides
-        normally_dropped = False
-        drop_reason = ""
-
-        if hint in ("footer_candidate", "metadata_candidate", "tax_candidate"):
-            normally_dropped = True
-            drop_reason = f"row_type_hint_{hint}"
-        elif hint not in ("item_candidate", "header_candidate"):
-            normally_dropped = True
-            drop_reason = f"row_type_hint_{hint}"
-
-        if normally_dropped:
-            # Preservation Overrides
-            
-            # Rule 1: Header Preservation Override
-            if has_strong_header_tokens:
-                graph_rows_preserved_by_header_evidence += 1
-                logger.info(f"[PRESERVATION OVERRIDE] Preserved row_id={row_id} via Header Rule. Hint={hint}. Text={text[:60]}")
-                graph_rows.append(r)
-                continue
-
-            # Rule 2: Product-Context Preservation Override
-            has_med_term = (
-                re.search(r"\b(TAB|CAP|INJ|SUSP|SYR|TABLET|CAPSULE|MG|ML|GM|STRIP)\b", text_upper) is not None or
-                any(w not in common_stops for w in re.findall(r"\b[A-Z]{3,}\b", text_upper))
-            )
-            has_batch = (
-                re.search(r"\bB\.?\s*NO\b", text_upper) is not None or
-                "BATCH" in text_upper or
-                "LOT" in text_upper or
-                re.search(r"\bB/N\b", text_upper) is not None or
-                re.search(r"\bB\.N\b", text_upper) is not None
-            )
-            has_expiry = (
-                re.search(r"\b\d{2}[/-]\d{2,4}\b", text_upper) is not None or
-                "EXP" in text_upper or
-                "EXPIRY" in text_upper
-            )
-            has_amount_dec = re.search(r"\b\d+\.\d{2}\b", text_upper) is not None
-            
-            has_evidence = has_batch or has_expiry or has_amount_dec
-
-            if has_med_term and has_evidence:
-                graph_rows_preserved_by_product_evidence += 1
-                logger.info(f"[PRESERVATION OVERRIDE] Preserved row_id={row_id} via Product Context Rule. Hint={hint}. Text={text[:60]}")
-                graph_rows.append(r)
-                continue
-
-            # Dropped completely
-            graph_rows_dropped_reasons[drop_reason] = graph_rows_dropped_reasons.get(drop_reason, 0) + 1
-            graph_rows_dropped_detail_sample.append({
-                "row_id": row_id,
-                "row_type_hint": hint,
-                "text_preview": text[:100],
-                "drop_reason": drop_reason
-            })
-            logger.info(f"[GRAPH ROW DROPPED] row_id={row_id} | hint={hint} | reason={drop_reason} | text={text[:60]}")
-            continue
-
-        graph_rows.append(r)
-
-    graph_rows_filtered_count = len(graph_rows)
-    graph_rows_dropped_count = graph_rows_raw_count - graph_rows_filtered_count
-
-    logger.info(
-        f"[GRAPH FILTERING] Raw Count: {graph_rows_raw_count} | "
-        f"Filtered Count: {graph_rows_filtered_count} | "
-        f"Dropped Count: {graph_rows_dropped_count} | "
-        f"Dropped Reasons: {graph_rows_dropped_reasons} | "
-        f"Preserved Headers: {graph_rows_preserved_by_header_evidence} | "
-        f"Preserved Products: {graph_rows_preserved_by_product_evidence}"
-    )
-
-    # Telemetry
-    tsr_metadata["graph_rows_raw_count"] = graph_rows_raw_count
-    tsr_metadata["graph_rows_filtered_count"] = graph_rows_filtered_count
-    tsr_metadata["graph_rows_dropped_count"] = graph_rows_dropped_count
-    tsr_metadata["graph_rows_dropped_reasons"] = graph_rows_dropped_reasons
-    tsr_metadata["graph_rows_preserved_by_header_evidence"] = graph_rows_preserved_by_header_evidence
-    tsr_metadata["graph_rows_preserved_by_product_evidence"] = graph_rows_preserved_by_product_evidence
-    tsr_metadata["graph_rows_dropped_detail_sample"] = graph_rows_dropped_detail_sample
+    graph_rows = filter_graph_rows(raw_graph_rows, tsr_metadata)
 
     # Helper function to evaluate and score table candidates
     def evaluate_candidate_table(tr, is_graph=False):
