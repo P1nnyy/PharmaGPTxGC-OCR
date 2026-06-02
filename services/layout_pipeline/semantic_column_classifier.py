@@ -33,6 +33,315 @@ NUMERIC_SEMANTICS = {
 }
 
 
+def parse_numeric(text: str) -> Optional[float]:
+    """
+    Parses a string into a float by stripping currency symbols, commas, and percentage signs.
+    Returns None if the string cannot be parsed as a float.
+    """
+    if not text:
+        return None
+    cleaned = re.sub(r"[₹$,%\s,]", "", text.upper())
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def is_contaminated_qty(text: str) -> bool:
+    """
+    Checks if a quantity string contains invalid characters (like Cyrillic letters)
+    or multiple space-separated numbers indicating a layout/OCR contamination.
+    """
+    if not text:
+        return False
+    text = text.strip()
+    
+    # 1. Cyrillic letters (e.g. 'э' or 'а') are common OCR errors in scanning
+    if any('\u0400' <= char <= '\u04FF' for char in text):
+        return True
+        
+    # 2. Check for multiple space-separated numbers that do not fit a known pack/scheme combo
+    # Valid combos contain +, *, x, X, etc. e.g. "10+2" or "10 * 2" or "2x1x15"
+    # If we find space-separated numbers without arithmetic operators (e.g., "33 0 2"), it's contaminated
+    tokens = text.split()
+    if len(tokens) >= 2:
+        digits_tokens = [t for t in tokens if re.match(r'^\d+(\.\d+)?$', t)]
+        if len(digits_tokens) >= 2:
+            # Check if there is no operator (+, *, x, X) in the tokens
+            has_operator = any(op in text for op in ['+', '*', 'x', 'X', '×'])
+            if not has_operator:
+                return True
+                
+    return False
+
+
+def resolve_semantic_role_conflicts(
+    column_scores: Dict[str, Dict[str, float]],
+    cells: List[TableCell],
+    row_roles: Optional[Dict[str, str]] = None,
+    headers: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """
+    Semantic Role Resolution v1: Enforces one canonical winner for critical roles
+    (product, quantity, free_quantity, rate, amount) by resolving collisions
+    using semantic scores, header evidence, X geometry, and numeric constraints.
+    """
+    if row_roles is None:
+        row_roles = {}
+    if headers is None:
+        headers = {}
+
+    CRITICAL_ROLES = {
+        ColumnSemantics.PRODUCT,
+        ColumnSemantics.QUANTITY,
+        ColumnSemantics.FREE_QUANTITY,
+        ColumnSemantics.RATE,
+        ColumnSemantics.AMOUNT,
+    }
+
+    # 1. Find all cells in item rows to examine values and check quantity contamination
+    item_row_ids = {rid for rid, role in row_roles.items() if role == "item_row"}
+    col_cells: Dict[str, List[TableCell]] = {}
+    for cell in cells:
+        if cell.row_id in item_row_ids and (cell.text or "").strip():
+            col_cells.setdefault(cell.col_id, []).append(cell)
+
+    # Calculate quantity contamination penalty for each column
+    quantity_penalties: Dict[str, float] = {}
+    for col_id, c_cells in col_cells.items():
+        if not c_cells:
+            continue
+        contam_count = sum(1 for c in c_cells if is_contaminated_qty(c.text))
+        if contam_count > 0:
+            ratio = contam_count / len(c_cells)
+            # Penalty factor decreases score proportionally to contaminated ratio
+            quantity_penalties[col_id] = max(0.1, 1.0 - ratio * 0.9)
+
+    # 2. Adjust base scores for quantity contamination
+    adjusted_scores = {}
+    for col_id, scores in column_scores.items():
+        adjusted_scores[col_id] = dict(scores)
+        if col_id in quantity_penalties:
+            factor = quantity_penalties[col_id]
+            for qty_role in [ColumnSemantics.QUANTITY, ColumnSemantics.FREE_QUANTITY]:
+                if qty_role in adjusted_scores[col_id]:
+                    adjusted_scores[col_id][qty_role] *= factor
+
+    # 3. Calculate relative horizontal center (X-ratio) for each column in the table
+    xs = []
+    for cell in cells:
+        if cell.geometry:
+            xs.extend([cell.geometry.min_x, cell.geometry.max_x])
+    table_min_x = min(xs) if xs else 0.0
+    table_max_x = max(xs) if xs else 1.0
+    table_span = max(1e-5, table_max_x - table_min_x)
+
+    col_x_ratios = {}
+    for col_id in column_scores.keys():
+        col_c_xs = [c.geometry.center_x for c in cells if c.col_id == col_id and c.geometry]
+        if col_c_xs:
+            avg_x = sum(col_c_xs) / len(col_c_xs)
+            col_x_ratios[col_id] = (avg_x - table_min_x) / table_span
+        else:
+            col_x_ratios[col_id] = 0.5
+
+    # 4. Calculate average numeric values for columns to detect scaling patterns
+    col_avg_values = {}
+    for col_id, c_cells in col_cells.items():
+        vals = []
+        for c in c_cells:
+            val = parse_numeric(c.text)
+            if val is not None:
+                vals.append(val)
+        if vals:
+            col_avg_values[col_id] = sum(vals) / len(vals)
+
+    # 5. Compile keyword matching regexes
+    HEADER_KEYWORDS = {
+        ColumnSemantics.PRODUCT: re.compile(r"\b(?:PRODUCT|ITEM|DESCRIPTION|PARTICULARS?|NAME|MEDICINE|DRUG)\b", re.IGNORECASE),
+        ColumnSemantics.QUANTITY: re.compile(r"\b(?:QTY|QUANTITY|BILLED\s*QTY)\b", re.IGNORECASE),
+        ColumnSemantics.FREE_QUANTITY: re.compile(r"\b(?:FREE|SCHEME|SCH|SCH\s*QTY|FREE\s*QTY)\b", re.IGNORECASE),
+        ColumnSemantics.RATE: re.compile(r"\b(?:RATE|PTR|PRICE|UNIT\s*PRICE|P\.T\.R)\b", re.IGNORECASE),
+        ColumnSemantics.AMOUNT: re.compile(r"\b(?:AMOUNT|AMT|NET\s*AMT|NET\s*AMOUNT|TOTAL|VALUE|BILL\s*AMT)\b", re.IGNORECASE)
+    }
+    TAX_KEYWORDS = re.compile(r"\b(?:CGST|SGST|IGST|GST|TAX|TAXABLE|VAT)\b", re.IGNORECASE)
+    DISCOUNT_KEYWORDS = re.compile(r"\b(?:DIS|DISC|DISCOUNT|TD|CD|SCHEME\s*DISC)\b", re.IGNORECASE)
+
+    # 6. Record original roles chosen by maximum base score
+    original_roles = {}
+    for col_id, scores in column_scores.items():
+        if not scores:
+            original_roles[col_id] = ColumnSemantics.UNKNOWN
+            continue
+        best_role, best_score = max(scores.items(), key=lambda x: x[1])
+        original_roles[col_id] = best_role if best_score > 0.0 else ColumnSemantics.UNKNOWN
+
+    # 7. Apply heuristic scoring modifiers for critical roles
+    critical_scores = {}
+    for col_id in column_scores.keys():
+        critical_scores[col_id] = {}
+        x_ratio = col_x_ratios.get(col_id, 0.5)
+        avg_val = col_avg_values.get(col_id, 0.0)
+        header_text = headers.get(col_id, "")
+
+        for role in CRITICAL_ROLES:
+            score = adjusted_scores[col_id].get(role, 0.0)
+
+            # Boost if header matches the target role, penalize if it matches exclusions
+            if header_text:
+                if HEADER_KEYWORDS[role].search(header_text):
+                    score += 5.0
+                if TAX_KEYWORDS.search(header_text) and role in {ColumnSemantics.AMOUNT, ColumnSemantics.RATE, ColumnSemantics.QUANTITY, ColumnSemantics.FREE_QUANTITY}:
+                    score -= 10.0
+                if DISCOUNT_KEYWORDS.search(header_text) and role in {ColumnSemantics.AMOUNT, ColumnSemantics.RATE}:
+                    score -= 5.0
+
+            # Boost/penalize based on relative spatial layout (geometry)
+            # Only apply positive geometry boost if the column has some base score or matches the header
+            if role == ColumnSemantics.PRODUCT:
+                if x_ratio < 0.4:
+                    if score > 0.0 or (header_text and HEADER_KEYWORDS[role].search(header_text)):
+                        score += 2.0
+                elif x_ratio > 0.6:
+                    score -= 4.0
+            elif role == ColumnSemantics.AMOUNT:
+                if x_ratio > 0.6:
+                    if score > 0.0 or (header_text and HEADER_KEYWORDS[role].search(header_text)):
+                        score += 2.0
+                elif x_ratio < 0.4:
+                    score -= 4.0
+            elif role in {ColumnSemantics.QUANTITY, ColumnSemantics.FREE_QUANTITY}:
+                if x_ratio > 0.6:
+                    score -= 2.0
+
+            # Penalize amounts that are too small or quantities that are too large
+            if role == ColumnSemantics.AMOUNT:
+                if avg_val < 5.0:
+                    # Penalize amount role if values are small and another column could be amount
+                    has_large_col = any(col_avg_values.get(cid, 0.0) > 10.0 for cid in column_scores.keys() if cid != col_id)
+                    if has_large_col:
+                        score -= 3.0
+            elif role == ColumnSemantics.QUANTITY:
+                if avg_val > 100.0:
+                    score -= 3.0
+
+            critical_scores[col_id][role] = score
+
+    # 8. Greedy conflict resolution selection
+    resolved_semantics = {}
+    resolved_confidences = {}
+    reasons = {}
+    role_winners = {}
+    demoted_columns = []
+
+    # Assign non-critical roles first (e.g. batch, expiry, hsn, gst)
+    competing_cols = set()
+    for col_id, orig_role in original_roles.items():
+        if orig_role in CRITICAL_ROLES:
+            competing_cols.add(col_id)
+        else:
+            resolved_semantics[col_id] = orig_role
+            resolved_confidences[col_id] = 0.85
+            reasons[col_id] = "locked_non_critical_role"
+
+    # Evaluate competing candidates for the critical roles
+    candidates = []
+    for col_id in competing_cols:
+        for role in CRITICAL_ROLES:
+            score = critical_scores[col_id][role]
+            candidates.append((score, col_id, role))
+
+    # Sort descending so highest scores are assigned first
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    assigned_roles = set()
+    assigned_cols = set()
+
+    for score, col_id, role in candidates:
+        if col_id in assigned_cols or role in assigned_roles:
+            continue
+        
+        # Only assign if the score is at least 2.0 or if this is the column's original best role.
+        # This prevents columns from winning random secondary critical roles (like rate or product)
+        # when their score is extremely low and they had a different original intent.
+        if score < 2.0 and role != original_roles[col_id]:
+            continue
+
+        resolved_semantics[col_id] = role
+        role_winners[role] = col_id
+        assigned_cols.add(col_id)
+        assigned_roles.add(role)
+        reasons[col_id] = f"won_{role}_with_score_{score:.2f}"
+
+        # Confidence is score margin over runner-up for the same column
+        all_col_scores = sorted(critical_scores[col_id].values(), reverse=True)
+        best = all_col_scores[0]
+        runner_up = all_col_scores[1] if len(all_col_scores) > 1 else 0.0
+        conf = (best - runner_up) / max(1.0, sum(abs(v) for v in critical_scores[col_id].values()))
+        resolved_confidences[col_id] = round(max(0.0, min(0.95, conf)), 3)
+
+    # 9. Demote any columns that competed but did not win a critical role
+    for col_id in competing_cols:
+        if col_id not in assigned_cols:
+            orig_role = original_roles[col_id]
+            demoted_role = ColumnSemantics.UNKNOWN
+            header_text = headers.get(col_id, "").lower()
+
+            if orig_role == ColumnSemantics.AMOUNT:
+                if "taxable" in header_text:
+                    demoted_role = ColumnSemantics.TAXABLE_VALUE
+                elif any(tax_kw in header_text for tax_kw in ["gst", "cgst", "sgst", "igst", "tax"]):
+                    demoted_role = ColumnSemantics.GST
+                elif any(disc_kw in header_text for disc_kw in ["disc", "discount", "td", "cd"]):
+                    demoted_role = ColumnSemantics.DISCOUNT
+                elif "mrp" in header_text:
+                    demoted_role = ColumnSemantics.MRP
+                else:
+                    # Default: check if taxable_value is already taken
+                    if ColumnSemantics.TAXABLE_VALUE not in resolved_semantics.values():
+                        demoted_role = ColumnSemantics.TAXABLE_VALUE
+                    else:
+                        demoted_role = "aux_amount"
+            elif orig_role == ColumnSemantics.QUANTITY:
+                # If quantity got demoted, try to assign to free_quantity if free_quantity is not won yet
+                if ColumnSemantics.FREE_QUANTITY not in assigned_roles:
+                    demoted_role = ColumnSemantics.FREE_QUANTITY
+                    assigned_roles.add(ColumnSemantics.FREE_QUANTITY)
+                    role_winners[ColumnSemantics.FREE_QUANTITY] = col_id
+                else:
+                    demoted_role = ColumnSemantics.UNKNOWN
+            else:
+                demoted_role = ColumnSemantics.UNKNOWN
+
+            resolved_semantics[col_id] = demoted_role
+            resolved_confidences[col_id] = 0.5
+            demoted_columns.append(col_id)
+            reasons[col_id] = f"demoted_from_{orig_role}_to_{demoted_role}"
+
+    # Calculate metrics
+    original_role_counts = {}
+    resolved_role_counts = {}
+    for col_id, role in original_roles.items():
+        original_role_counts[role] = original_role_counts.get(role, 0) + 1
+    for col_id, role in resolved_semantics.items():
+        resolved_role_counts[role] = resolved_role_counts.get(role, 0) + 1
+
+    return {
+        "resolved_semantics": resolved_semantics,
+        "resolved_confidences": resolved_confidences,
+        "original_roles": original_roles,
+        "metrics": {
+            "original_role_counts": original_role_counts,
+            "resolved_role_counts": resolved_role_counts,
+            "role_winners": role_winners,
+            "demoted_columns": demoted_columns,
+            "reasons": reasons
+        }
+    }
+
+
 class SemanticColumnClassifier:
     """
     Geometry-aware semantic classifier for reconstructed table columns.
@@ -66,13 +375,7 @@ class SemanticColumnClassifier:
         return re.sub(r"\s+", "", (text or "").strip().upper())
 
     def _numeric_value(self, text: str) -> Optional[float]:
-        cleaned = re.sub(r"[₹$,%\s,]", "", (text or "").upper())
-        if not cleaned:
-            return None
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
+        return parse_numeric(text)
 
     def _has_compound_qty_pattern(self, compact: str) -> bool:
         return bool(re.search(r"\d+(?:\.\d+)?[+*xX]\.?\d+", compact))
@@ -356,12 +659,12 @@ class SemanticColumnClassifier:
         """
         analysis_results: Dict[str, Dict[str, Any]] = {}
         row_roles = {r.row_id: getattr(r, "row_role", "unknown_row") for r in region.rows}
-        
+
         # Apply semantic input sanitizer to prevent footer/tax row leakage
         from services.layout_pipeline.semantic_input_sanitizer import sanitize_rows_for_semantic_inference
         sanitizer_res = sanitize_rows_for_semantic_inference(region.rows, cells=region.cells, row_roles=row_roles)
         excluded_row_ids = set(sanitizer_res["excluded_row_ids"])
-        
+
         excluded_roles = {"header_row", "footer_summary_row", "tax_summary_row", "metadata_row"}
         item_row_ids: Set[str] = {
             row_id
@@ -387,6 +690,17 @@ class SemanticColumnClassifier:
         hard_semantics: Dict[str, str] = {}
         money_candidates: List[str] = []
         quantity_candidates: List[str] = []
+
+        # Construct headers mapping
+        headers = {}
+        for cell in region.cells:
+            if row_roles.get(cell.row_id) == "header_row":
+                text = (cell.text or "").strip()
+                if text:
+                    if cell.col_id not in headers:
+                        headers[cell.col_id] = text
+                    else:
+                        headers[cell.col_id] += " " + text
 
         for col in region.columns:
             col_id = col.col_id
@@ -537,77 +851,23 @@ class SemanticColumnClassifier:
             }
             semantic_column_scores_by_col[col_id] = analysis_results[col_id]["metrics"]
 
-        quantity_candidates = sorted(
-            [cid for cid in quantity_candidates if cid not in hard_semantics],
-            key=lambda cid: profiles[cid]["right_side_score"],
+        # Run Semantic Role Resolution v1 conflict resolution
+        resolution_result = resolve_semantic_role_conflicts(
+            column_scores=scores_by_col,
+            cells=region.cells,
+            row_roles=row_roles,
+            headers=headers
         )
-        if quantity_candidates:
-            hard_semantics[quantity_candidates[0]] = ColumnSemantics.QUANTITY
-            if len(quantity_candidates) > 1:
-                hard_semantics[quantity_candidates[1]] = ColumnSemantics.FREE_QUANTITY
+        resolved_semantics = resolution_result["resolved_semantics"]
+        resolved_confidences = resolution_result["resolved_confidences"]
 
-        money_candidates = sorted(
-            [
-                cid for cid in money_candidates
-                if cid not in hard_semantics
-                and not self._strong_non_amount_signal(profiles[cid])
-            ],
-            key=lambda cid: profiles[cid]["right_side_score"],
-        )
-        money_assignment: Dict[str, str] = {}
-        if money_candidates:
-            money_assignment[money_candidates[-1]] = ColumnSemantics.AMOUNT
-            left_money = money_candidates[:-1]
-            for idx, cid in enumerate(left_money):
-                if profiles[cid]["discount_pattern_count"] > 0:
-                    money_assignment[cid] = ColumnSemantics.DISCOUNT
-                    continue
-                if len(left_money) == 1:
-                    money_assignment[cid] = ColumnSemantics.RATE
-                elif idx == 0:
-                    money_assignment[cid] = ColumnSemantics.MRP
-                elif idx == 1:
-                    money_assignment[cid] = ColumnSemantics.RATE
-                else:
-                    money_assignment[cid] = ColumnSemantics.TAXABLE_VALUE
-
+        # Assign types and confidence values using the resolved semantics
         for col_id, data in analysis_results.items():
             if col_id.startswith("_") or col_id not in profiles:
                 continue
-
-            profile = profiles[col_id]
-            scores = scores_by_col.get(col_id, {})
-            if col_id in hard_semantics:
-                best_type = hard_semantics[col_id]
-            elif col_id in money_assignment:
-                best_type = money_assignment[col_id]
-            else:
-                best_type, best_score = max(scores.items(), key=lambda item: item[1])
-                if best_score <= 0.0:
-                    best_type = ColumnSemantics.UNKNOWN
-                if best_type == ColumnSemantics.AMOUNT and self._strong_non_amount_signal(profile):
-                    rejected_amount_candidates.append({
-                        "col_id": col_id,
-                        "reason": "amount_vote_blocked_by_non_amount_signal",
-                    })
-                    best_type = ColumnSemantics.UNKNOWN
-
-            best_score = scores.get(best_type, 0.0)
-            sample_size = max(1, profile["sample_size"])
-            if col_id in hard_semantics:
-                best_score = max(best_score, 1.0)
-            if col_id in money_assignment:
-                best_score = max(best_score, profile["money_pattern_count"] / sample_size)
-
-            sorted_scores = sorted(scores.values(), reverse=True)
-            runner_up = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
-            confidence = (best_score - runner_up) / max(1.0, sum(scores.values()))
-            if col_id in hard_semantics or col_id in money_assignment:
-                confidence = max(confidence, min(0.85, best_score))
-
-            data["type"] = best_type
-            data["confidence"] = round(max(0.0, min(0.95, confidence)), 3)
-            final_column_semantics[col_id] = best_type
+            data["type"] = resolved_semantics.get(col_id, ColumnSemantics.UNKNOWN)
+            data["confidence"] = resolved_confidences.get(col_id, 0.5)
+            final_column_semantics[col_id] = data["type"]
 
         analysis_results["_inference_summary"] = {
             "columns_inferred_from_item_rows_only": columns_inferred_from_item_rows_only,
@@ -623,6 +883,7 @@ class SemanticColumnClassifier:
             "gst_column_candidates": gst_column_candidates,
             "quantity_column_candidates": quantity_column_candidates,
             "rejected_quantity_candidates": rejected_quantity_candidates,
+            "semantic_role_resolution": resolution_result["metrics"],
         }
         return analysis_results
 

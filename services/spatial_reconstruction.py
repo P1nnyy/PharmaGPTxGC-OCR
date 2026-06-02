@@ -1555,6 +1555,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         if selected_main_table is not None
         else {}
     )
+    selected_main_table_resolution = {}
+    if selected_main_table is not None:
+        selected_main_table_resolution = semantic_results.get(selected_main_table.table_id, {}).get("_inference_summary", {}).get("semantic_role_resolution", {})
     segmenter_results = segmenter.process(
         selected_topology_source=selected_topology_source,
         selected_main_table=selected_main_table,
@@ -2038,6 +2041,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "topology_stability": stability_metrics,
             "topology_debug": topology_debug,
             "semantic_debug": semantic_debug,
+            "semantic_role_resolution": selected_main_table_resolution,
             **table_routing_diagnostics,
             "column_anchor_debug": column_anchor_debug,
             "anchor_repair": anchor_repair,
