@@ -106,12 +106,51 @@ def format_applied_fields(applied_fields):
     return ", ".join(parts) or "none"
 
 
+def summarize_row_repair_candidates(row_math_repair):
+    if not isinstance(row_math_repair, dict):
+        return []
+    candidates = row_math_repair.get("repair_candidates") or []
+    if not isinstance(candidates, list):
+        return []
+    summary = []
+    for candidate in candidates[:3]:
+        if not isinstance(candidate, dict):
+            continue
+        summary.append({
+            "row_id": candidate.get("row_id"),
+            "product": candidate.get("product"),
+            "candidate_qty": candidate.get("candidate_qty"),
+            "candidate_free_qty": candidate.get("candidate_free_qty"),
+            "delta_before": candidate.get("delta_before"),
+            "delta_after": candidate.get("delta_after"),
+            "confidence": candidate.get("confidence"),
+            "applied": candidate.get("applied"),
+        })
+    return summary
+
+
+def format_row_repair_candidates(candidates):
+    if not candidates:
+        return "none"
+    parts = []
+    for candidate in candidates:
+        confidence = candidate.get("confidence")
+        confidence_text = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "n/a"
+        row_id = candidate.get("row_id") or "row"
+        parts.append(
+            f"{row_id}:qty={candidate.get('candidate_qty')}+{candidate.get('candidate_free_qty')} "
+            f"{candidate.get('delta_before')}->{candidate.get('delta_after')} ({confidence_text})"
+        )
+    return "; ".join(parts) or "none"
+
+
 def summarize_reconstruction(image_path: Path, original_status: str, reconstruction: dict, error: dict | None = None) -> dict:
     reconstruction = reconstruction if isinstance(reconstruction, dict) else {}
     canonical = reconstruction.get("canonical_invoice") or {}
     quality_gate = reconstruction.get("quality_gate") or {}
     layout_profile = reconstruction.get("layout_profile") or {}
     footer_rescue = reconstruction.get("footer_rescue") or {}
+    row_math_repair = reconstruction.get("row_math_repair") or {}
     q_metrics = quality_gate.get("metrics") or {}
     metrics = reconstruction.get("metrics") or {}
 
@@ -130,6 +169,9 @@ def summarize_reconstruction(image_path: Path, original_status: str, reconstruct
         candidate_count = sum(len(candidates) for candidates in candidate_fields.values() if isinstance(candidates, list))
     else:
         candidate_count = len(candidate_fields)
+    row_repair_summary = row_math_repair.get("summary") if isinstance(row_math_repair.get("summary"), dict) else {}
+    row_repair_candidates = summarize_row_repair_candidates(row_math_repair)
+    row_repairs_applied = row_math_repair.get("applied_repairs") or []
 
     return {
         "filename": image_path.name,
@@ -163,6 +205,12 @@ def summarize_reconstruction(image_path: Path, original_status: str, reconstruct
         "footer_lines_used": footer_rescue.get("footer_lines_used") or [],
         "footer_rescue_candidate_count": candidate_count,
         "footer_rescue_applied_count": len(applied_fields),
+        "row_repair_candidate_count": row_repair_summary.get("candidate_count", 0),
+        "row_repair_applied_count": row_repair_summary.get("applied_count", 0),
+        "row_repair_still_failed_count": row_repair_summary.get("still_failed_count", 0),
+        "top_row_repair_candidates": row_repair_candidates,
+        "row_repairs_applied": row_repairs_applied,
+        "row_repair_warnings": row_math_repair.get("warnings") or [],
         "fast_fail": reconstruction.get("fast_fail"),
         "fast_fail_reason": reconstruction.get("fast_fail_reason"),
         "raw_token_count": metrics.get("raw_token_count"),
@@ -210,14 +258,14 @@ def render_markdown(rows: list[dict], json_path: Path) -> str:
         f"- JSON report: `{json_path.name}`",
         f"- Invoice count: {len(rows)}",
         "",
-        "| Filename | Original | Effective | Confidence | Missing before rescue | Selected candidates | Applied fields | Warnings | Profile | Reasons |",
-        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |",
+        "| Filename | Original | Effective | Confidence | Missing before rescue | Footer selected | Footer applied | Row repair c/a | Top row repair candidates | Warnings | Profile | Reasons |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         confidence = row.get("invoice_confidence")
         confidence_text = f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else "n/a"
         lines.append(
-            "| {filename} | {original} | {effective} | {confidence} | {missing} | {selected} | {applied} | {warnings} | {profile} | {reasons} |".format(
+            "| {filename} | {original} | {effective} | {confidence} | {missing} | {selected} | {applied} | {row_repair_counts} | {row_repair_candidates} | {warnings} | {profile} | {reasons} |".format(
                 filename=row.get("filename"),
                 original=row.get("original_status"),
                 effective=row.get("status_effective"),
@@ -225,7 +273,9 @@ def render_markdown(rows: list[dict], json_path: Path) -> str:
                 missing=", ".join(row.get("footer_missing_before_rescue") or []) or "none",
                 selected=format_selected_candidates(row.get("footer_selected_candidates")),
                 applied=format_applied_fields(row.get("footer_applied_fields")),
-                warnings=", ".join(row.get("footer_rescue_warnings") or []) or "none",
+                row_repair_counts=f"{row.get('row_repair_candidate_count', 0)}/{row.get('row_repair_applied_count', 0)}",
+                row_repair_candidates=format_row_repair_candidates(row.get("top_row_repair_candidates")),
+                warnings=", ".join((row.get("footer_rescue_warnings") or []) + (row.get("row_repair_warnings") or [])) or "none",
                 profile=row.get("layout_profile") or "unknown",
                 reasons=", ".join(row.get("quality_reasons") or []) or "none",
             )
@@ -277,6 +327,7 @@ def main():
             "quality_gate": reconstruction.get("quality_gate"),
             "layout_profile": reconstruction.get("layout_profile"),
             "footer_rescue": reconstruction.get("footer_rescue"),
+            "row_math_repair": reconstruction.get("row_math_repair"),
             "canonical_invoice": reconstruction.get("canonical_invoice"),
         })
 

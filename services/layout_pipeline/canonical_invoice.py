@@ -34,7 +34,7 @@ class CanonicalItemRow:
     source_path: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "row_id": self.row_id,
             "raw_text": self.raw_text,
             "product": self.product,
@@ -47,6 +47,11 @@ class CanonicalItemRow:
             "confidence": self.confidence,
             "source_path": self.source_path,
         }
+        if hasattr(self, "repair_source"):
+            data["repair_source"] = getattr(self, "repair_source")
+        if hasattr(self, "repair_original_values"):
+            data["repair_original_values"] = getattr(self, "repair_original_values")
+        return data
 
 
 @dataclass
