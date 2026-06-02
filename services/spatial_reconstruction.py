@@ -947,10 +947,24 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             temp_reconciliation_results.get(tr.table_id, {}),
             footer_reconcile_tables,
         )
+
+        # Check for required semantic columns: rate, amount, quantity, product
+        final_vals = {str(v).lower() for v in final_semantics.values()}
+        missing_req_cols = []
+        if 'amount' not in final_vals:
+            missing_req_cols.append('amount')
+        if not any(k in final_vals for k in ('quantity', 'qty', 'free_quantity')):
+            missing_req_cols.append('quantity')
+        if 'rate' not in final_vals:
+            missing_req_cols.append('rate')
+        if not any(k in final_vals for k in ('product', 'drug_name')):
+            missing_req_cols.append('product')
         
         status = temp_invoice_recon.get("status", "FAIL")
         math_score = 0.0
-        if status == "PASS":
+        if len(missing_req_cols) > 0:
+            math_score = 0.0
+        elif status == "PASS":
             math_score = 100.0
         elif status == "WARN":
             math_score = 75.0
@@ -970,18 +984,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         row_math_fail_count = val_results.get("financial_failures", 0)
         total_row_math = row_math_pass_count + row_math_fail_count
         row_math_failure_rate = (row_math_fail_count / total_row_math) if total_row_math > 0 else 0.0
-
-        # Check for required semantic columns: rate, amount, quantity, product
-        final_vals = {str(v).lower() for v in final_semantics.values()}
-        missing_req_cols = []
-        if 'amount' not in final_vals:
-            missing_req_cols.append('amount')
-        if not any(k in final_vals for k in ('quantity', 'qty', 'free_quantity')):
-            missing_req_cols.append('quantity')
-        if 'rate' not in final_vals:
-            missing_req_cols.append('rate')
-        if not any(k in final_vals for k in ('product', 'drug_name')):
-            missing_req_cols.append('product')
 
         # Row Role Metrics
         role_metrics = classify_row_roles(tr)
@@ -1136,6 +1138,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     selected_candidate_reason = "default_heuristic"
     margin = 15.0
     
+    # If the heuristic candidate is missing required columns, do not require a margin to beat it
+    margin_to_use = 0.0 if len(heuristic_metrics.get("missing_req_cols", [])) > 0 else margin
+
     if not heuristic_candidate or len(heuristic_candidate.rows) == 0:
         if graph_candidate and len(graph_candidate.rows) > 0:
             selected_topology_source = "document_graph_candidate"
@@ -1144,7 +1149,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         if graph_selection_blocked_reason:
             selected_topology_source = "heuristic_anchor"
             selected_candidate_reason = f"heuristic_preferred_due_to_block_{graph_selection_blocked_reason}"
-        elif graph_score > heuristic_score + margin:
+        elif graph_score > heuristic_score + margin_to_use:
             selected_topology_source = "document_graph_candidate"
             selected_candidate_reason = f"graph_score_beats_heuristic_with_margin_{graph_score - heuristic_score:.2f}"
         else:
