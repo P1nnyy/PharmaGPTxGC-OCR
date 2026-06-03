@@ -11,10 +11,7 @@ from services.layout_pipeline.row_validator import RowValidator
 from services.layout_pipeline.multiline_merging import merge_multiline_table_rows, update_row_stability_scores
 from services.layout_pipeline.confidence import ConfidenceCompositor
 from services.layout_pipeline.row_roles import classify_row_roles
-from services.layout_pipeline.column_anchor_detector import detect_column_anchors, repair_undersegmented_table_with_anchors
-from services.layout_pipeline.column_band_rescue import build_column_band_rescue_candidate
-from services.layout_pipeline.document_graph import build_document_graph
-from services.layout_pipeline.graph_fallback import build_graph_fallback_table_region
+from services.layout_pipeline.column_anchor_detector import detect_column_anchors
 from services.layout_pipeline.invoice_diagnostics import attach_invoice_diagnostics
 from services.layout_pipeline.reconstruction_diagnostics import (
     _box_to_dict,
@@ -29,7 +26,7 @@ from services.layout_pipeline.reconstruction_metrics import (
     _compute_tsr_confidence,
     _invoice_footer_tax_source_counts,
 )
-from services.layout_pipeline.vendor_priors import build_vendor_template_prior
+
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
 from services.table_classifier import TableClassifier, route_tables
@@ -37,233 +34,7 @@ from services.table_classifier import TableClassifier, route_tables
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_ppstructure import PPStructure_TSREngine
 
-def _repair_product_numeric_phase_shift(
-    main_table,
-    table_regions,
-    ocr_blocks,
-    final_semantics: Dict[str, str],
-) -> Dict[str, Any]:
-    """Conservatively shift product ownership up one visual row for heuristic tables."""
-    metrics = {
-        "product_numeric_phase_shift_detected": False,
-        "product_phase_shift_repair_count": 0,
-        "product_phase_shift_source": "not_attempted",
-        "product_phase_shift_affected_rows": [],
-    }
-    if not main_table or not str(main_table.table_id).startswith("heuristic_region"):
-        metrics["product_phase_shift_source"] = "not_heuristic_table"
-        return metrics
 
-    product_col_id = next((col_id for col_id, semantic in final_semantics.items() if semantic == "product"), None)
-    numeric_col_ids = {
-        col_id
-        for col_id, semantic in final_semantics.items()
-        if semantic in {"quantity", "free_quantity", "mrp", "rate", "amount"}
-    }
-    if not product_col_id or not numeric_col_ids:
-        metrics["product_phase_shift_source"] = "missing_product_or_numeric_semantics"
-        return metrics
-
-    block_by_id = {block.id: block for block in ocr_blocks if getattr(block, "id", None)}
-
-    def _center_y(block) -> float:
-        geom = getattr(block, "normalized_geometry", None) or getattr(block, "original_geometry", None)
-        return float(getattr(geom, "center_y", 0.0) or 0.0)
-
-    def _center_x(block) -> float:
-        geom = getattr(block, "normalized_geometry", None) or getattr(block, "original_geometry", None)
-        return float(getattr(geom, "center_x", 0.0) or 0.0)
-
-    def _is_product_like(text: str) -> bool:
-        import re
-
-        upper = (text or "").upper().strip()
-        if not upper or not re.search(r"[A-Z]", upper):
-            return False
-        blocked = {
-            "PRODUCT",
-            "PRODUCT NAME",
-            "PACK",
-            "BATCH",
-            "HSN",
-            "MRP",
-            "RATE",
-            "AMOUNT",
-            "QTY",
-            "SGST",
-            "CGST",
-            "GST",
-            "DIS",
-        }
-        if upper in blocked:
-            return False
-        if any(word in upper for word in ("TOTAL", "SUB TOTAL", "GRAND", "ROUND", "DISCOUNT", "BANK", "GSTIN")):
-            return False
-        return True
-
-    row_by_id = {row.row_id: row for row in main_table.rows}
-    cells_by_row: Dict[str, Dict[str, Any]] = {}
-    for cell in main_table.cells:
-        cells_by_row.setdefault(cell.row_id, {})[cell.col_id] = cell
-
-    def _row_center(row) -> float:
-        return float(getattr(row.geometry, "center_y", 0.0) or 0.0)
-
-    def _cell_blocks(cell) -> List[Any]:
-        return [block_by_id[block_id] for block_id in cell.mapped_block_ids if block_id in block_by_id]
-
-    eligible_rows = []
-    for row in sorted(main_table.rows, key=_row_center):
-        if getattr(row, "row_role", "") != "item_row":
-            continue
-        row_cells = cells_by_row.get(row.row_id, {})
-        has_numeric = any((row_cells.get(col_id) and row_cells[col_id].mapped_block_ids) for col_id in numeric_col_ids)
-        if has_numeric:
-            eligible_rows.append(row)
-    if len(eligible_rows) < 3:
-        metrics["product_phase_shift_source"] = "insufficient_item_rows"
-        return metrics
-
-    row_centers = [_row_center(row) for row in eligible_rows]
-    intervals = [
-        row_centers[idx + 1] - row_centers[idx]
-        for idx in range(len(row_centers) - 1)
-        if row_centers[idx + 1] > row_centers[idx]
-    ]
-    if not intervals:
-        metrics["product_phase_shift_source"] = "missing_row_intervals"
-        return metrics
-    intervals_sorted = sorted(intervals)
-    row_interval = intervals_sorted[len(intervals_sorted) // 2]
-
-    product_col = next((col for col in main_table.columns if col.col_id == product_col_id), None)
-    if not product_col or not product_col.geometry:
-        metrics["product_phase_shift_source"] = "missing_product_column_geometry"
-        return metrics
-    x_min = max(float(product_col.geometry.min_x) + 35.0, float(product_col.geometry.min_x))
-    x_max = float(product_col.geometry.max_x) + 55.0
-    first_row = eligible_rows[0]
-    first_center = _row_center(first_row)
-    external_candidates = []
-    current_table_token_ids = {block_id for cell in main_table.cells for block_id in cell.mapped_block_ids}
-    for region in table_regions:
-        if region.table_id == main_table.table_id:
-            continue
-        for cell in region.cells:
-            candidate_blocks = []
-            for block in _cell_blocks(cell):
-                if block.id in current_table_token_ids:
-                    continue
-                if not (x_min <= _center_x(block) <= x_max):
-                    continue
-                if not (first_center - (1.5 * row_interval) <= _center_y(block) < first_center):
-                    continue
-                if _is_product_like(block.text):
-                    candidate_blocks.append(block)
-            if candidate_blocks:
-                candidate_blocks.sort(key=lambda b: (_center_y(b), _center_x(b)))
-                external_candidates.append(
-                    {
-                        "source_table_id": region.table_id,
-                        "source_row_id": cell.row_id,
-                        "source_col_id": cell.col_id,
-                        "block_ids": [block.id for block in candidate_blocks],
-                        "text": " ".join(block.text for block in candidate_blocks if block.text).strip(),
-                        "center_y": max(_center_y(block) for block in candidate_blocks),
-                    }
-                )
-    if not external_candidates:
-        metrics["product_phase_shift_source"] = "no_preceding_product_candidate"
-        return metrics
-    external_candidates.sort(key=lambda item: item["center_y"], reverse=True)
-    preceding_product = external_candidates[0]
-
-    product_cells = []
-    for row in eligible_rows:
-        product_cell = cells_by_row.get(row.row_id, {}).get(product_col_id)
-        if product_cell is not None:
-            product_cells.append(product_cell)
-        else:
-            product_cells.append(None)
-
-    current_products = []
-    for cell in product_cells:
-        if cell is None:
-            continue
-        product_blocks = [
-            block
-            for block in _cell_blocks(cell)
-            if x_min <= _center_x(block) <= x_max and _is_product_like(block.text)
-        ]
-        if not product_blocks:
-            continue
-        product_blocks.sort(key=lambda b: (_center_y(b), _center_x(b)))
-        current_products.append(
-            {
-                "block_ids": [block.id for block in product_blocks],
-                "text": " ".join(block.text for block in product_blocks if block.text).strip(),
-                "source_table_id": main_table.table_id,
-                "source_row_id": cell.row_id,
-                "source_col_id": cell.col_id,
-            }
-        )
-    if len(current_products) < 2:
-        metrics["product_phase_shift_source"] = "insufficient_product_cells"
-        return metrics
-
-    replacement_sequence = [preceding_product] + current_products
-    repair_limit = min(len(eligible_rows), len(replacement_sequence))
-    if repair_limit < 3:
-        metrics["product_phase_shift_source"] = "insufficient_repair_sequence"
-        return metrics
-
-    metrics["product_numeric_phase_shift_detected"] = True
-    metrics["product_phase_shift_source"] = (
-        f"{preceding_product['source_table_id']}:{preceding_product['source_row_id']}:{preceding_product['source_col_id']}"
-    )
-    affected_rows = []
-    for idx in range(repair_limit):
-        row = eligible_rows[idx]
-        product_cell = cells_by_row.get(row.row_id, {}).get(product_col_id)
-        if product_cell is None:
-            continue
-        replacement = replacement_sequence[idx]
-        before = {
-            "text": product_cell.text,
-            "mapped_block_ids": list(product_cell.mapped_block_ids),
-        }
-        if before["mapped_block_ids"] == replacement["block_ids"]:
-            continue
-        product_cell.original_text = product_cell.original_text or product_cell.text
-        product_cell.mapped_block_ids = list(replacement["block_ids"])
-        product_cell.text = replacement["text"]
-        product_cell.assignment_strategy = "product_phase_shift_repair"
-        row.provenance["product_phase_shift_repair"] = {
-            "before": before,
-            "after": {
-                "text": product_cell.text,
-                "mapped_block_ids": list(product_cell.mapped_block_ids),
-                "source_table_id": replacement.get("source_table_id"),
-                "source_row_id": replacement.get("source_row_id"),
-                "source_col_id": replacement.get("source_col_id"),
-            },
-        }
-        affected_rows.append(
-            {
-                "row_id": row.row_id,
-                "before_text": before["text"],
-                "after_text": product_cell.text,
-                "before_block_ids": before["mapped_block_ids"],
-                "after_block_ids": list(product_cell.mapped_block_ids),
-            }
-        )
-
-    metrics["product_phase_shift_repair_count"] = len(affected_rows)
-    metrics["product_phase_shift_affected_rows"] = affected_rows
-    if not affected_rows:
-        metrics["product_numeric_phase_shift_detected"] = False
-        metrics["product_phase_shift_source"] = "no_cell_changes_needed"
-    return metrics
 
 
 def _dominance_score_confidence(score: float) -> float:
@@ -595,7 +366,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     # Step 2: Skew Normalization
     ocr_blocks = apply_skew_normalization(ocr_blocks)
-    document_graph = build_document_graph(ocr_blocks)
+    document_graph = {
+        "graph_candidate_rows": [],
+        "graph_candidate_columns": [],
+        "graph_table_region": {},
+        "graph_confidence": 0.0,
+        "metrics": {},
+    }
 
     # Step 3: TSR Table Region Detection with Confidence-Gated Fallback
     table_regions = []
@@ -1136,25 +913,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Topology Decision Logic
     selected_topology_source = "heuristic_anchor"
     selected_candidate_reason = "default_heuristic"
-    margin = 15.0
-    
-    # If the heuristic candidate is missing required columns, do not require a margin to beat it
-    margin_to_use = 0.0 if len(heuristic_metrics.get("missing_req_cols", [])) > 0 else margin
-
-    if not heuristic_candidate or len(heuristic_candidate.rows) == 0:
-        if graph_candidate and len(graph_candidate.rows) > 0:
-            selected_topology_source = "document_graph_candidate"
-            selected_candidate_reason = "heuristic_empty_graph_available"
-    elif graph_candidate and len(graph_candidate.rows) > 0:
-        if graph_selection_blocked_reason:
-            selected_topology_source = "heuristic_anchor"
-            selected_candidate_reason = f"heuristic_preferred_due_to_block_{graph_selection_blocked_reason}"
-        elif graph_score > heuristic_score + margin_to_use:
-            selected_topology_source = "document_graph_candidate"
-            selected_candidate_reason = f"graph_score_beats_heuristic_with_margin_{graph_score - heuristic_score:.2f}"
-        else:
-            selected_topology_source = "heuristic_anchor"
-            selected_candidate_reason = f"heuristic_score_higher_or_within_margin (diff: {heuristic_score - graph_score:.2f})"
 
     logger.info(
         f"[TOPOLOGY RANKING] Heuristic Score: {heuristic_score:.2f} ({heuristic_metrics}) | "
@@ -1195,60 +953,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     should_fallback = False
     trigger_reason = None
 
-    if not table_bundle.main_table:
-        should_fallback = True
-        trigger_reason = "missing_main_table"
-    else:
-        main_tr = table_bundle.main_table
-        num_rows = len(main_tr.rows)
-        num_cols = len(main_tr.columns)
-
-        # Triggers for collapsed rows or poor column support
-        if num_rows < 3 and len(ocr_blocks) >= 15:
-            should_fallback = True
-            trigger_reason = f"collapsed_rows_{num_rows}"
-        elif num_cols < 3:
-            should_fallback = True
-            trigger_reason = f"poor_column_support_{num_cols}"
-        elif getattr(main_tr, "topology_confidence", 1.0) < 0.40:
-            should_fallback = True
-            trigger_reason = f"low_topology_confidence_{main_tr.topology_confidence:.2f}"
-
-    if should_fallback:
-        if selected_topology_source == "document_graph_candidate":
-            logger.info("[GRAPH FALLBACK] Already selected document_graph_candidate; skipping redundant emergency fallback.")
-        else:
-            if graph_rows and graph_cols:
-                logger.warning(f"[GRAPH FALLBACK] Activating emergency document graph fallback due to: {trigger_reason}")
-                fallback_tr = build_graph_fallback_table_region(
-                    graph_rows=graph_rows,
-                    graph_cols=graph_cols,
-                    graph_confidence=document_graph.get("graph_confidence", 0.5)
-                )
-                from services.layout_pipeline.graph_fallback import assign_tokens_to_graph_cells
-                rep_counts = assign_tokens_to_graph_cells(fallback_tr, ocr_blocks, graph_rows, graph_cols)
-                for k in ["graph_fallback_product_repair_count", "graph_fallback_amount_repair_count", "graph_fallback_numeric_reassignment_count", "graph_fallback_suspicious_qty_count"]:
-                    if k not in tsr_metadata:
-                        tsr_metadata[k] = 0
-                tsr_metadata["graph_fallback_product_repair_count"] += rep_counts.get("product_repair_count", 0)
-                tsr_metadata["graph_fallback_amount_repair_count"] += rep_counts.get("amount_repair_count", 0)
-                tsr_metadata["graph_fallback_numeric_reassignment_count"] += rep_counts.get("numeric_reassignment_count", 0)
-                tsr_metadata["graph_fallback_suspicious_qty_count"] += rep_counts.get("suspicious_qty_count", 0)
-                fallback_tr, audit = merge_multiline_table_rows(fallback_tr, ocr_blocks)
-                fallback_tr = update_row_stability_scores(fallback_tr, ocr_blocks)
-
-                table_bundle.main_table = fallback_tr
-                if fallback_tr not in table_regions:
-                    table_regions.append(fallback_tr)
-
-                topology_source = "document_graph_fallback"
-                selected_topology_source = "document_graph_fallback"
-                graph_fallback_used = True
-                graph_rejection_reason = "fallback_activated"
-                fallback_tr.topology_confidence = document_graph.get("graph_confidence", 0.5)
-            else:
-                graph_rejection_reason = "graph_extraction_empty"
-                logger.warning(f"[GRAPH FALLBACK] Fallback triggered ({trigger_reason}) but document graph candidates were empty.")
+    should_fallback = False
+    trigger_reason = None
 
     # Populate actual selected topology sources in metadata
     tsr_metadata["topology_source"] = topology_source
@@ -1283,66 +989,14 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         ):
             row_role_metrics[key] += table_role_metrics.get(key, 0)
 
-    column_band_rescue_candidate, column_band_rescue_metrics = build_column_band_rescue_candidate(
-        ocr_blocks=ocr_blocks,
-        table_regions=table_regions,
-        selected_main_table=table_bundle.main_table,
-        selected_main_item_rows_count=row_role_metrics["item_rows_count"],
-        max_final_column_count=int(tsr_metadata.get("max_final_column_count", 0) or 0),
-    )
-    if column_band_rescue_candidate is not None:
-        candidate_score_details = classifier_engine.score_region_for_main_table(column_band_rescue_candidate)
-        current_score_details = classifier_engine.score_region_for_main_table(table_bundle.main_table)
-        candidate_score = float(candidate_score_details.get("score", 0.0))
-        current_score = float(current_score_details.get("score", 0.0))
-        current_confidence = _dominance_score_confidence(current_score)
-        candidate_confidence = float(column_band_rescue_metrics.get("column_band_rescue_confidence", 0.0) or 0.0)
-
-        column_band_rescue_metrics["column_band_rescue_candidate_score"] = round(candidate_score, 3)
-        column_band_rescue_metrics["column_band_rescue_current_main_score"] = round(current_score, 3)
-        column_band_rescue_metrics["column_band_rescue_current_main_confidence"] = round(current_confidence, 3)
-
-        if candidate_score > current_score and candidate_confidence > current_confidence:
-            table_regions.append(column_band_rescue_candidate)
-            classifications = classifier_engine.classify_region_list(table_regions)
-            table_routing_diagnostics = getattr(classifier_engine, "last_routing_diagnostics", {})
-            table_bundle = route_tables(table_regions, classifications, diagnostics=table_routing_diagnostics)
-            if table_bundle.main_table and table_bundle.main_table.table_id == column_band_rescue_candidate.table_id:
-                table_bundle.main_table.source_engine = "column_band_rescue"
-                column_band_rescue_metrics["column_band_rescue_selected"] = True
-                logger.info(
-                    "[COLUMN BAND RESCUE] selected rows=%s subtotal_preview=%s confidence=%s",
-                    column_band_rescue_metrics.get("column_band_rescued_rows_count"),
-                    column_band_rescue_metrics.get("column_band_rescue_item_subtotal_preview"),
-                    column_band_rescue_metrics.get("column_band_rescue_confidence"),
-                )
-            else:
-                column_band_rescue_metrics["column_band_rescue_rejected_reason"] = "rescue_candidate_not_selected_by_routing"
-        else:
-            column_band_rescue_metrics["column_band_rescue_rejected_reason"] = "candidate_did_not_beat_current_main_confidence"
-
-        analysis_targets = [table_bundle.main_table]
-        row_role_metrics = {
-            "item_rows_count": 0,
-            "header_rows_count": 0,
-            "footer_rows_count": 0,
-            "tax_rows_count": 0,
-            "metadata_rows_count": 0,
-            "unknown_rows_count": 0,
-            "by_table": {},
-        }
-        for tr in analysis_targets:
-            table_role_metrics = classify_row_roles(tr)
-            row_role_metrics["by_table"][tr.table_id] = table_role_metrics
-            for key in (
-                "item_rows_count",
-                "header_rows_count",
-                "footer_rows_count",
-                "tax_rows_count",
-                "metadata_rows_count",
-                "unknown_rows_count",
-            ):
-                row_role_metrics[key] += table_role_metrics.get(key, 0)
+    column_band_rescue_candidate = None
+    column_band_rescue_metrics = {
+        "column_band_rescue_selected": False,
+        "column_band_rescue_confidence": 0.0,
+        "column_band_rescued_rows_count": 0,
+        "column_band_rescue_item_subtotal_preview": 0.0,
+        "column_band_rescue_rejected_reason": "disabled_in_production",
+    }
 
     tsr_metadata.update(column_band_rescue_metrics)
 
@@ -1365,23 +1019,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     }
     for tr in analysis_targets:
         column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
-        anchor_repair = repair_undersegmented_table_with_anchors(
-            tr,
-            ocr_blocks,
-            column_anchor_debug[tr.table_id],
-        )
-        if anchor_repair.get("enabled"):
-            table_role_metrics = classify_row_roles(tr)
-            row_role_metrics = {
-                "item_rows_count": table_role_metrics.get("item_rows_count", 0),
-                "header_rows_count": table_role_metrics.get("header_rows_count", 0),
-                "footer_rows_count": table_role_metrics.get("footer_rows_count", 0),
-                "tax_rows_count": table_role_metrics.get("tax_rows_count", 0),
-                "metadata_rows_count": table_role_metrics.get("metadata_rows_count", 0),
-                "unknown_rows_count": table_role_metrics.get("unknown_rows_count", 0),
-                "by_table": {tr.table_id: table_role_metrics},
-            }
-            column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
 
     semantic_results = {}
     classifier = SemanticColumnClassifier()
@@ -1452,98 +1089,12 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     row_validator = RowValidator(semantic_column_cache=semantic_results)
     row_validation_results = row_validator.validate_all(analysis_targets)
 
-    if not anchor_repair.get("enabled"):
-        for tr in analysis_targets:
-            validation = row_validation_results.get(tr.table_id, {})
-            retry_metrics = repair_undersegmented_table_with_anchors(
-                tr,
-                ocr_blocks,
-                column_anchor_debug.get(tr.table_id),
-                semantic_context=semantic_results.get(tr.table_id),
-                missing_semantic_columns=validation.get("missing_semantic_columns", []),
-            )
-            if retry_metrics.get("repair_attempted"):
-                anchor_repair = retry_metrics
-            if retry_metrics.get("enabled"):
-                table_role_metrics = classify_row_roles(tr)
-                row_role_metrics = {
-                    "item_rows_count": table_role_metrics.get("item_rows_count", 0),
-                    "header_rows_count": table_role_metrics.get("header_rows_count", 0),
-                    "footer_rows_count": table_role_metrics.get("footer_rows_count", 0),
-                    "tax_rows_count": table_role_metrics.get("tax_rows_count", 0),
-                    "metadata_rows_count": table_role_metrics.get("metadata_rows_count", 0),
-                    "unknown_rows_count": table_role_metrics.get("unknown_rows_count", 0),
-                    "by_table": {tr.table_id: table_role_metrics},
-                }
-                column_anchor_debug[tr.table_id] = detect_column_anchors(tr, ocr_blocks)
-
-                semantic_results = {}
-                semantic_rejection_total = 0
-                semantic_outlier_total = 0
-                hard_deleted_cells_total = 0
-                quarantined_cell_total = 0
-                columns_inferred_from_item_rows_only = True
-                semantic_column_scores_by_col = {}
-                final_column_semantics = {}
-                amount_column_candidates = {}
-                rejected_amount_candidates = {}
-                product_column_candidates = {}
-                expiry_column_candidates = {}
-                batch_column_candidates = {}
-                hsn_column_candidates = {}
-                gst_column_candidates = {}
-                quantity_column_candidates = {}
-                rejected_quantity_candidates = {}
-                for semantic_target in analysis_targets:
-                    semantic_results[semantic_target.table_id] = classifier.enrich_region_metadata(semantic_target)
-                    rejection_summary = semantic_results[semantic_target.table_id].get("_rejection_summary", {})
-                    inference_summary = semantic_results[semantic_target.table_id].get("_inference_summary", {})
-                    semantic_rejection_total += rejection_summary.get("semantic_rejection_count", 0)
-                    semantic_outlier_total += rejection_summary.get("semantic_outlier_count", 0)
-                    hard_deleted_cells_total += rejection_summary.get("hard_deleted_cells_count", 0)
-                    quarantined_cell_total += rejection_summary.get("quarantined_cell_count", 0)
-                    columns_inferred_from_item_rows_only = (
-                        columns_inferred_from_item_rows_only
-                        and inference_summary.get("columns_inferred_from_item_rows_only", False)
-                    )
-                    semantic_column_scores_by_col[semantic_target.table_id] = inference_summary.get("semantic_column_scores_by_col", {})
-                    final_column_semantics[semantic_target.table_id] = inference_summary.get("final_column_semantics", {})
-                    amount_column_candidates[semantic_target.table_id] = inference_summary.get("amount_column_candidates", [])
-                    rejected_amount_candidates[semantic_target.table_id] = inference_summary.get("rejected_amount_candidates", [])
-                    product_column_candidates[semantic_target.table_id] = inference_summary.get("product_column_candidates", [])
-                    expiry_column_candidates[semantic_target.table_id] = inference_summary.get("expiry_column_candidates", [])
-                    batch_column_candidates[semantic_target.table_id] = inference_summary.get("batch_column_candidates", [])
-                    hsn_column_candidates[semantic_target.table_id] = inference_summary.get("hsn_column_candidates", [])
-                    gst_column_candidates[semantic_target.table_id] = inference_summary.get("gst_column_candidates", [])
-                    quantity_column_candidates[semantic_target.table_id] = inference_summary.get("quantity_column_candidates", [])
-                    rejected_quantity_candidates[semantic_target.table_id] = inference_summary.get("rejected_quantity_candidates", [])
-
-                row_validator = RowValidator(semantic_column_cache=semantic_results)
-                row_validation_results = row_validator.validate_all(analysis_targets)
-                break
-
     product_phase_shift_metrics = {
         "product_numeric_phase_shift_detected": False,
         "product_phase_shift_repair_count": 0,
         "product_phase_shift_source": "not_evaluated",
         "product_phase_shift_affected_rows": [],
     }
-    for tr in analysis_targets:
-        product_phase_shift_metrics = _repair_product_numeric_phase_shift(
-            tr,
-            table_regions,
-            ocr_blocks,
-            final_column_semantics.get(tr.table_id, {}),
-        )
-        if product_phase_shift_metrics.get("product_phase_shift_repair_count", 0) > 0:
-            logger.info(
-                "[PRODUCT PHASE SHIFT] repaired rows=%s source=%s",
-                product_phase_shift_metrics.get("product_phase_shift_repair_count"),
-                product_phase_shift_metrics.get("product_phase_shift_source"),
-            )
-            row_validator = RowValidator(semantic_column_cache=semantic_results)
-            row_validation_results = row_validator.validate_all(analysis_targets)
-            break
 
     # Build normalized item rows before financial reconciliation so row math can
     # use guarded selected-graph quantity repairs without re-running reconciliation.
@@ -1667,7 +1218,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         document_role_metrics["tax_rows_count"],
         invoice_source_role_counts["tax_rows_count"],
     )
-    vendor_template_prior = build_vendor_template_prior(ocr_blocks, table_bundle.main_table, table_regions)
+    vendor_template_prior = {}
     logger.info(
         "[INVOICE RECONCILIATION] "
         f"status={invoice_reconciliation_result.get('status')} "

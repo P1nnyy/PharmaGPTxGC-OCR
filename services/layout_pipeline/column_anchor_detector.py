@@ -351,179 +351,22 @@ def repair_undersegmented_table_with_anchors(
     missing_semantic_columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Split one-cell medicine rows into geometry-anchored cells. Mutates only on success.
+    Disabled in production. Always returns disabled metrics without mutating cells or columns.
     """
-    before_column_count = len(table_region.columns)
-    before_avg_len = _avg_populated_cell_text_len(table_region)
-    reason = _undersegmentation_reason(table_region)
-    anchor_debug = anchor_debug or detect_column_anchors(table_region, ocr_blocks)
-    candidate_anchor_count = anchor_debug.get("candidate_anchor_count", 0)
-    final_anchor_count = anchor_debug.get("final_anchor_count", 0)
-    missing_semantic_trigger = _semantic_repair_trigger(semantic_context, missing_semantic_columns)
-    anchors = _useful_anchor_columns(anchor_debug)
-    if (
-        not reason
-        and before_column_count <= 2
-        and final_anchor_count >= 4
-        and missing_semantic_trigger
-    ):
-        reason = "low_column_count_with_strong_anchors_and_missing_semantics"
-    if not reason:
-        reason = _strong_semantic_anchor_repair_reason(
-            before_column_count,
-            candidate_anchor_count,
-            final_anchor_count,
-            anchors,
-            missing_semantic_trigger,
-        )
-
-    base_metrics = {
+    before_column_count = len(table_region.columns) if table_region else 0
+    return {
         "enabled": False,
         "repair_attempted": False,
-        "reason": reason or "not_under_segmented",
-        "undersegmentation_trigger_reason": reason,
+        "reason": "disabled_in_production",
+        "undersegmentation_trigger_reason": None,
         "missing_semantic_columns_trigger": sorted({str(col).lower() for col in (missing_semantic_columns or [])}),
-        "candidate_anchor_count": candidate_anchor_count,
-        "final_anchor_count": final_anchor_count,
+        "candidate_anchor_count": 0,
+        "final_anchor_count": 0,
         "before_column_count": before_column_count,
         "after_column_count": before_column_count,
-        "before_avg_cell_text_len": round(before_avg_len, 2),
-        "after_avg_cell_text_len": round(before_avg_len, 2),
+        "before_avg_cell_text_len": 0.0,
+        "after_avg_cell_text_len": 0.0,
         "repaired_row_count": 0,
         "product_col_detected": False,
         "anchor_columns_used": [],
-    }
-    if not reason:
-        return base_metrics
-
-    base_metrics["repair_attempted"] = True
-    if len(anchors) + 1 < 3:
-        return {
-            **base_metrics,
-            "reason": "anchor_repair_produced_fewer_than_3_useful_columns",
-            "anchor_columns_used": anchors,
-        }
-
-    blocks_by_id = {b.id: b for b in ocr_blocks if b.id}
-    product_col_id = "anchor_product"
-    table_geom = table_region.geometry
-    all_row_geoms = [r.geometry for r in table_region.rows if r.geometry]
-    min_y = table_geom.min_y if table_geom else min([g.min_y for g in all_row_geoms] + [0.0])
-    max_y = table_geom.max_y if table_geom else max([g.max_y for g in all_row_geoms] + [1000.0])
-    min_x = table_geom.min_x if table_geom else 0.0
-    max_x = table_geom.max_x if table_geom else max([a["max_x"] for a in anchors] + [1000.0])
-
-    product_max_x = max(min_x, anchors[0]["min_x"] - 2.0)
-    new_columns = [
-        ColumnRegion(
-            col_id=product_col_id,
-            geometry=_make_geom(min_x, min_y, product_max_x, max_y),
-            normalized_geometry=_make_geom(min_x, min_y, product_max_x, max_y),
-            confidence=1.0,
-        )
-    ]
-    for idx, anchor in enumerate(anchors):
-        col_id = f"anchor_col_{idx}"
-        anchor["col_id"] = col_id
-        geom = _make_geom(anchor["min_x"], min_y, anchor["max_x"], max_y)
-        new_columns.append(ColumnRegion(
-            col_id=col_id,
-            geometry=geom,
-            normalized_geometry=geom.model_copy(),
-            confidence=1.0,
-        ))
-
-    cells_by_row = _row_cells(table_region)
-    new_cells: List[TableCell] = []
-    repaired_row_count = 0
-
-    for row in table_region.rows:
-        token_features = []
-        seen: Set[str] = set()
-        for cell in cells_by_row.get(row.row_id, []):
-            for token_id in cell.mapped_block_ids:
-                if token_id in seen:
-                    continue
-                seen.add(token_id)
-                block = blocks_by_id.get(token_id)
-                if not block:
-                    continue
-                feature = extract_token_features(block)
-                if feature:
-                    token_features.append(feature)
-
-        assignments: Dict[str, List[Dict[str, Any]]] = {}
-        for feature in token_features:
-            col_id = _assign_feature_to_column(feature, anchors, product_col_id)
-            assignments.setdefault(col_id, []).append(feature)
-
-        populated_cols = 0
-        for col in new_columns:
-            features = assignments.get(col.col_id, [])
-            if not features:
-                continue
-            features.sort(key=lambda f: (f["geometry"].min_y, f["min_x"]))
-            text = " ".join(f["text"] for f in features if f["text"]).strip()
-            geom = _union_geom(features)
-            new_cells.append(TableCell(
-                row_id=row.row_id,
-                col_id=col.col_id,
-                geometry=geom,
-                original_geometry=geom.model_copy(),
-                normalized_geometry=geom.model_copy(),
-                confidence=1.0,
-                mapped_block_ids=[f["token_id"] for f in features if f["token_id"]],
-                text=text,
-                original_text=text,
-                semantic_outlier=False,
-                assignment_confidence=1.0,
-                assignment_strategy="anchor_repair",
-            ))
-            populated_cols += 1
-
-        if getattr(row, "row_role", "unknown_row") == "item_row" and populated_cols > 1:
-            repaired_row_count += 1
-
-    item_row_ids = {row.row_id for row in table_region.rows if getattr(row, "row_role", "unknown_row") == "item_row"}
-    meaningful_columns = {
-        cell.col_id
-        for cell in new_cells
-        if (cell.text or "").strip()
-        and (not item_row_ids or cell.row_id in item_row_ids)
-    }
-
-    if len(meaningful_columns) < 4:
-        return {
-            **base_metrics,
-            "reason": "anchor_repair_failed_insufficient_output_columns",
-            "after_column_count": len(meaningful_columns),
-            "anchor_columns_used": anchors,
-        }
-
-    if repaired_row_count == 0:
-        return {
-            **base_metrics,
-            "reason": "anchor_repair_no_item_rows_split",
-            "anchor_columns_used": anchors,
-        }
-
-    table_region.columns = new_columns
-    table_region.cells = new_cells
-
-    after_avg_len = _avg_populated_cell_text_len(table_region)
-    return {
-        "enabled": True,
-        "repair_attempted": True,
-        "reason": reason,
-        "undersegmentation_trigger_reason": reason,
-        "missing_semantic_columns_trigger": sorted({str(col).lower() for col in (missing_semantic_columns or [])}),
-        "candidate_anchor_count": candidate_anchor_count,
-        "final_anchor_count": final_anchor_count,
-        "before_column_count": before_column_count,
-        "after_column_count": len(new_columns),
-        "before_avg_cell_text_len": round(before_avg_len, 2),
-        "after_avg_cell_text_len": round(after_avg_len, 2),
-        "repaired_row_count": repaired_row_count,
-        "product_col_detected": True,
-        "anchor_columns_used": anchors,
     }
