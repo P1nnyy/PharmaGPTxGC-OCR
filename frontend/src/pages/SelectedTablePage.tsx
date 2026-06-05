@@ -30,7 +30,7 @@ export const SelectedTablePage: React.FC = () => {
         const mappings = await apiClient.getSemanticMapping(activeId);
         setSemanticCols(mappings);
 
-        if (table.cells.length > 1 && table.cells[1].length > 0) {
+        if (table && table.cells.length > 1 && table.cells[1].length > 0) {
           // Default select the first data cell
           setSelectedCellId(table.cells[1][0].cell_id);
         }

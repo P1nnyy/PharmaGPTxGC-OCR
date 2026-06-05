@@ -56,6 +56,7 @@ interface RunContextType {
   triggerReconstruction: () => Promise<void>;
   flagAnomaly: (note: string) => void;
   anomalies: Record<string, string>; // runId -> note
+  clearWorkbenchState: (clearSettings?: boolean) => void;
 }
 
 const RunContext = createContext<RunContextType | undefined>(undefined);
@@ -81,6 +82,18 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return defaultSettings;
   });
 
+  const clearWorkbenchState = (clearSettings = false) => {
+    apiClient.clearWorkbenchRunStorage();
+    if (clearSettings) {
+      localStorage.removeItem('ocr_workbench_settings');
+      setSettings(defaultSettings);
+    }
+    sessionStorage.clear();
+    setRuns([]);
+    setCurrentRunId(null);
+    setCompareRunId(null);
+  };
+
   // Check health and load runs on mount
   useEffect(() => {
     const init = async () => {
@@ -92,7 +105,16 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const data = await apiClient.getRuns();
         setRuns(data);
         if (data.length > 0) {
-          setCurrentRunId(data[0].run_id);
+          if (currentRunId && !data.some(r => r.run_id === currentRunId)) {
+            apiClient.clearWorkbenchRunStorage();
+            setCurrentRunId(null);
+            setCompareRunId(null);
+          } else if (!currentRunId) {
+            setCurrentRunId(data[0].run_id);
+          }
+        } else {
+          setCurrentRunId(null);
+          setCompareRunId(null);
         }
       } catch (err: any) {
         setError(err.message || 'Initialization failed');
@@ -120,6 +142,9 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsLoading(true);
     try {
       const newRun = await apiClient.uploadInvoice(file);
+      if (!newRun) {
+        throw new Error('Upload failed or backend is offline.');
+      }
       // Refresh list
       const data = await apiClient.getRuns();
       setRuns(data);
@@ -190,7 +215,8 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         triggerOCR,
         triggerReconstruction,
         flagAnomaly,
-        anomalies
+        anomalies,
+        clearWorkbenchState
       }}
     >
       {children}

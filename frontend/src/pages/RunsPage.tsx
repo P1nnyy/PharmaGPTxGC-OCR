@@ -27,7 +27,7 @@ export const RunsPage: React.FC = () => {
   // Selected Row for Right Drawer Summary
   const [selectedRunId, setSelectedRunId] = useState<string | null>(currentRunId);
 
-  const selectedRun = runs.find(r => r.run_id === selectedRunId) || runs[0] || null;
+  const selectedRun = (selectedRunId && runs.find(r => r.run_id === selectedRunId)) || null;
 
   // Handles File Input Selection
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -217,7 +217,14 @@ export const RunsPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#30363d]">
-                  {filteredRuns.length > 0 ? (
+                  {runs.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="text-center py-12 text-gray-400 font-sans">
+                        <div className="text-base font-semibold">No invoice runs found</div>
+                        <div className="text-xs text-gray-500 mt-1">Start backend service or upload an invoice.</div>
+                      </td>
+                    </tr>
+                  ) : filteredRuns.length > 0 ? (
                     filteredRuns.map((run) => {
                       const isSelected = selectedRunId === run.run_id;
                       return (
@@ -390,7 +397,7 @@ export const RunsPage: React.FC = () => {
             </div>
           ) : (
             <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 text-center text-gray-500 text-xs">
-              No runs loaded. Upload an invoice to start.
+              No run selected.
             </div>
           )}
         </div>

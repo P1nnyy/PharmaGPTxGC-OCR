@@ -10,6 +10,9 @@ import type {
   TableCell
 } from './types';
 
+// Gating flag for mock / demo data
+export const ENABLE_MOCK_DATA = import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
+
 // Helper to generate a timestamp in ISO format
 const getTimestamp = (offsetHours = 0) => {
   const date = new Date();
@@ -254,18 +257,53 @@ const initialRuns: RunSummary[] = [
   }
 ];
 
+// Helper to clear storage
+export function clearWorkbenchRunStorage() {
+  localStorage.removeItem('ocr_workbench_runs');
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith('ocr_workbench_run_detail_')) {
+      localStorage.removeItem(key);
+    }
+  }
+}
+
+// Helper to retrieve detailed backend run data
+export const getDetailsData = (runId: string): any | null => {
+  const saved = localStorage.getItem(`ocr_workbench_run_detail_${runId}`);
+  if (saved) {
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
 // Helper to store Runs in local storage to keep state across page refreshes
 const getStoredRuns = (): RunSummary[] => {
   const saved = localStorage.getItem('ocr_workbench_runs');
   if (saved) {
     try {
-      return JSON.parse(saved);
+      let runs: RunSummary[] = JSON.parse(saved);
+      if (!ENABLE_MOCK_DATA) {
+        const containsDemo = runs.some(r => r.run_id.startsWith('RUN_20260603_213604_'));
+        if (containsDemo) {
+          clearWorkbenchRunStorage();
+          runs = [];
+        }
+      }
+      return runs;
     } catch {
-      return initialRuns;
+      return ENABLE_MOCK_DATA ? initialRuns : [];
     }
   }
-  localStorage.setItem('ocr_workbench_runs', JSON.stringify(initialRuns));
-  return initialRuns;
+  if (ENABLE_MOCK_DATA) {
+    localStorage.setItem('ocr_workbench_runs', JSON.stringify(initialRuns));
+    return initialRuns;
+  }
+  return [];
 };
 
 const saveStoredRuns = (runs: RunSummary[]) => {
@@ -958,7 +996,7 @@ export const apiClient = {
 
       const backendData = await response.json();
       
-      // Successfully uploaded. Add a new run to our mock store.
+      // Successfully uploaded. Add a new run to our store.
       const runs = getStoredRuns();
       const newRunId = `RUN_${Date.now()}`;
       
@@ -971,10 +1009,15 @@ export const apiClient = {
         token_coverage: backendData.metadata?.token_coverage || 0.920,
         representability_score: backendData.metadata?.reconstruction_score || 0.850,
         selected_table_id: 'ITEMS_001',
-        selected_table_shape: '4 Rows x 8 Columns',
+        selected_table_shape: backendData.metadata?.structured_tables?.[0] 
+          ? `${backendData.metadata.structured_tables[0].cells?.filter((c: any) => (c.col_index ?? c.col_id) === 0).length ?? 4} Rows x ${backendData.metadata.structured_tables[0].cells?.filter((c: any) => (c.row_index ?? c.row_id) === 0).length ?? 8} Columns`
+          : '4 Rows x 8 Columns',
         missing_fields: backendData.metadata?.quality_gate?.missing_fields || [],
         row_math_status: backendData.metadata?.quality_gate?.row_math_status || 'pass'
       };
+
+      // Store the backend metadata details
+      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(backendData.metadata || {}));
 
       runs.unshift(newRun);
       saveStoredRuns(runs);
@@ -983,7 +1026,11 @@ export const apiClient = {
     } catch (error) {
       console.warn('Backend call failed, simulating client upload:', error);
       
-      // Mock success upload if backend is offline
+      if (!ENABLE_MOCK_DATA) {
+        return null;
+      }
+      
+      // Mock success upload if backend is offline and ENABLE_MOCK_DATA=true
       const runs = getStoredRuns();
       const newRunId = `RUN_${Date.now()}`;
       
@@ -1042,44 +1089,261 @@ export const apiClient = {
   async getRun(runId: string) {
     const runs = getStoredRuns();
     const run = runs.find(r => r.run_id === runId);
-    if (!run) throw new Error('Run not found');
+    if (!run) {
+      clearWorkbenchRunStorage();
+      throw new Error('Run not found');
+    }
     return run;
   },
 
   // Gets the OCR blocks for an image page
-  async getOCRBlocks(runId: string) {
-    return getMockOCRBlocks(runId);
+  async getOCRBlocks(runId: string): Promise<OCRBlock[]> {
+    const detail = getDetailsData(runId);
+    if (detail && detail.blocks) {
+      return detail.blocks;
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockOCRBlocks(runId);
+    }
+    return [];
   },
 
   // Gets Candidate TSR Tables
-  async getCandidateTables(runId: string) {
-    return getMockCandidateTables(runId);
+  async getCandidateTables(runId: string): Promise<CandidateTable[]> {
+    const detail = getDetailsData(runId);
+    if (detail) {
+      const candidates: CandidateTable[] = [];
+      const decision = detail.tsr_candidate_decision || detail.metrics?.tsr_candidate_decision;
+      if (decision && decision.candidates) {
+        for (const [key, cand] of Object.entries(decision.candidates)) {
+          const c = cand as any;
+          if (!c.available && key !== 'ppstructure') continue;
+          candidates.push({
+            table_id: key,
+            source_engine: c.source || key,
+            rows: c.rows || 0,
+            cols: c.columns || 0,
+            x_coverage: c.x_coverage || 0,
+            y_coverage: c.y_coverage || 0,
+            cell_count: c.cells || 0,
+            non_empty_cells: c.non_empty_cells || c.cells || 0,
+            score: c.score || c.confidence || 0,
+            labels: c.labels || [key],
+            selected: decision.selected === key,
+            rejection_reason: c.blocked_by?.join(', ') || null,
+            representability_score: c.score || c.confidence || 0,
+            preview_cells: c.preview_cells || []
+          });
+        }
+      }
+      return candidates;
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockCandidateTables(runId);
+    }
+    return [];
   },
 
   // Gets the final selected table structure
-  async getSelectedTable(runId: string) {
-    return getMockSelectedTable(runId);
+  async getSelectedTable(runId: string): Promise<SelectedTable | null> {
+    const detail = getDetailsData(runId);
+    if (detail && detail.structured_tables && detail.structured_tables.length > 0) {
+      const table = detail.structured_tables[0];
+      const cells: TableCell[][] = [];
+      
+      if (table.cells && Array.isArray(table.cells)) {
+        const rowMap: Record<number, TableCell[]> = {};
+        for (const cell of table.cells) {
+          const rowIdx = cell.row_index ?? cell.row_id ?? 0;
+          const colIdx = cell.col_index ?? cell.col_id ?? 0;
+          const tableCell: TableCell = {
+            cell_id: cell.cell_id || `c_${rowIdx}_${colIdx}`,
+            row_id: rowIdx,
+            col_id: colIdx,
+            text: cell.text || '',
+            confidence: cell.confidence ?? 1.0,
+            semantic_label: cell.semantic_label || cell.label || '',
+            bbox: cell.bbox || [0,0,0,0],
+            normalized_bbox: cell.normalized_bbox || [0,0,0,0],
+            source_blocks: cell.mapped_block_ids || cell.source_blocks || [],
+            status: cell.status || (cell.confidence < 0.6 ? 'error' : 'good'),
+            warnings: cell.warnings || []
+          };
+          if (!rowMap[rowIdx]) {
+            rowMap[rowIdx] = [];
+          }
+          rowMap[rowIdx][colIdx] = tableCell;
+        }
+        
+        const maxRow = Math.max(...Object.keys(rowMap).map(Number), -1);
+        for (let r = 0; r <= maxRow; r++) {
+          const rowCells = rowMap[r] || [];
+          const cleanRow: TableCell[] = [];
+          const maxCol = Math.max(...Object.keys(rowCells).map(Number), -1);
+          for (let c = 0; c <= maxCol; c++) {
+            cleanRow.push(rowCells[c] || {
+              cell_id: `c_${r}_${c}`,
+              row_id: r,
+              col_id: c,
+              text: '',
+              confidence: 1.0,
+              semantic_label: '',
+              bbox: [0,0,0,0],
+              normalized_bbox: [0,0,0,0],
+              source_blocks: [],
+              status: 'good',
+              warnings: []
+            });
+          }
+          cells.push(cleanRow);
+        }
+      }
+
+      return {
+        table_id: table.table_id || 'ITEMS_001',
+        rows: cells.length,
+        cols: cells[0]?.length || 0,
+        x_coverage: table.x_coverage || 100.0,
+        non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
+        representability_score: table.representability_score || detail.reconstruction_score || 1.0,
+        required_fields_present: table.required_fields_present || [],
+        required_fields_missing: table.required_fields_missing || detail.quality_gate?.missing_fields || [],
+        cells
+      };
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockSelectedTable(runId);
+    }
+    return null;
   },
 
   // Gets the Column semantic mapper
-  async getSemanticMapping(runId: string) {
-    return getMockSemanticMapping(runId);
+  async getSemanticMapping(runId: string): Promise<SemanticColumn[]> {
+    const detail = getDetailsData(runId);
+    if (detail && detail.structured_tables && detail.structured_tables.length > 0) {
+      const table = detail.structured_tables[0];
+      const mappings: SemanticColumn[] = [];
+      
+      if (table.cells && Array.isArray(table.cells)) {
+        const headerCells = table.cells.filter((c: any) => (c.row_index ?? c.row_id) === 0);
+        headerCells.sort((a: any, b: any) => (a.col_index ?? a.col_id) - (b.col_index ?? b.col_id));
+        for (const cell of headerCells) {
+          const colId = cell.col_index ?? cell.col_id ?? 0;
+          const predictedType = cell.semantic_label || cell.label || 'unknown';
+          mappings.push({
+            col_id: colId,
+            predicted_type: predictedType,
+            confidence: cell.confidence ?? 1.0,
+            header_text: cell.text || '',
+            sample_values: [],
+            competing_candidates: [
+              { type: predictedType, confidence: cell.confidence ?? 1.0 }
+            ],
+            conflict_resolution_reason: 'Inferred from backend semantic column classification'
+          });
+        }
+      }
+      return mappings;
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockSemanticMapping(runId);
+    }
+    return [];
   },
 
   // Gets the Row Mathematical Reconciliation checks
-  async getRowMath(runId: string) {
-    return getMockRowMath(runId);
+  async getRowMath(runId: string): Promise<RowMathResult[]> {
+    const detail = getDetailsData(runId);
+    if (detail && detail.financial_reconciliation) {
+      const rows = detail.financial_reconciliation.rows || [];
+      return rows.map((r: any) => ({
+        row_id: r.row_id,
+        product: r.product_name || r.product || 'Unknown',
+        qty: r.qty || r.quantity || 0,
+        rate: r.rate || r.unit_price || 0,
+        discount: r.discount || 0,
+        gst: r.gst || 0,
+        expected_amount: r.expected_amount || 0,
+        actual_amount: r.actual_amount || 0,
+        difference: r.difference || 0,
+        status: r.status || 'pass',
+        formula_used: r.formula_used || ''
+      }));
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockRowMath(runId);
+    }
+    return [];
   },
 
   // Gets Quality Gate ERP checklist validation
-  async getQualityGate(runId: string) {
-    return getMockQualityGate(runId);
+  async getQualityGate(runId: string): Promise<QualityGate | null> {
+    const detail = getDetailsData(runId);
+    if (detail && detail.quality_gate) {
+      const qg = detail.quality_gate;
+      return {
+        safe_for_erp: qg.safe_for_erp ?? false,
+        status_effective: (qg.safe_for_erp ? 'safe_for_erp' : 'needs_review') as 'safe_for_erp' | 'needs_review' | 'failed',
+        confidence: qg.confidence ?? detail.invoice_confidence ?? 1.0,
+        reasons: qg.reasons || [],
+        missing_fields: qg.missing_fields || [],
+        footer_status: qg.footer_status || '',
+        row_math_status: qg.row_math_status || 'unmeasurable',
+        checklist: qg.checklist || []
+      };
+    }
+    if (ENABLE_MOCK_DATA) {
+      return getMockQualityGate(runId);
+    }
+    return null;
   },
 
   // Gets the full directory listing of artifacts
-  async getArtifacts(runId: string) {
-    const run = await this.getRun(runId);
-    return getMockArtifacts(runId, run.filename);
+  async getArtifacts(runId: string): Promise<Artifact[]> {
+    const detail = getDetailsData(runId);
+    if (detail) {
+      const run = await this.getRun(runId);
+      return [
+        {
+          name: `${run.filename}`,
+          type: 'image',
+          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/test_images/${run.filename}`,
+          size: '1.4 MB',
+          created_at: run.timestamp
+        },
+        {
+          name: 'ocr_blocks_raw.json',
+          type: 'json',
+          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/ocr_blocks_raw.json`,
+          size: '124 KB',
+          created_at: run.timestamp
+        },
+        {
+          name: 'candidate_tables.json',
+          type: 'json',
+          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/candidate_tables.json`,
+          size: '42 KB',
+          created_at: run.timestamp
+        },
+        {
+          name: 'selected_table_grid.csv',
+          type: 'csv',
+          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/selected_table_grid.csv`,
+          size: '4 KB',
+          created_at: run.timestamp
+        }
+      ];
+    }
+    if (ENABLE_MOCK_DATA) {
+      const run = await this.getRun(runId);
+      return getMockArtifacts(runId, run.filename);
+    }
+    return [];
+  },
+
+  // Expose the storage clearing helper
+  clearWorkbenchRunStorage() {
+    clearWorkbenchRunStorage();
   },
 
   // Downloads specific output artifact
@@ -1132,6 +1396,7 @@ export const apiClient = {
   async copyDebugSummary(runId: string) {
     const run = await this.getRun(runId);
     const qg = await this.getQualityGate(runId);
+    if (!qg) return '';
     
     const summary = `=== OCR WORKBENCH DEBUG SUMMARY ===
 Run ID: ${run.run_id}
@@ -1145,7 +1410,7 @@ Selected Table shape: ${run.selected_table_shape}
 Missing fields: ${qg.missing_fields.join(', ') || 'None'}
 Row Math Validation: ${qg.row_math_status.toUpperCase()}
 Quality Failure Reasons:
-${qg.reasons.map(r => `  - ${r}`).join('\n')}
+${qg.reasons.map((r: string) => `  - ${r}`).join('\n')}
 ====================================`;
     
     await navigator.clipboard.writeText(summary);

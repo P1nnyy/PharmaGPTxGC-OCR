@@ -1,9 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import { ShieldCheck, Eye, Cpu, Sliders } from 'lucide-react';
 
 export const SettingsPage: React.FC = () => {
-  const { settings, updateSettings } = useRun();
+  const { settings, updateSettings, clearWorkbenchState } = useRun();
+  const navigate = useNavigate();
+  const [toastText, setToastText] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastText(msg);
+    setTimeout(() => setToastText(null), 2000);
+  };
 
   const toggleSetting = (key: keyof typeof settings) => {
     updateSettings({ [key]: !settings[key] });
@@ -11,6 +19,11 @@ export const SettingsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {toastText && (
+        <div className="fixed top-16 right-6 bg-emerald-950 text-emerald-400 border border-emerald-800 px-4 py-2 rounded text-xs font-semibold z-50 shadow-lg">
+          {toastText}
+        </div>
+      )}
       
       {/* Title */}
       <div>
@@ -134,6 +147,34 @@ export const SettingsPage: React.FC = () => {
                 />
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Card 4: Danger Zone / System State Reset */}
+        <div className="bg-[#161b22] border border-red-900/40 rounded-lg p-5 space-y-4 md:col-span-2">
+          <h3 className="text-sm font-semibold text-red-400 uppercase tracking-wider font-mono flex items-center space-x-2 border-b border-red-900/40 pb-2">
+            <span>Danger Zone / Reset State</span>
+          </h3>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <span className="text-xs font-bold text-white block">Clear Workbench State</span>
+              <span className="text-[10px] text-gray-500 block">
+                This will delete all locally stored invoice runs and diagnostic details.
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                const clearSettings = window.confirm("Do you also want to clear your workbench settings/preferences?");
+                clearWorkbenchState(clearSettings);
+                showToast("Workbench state cleared successfully.");
+                setTimeout(() => {
+                  navigate('/runs');
+                }, 1000);
+              }}
+              className="bg-red-950 hover:bg-red-900 text-red-400 border border-red-800 px-4 py-2 rounded text-xs font-bold transition-colors cursor-pointer"
+            >
+              Clear Workbench State
+            </button>
           </div>
         </div>
 

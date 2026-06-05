@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient } from '../api/client';
+import { apiClient, ENABLE_MOCK_DATA } from '../api/client';
 import {
   FileText,
   Activity,
@@ -96,14 +96,24 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
           </div>
 
           {/* System status */}
-          <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between text-xs">
-            <span className="text-gray-400">System Status</span>
-            <div className="flex items-center space-x-1.5">
-              <span className={`w-2.5 h-2.5 rounded-full ${isBackendActive ? 'bg-[#2ea44f] animate-pulse' : 'bg-[#d29922]'}`} />
-              <span className={`font-mono font-medium ${isBackendActive ? 'text-[#2ea44f]' : 'text-[#d29922]'}`}>
-                {isBackendActive ? 'Active' : 'Backend Offline'}
-              </span>
+          <div className="px-5 py-3 border-b border-[#30363d] flex flex-col space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-400">System Status</span>
+              <div className="flex items-center space-x-1.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${isBackendActive ? 'bg-[#2ea44f] animate-pulse' : 'bg-[#d29922]'}`} />
+                <span className={`font-mono font-medium ${isBackendActive ? 'text-[#2ea44f]' : 'text-[#d29922]'}`}>
+                  {isBackendActive ? 'Active' : 'Backend Offline'}
+                </span>
+              </div>
             </div>
+            {ENABLE_MOCK_DATA && (
+              <div className="flex items-center justify-between pt-1 border-t border-[#30363d]/50">
+                <span className="text-gray-400">Data Mode</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono tracking-wide bg-purple-950 text-purple-400 border border-purple-800">
+                  DEMO DATA
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Navigation Links */}
@@ -168,9 +178,14 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
             <div className="text-xs text-gray-400 flex items-center space-x-1.5 font-mono">
               <span className="hover:underline cursor-pointer" onClick={() => navigate('/runs')}>Runs</span>
               <span>/</span>
-              {currentRun && (
+              {currentRun ? (
                 <>
                   <span className="text-gray-300 font-semibold">{currentRun.filename}</span>
+                  <span>/</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-gray-300 font-semibold text-gray-500">No run selected</span>
                   <span>/</span>
                 </>
               )}
@@ -203,12 +218,18 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
           {/* Right info: Metric badges & Action Buttons */}
           <div className="flex items-center space-x-4">
-            {currentRun && (
-              <div className="hidden lg:flex items-center space-x-3 text-xs border-r border-[#30363d] pr-4">
-                
-                {/* Safe for ERP badge */}
-                <div className="flex items-center space-x-1.5">
-                  <span className="text-gray-400">Safe for ERP:</span>
+            {ENABLE_MOCK_DATA && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono tracking-wide bg-purple-950 text-purple-400 border border-purple-800">
+                DEMO DATA
+              </span>
+            )}
+            
+            <div className="hidden lg:flex items-center space-x-3 text-xs border-r border-[#30363d] pr-4">
+              
+              {/* Safe for ERP badge */}
+              <div className="flex items-center space-x-1.5">
+                <span className="text-gray-400">Safe for ERP:</span>
+                {currentRun ? (
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono tracking-wide ${
                     currentRun.status === 'safe_for_erp'
                       ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
@@ -218,27 +239,35 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
                   }`}>
                     {currentRun.status === 'safe_for_erp' ? 'SAFE' : currentRun.status === 'needs_review' ? 'REVIEW' : 'FAILED'}
                   </span>
-                </div>
-
-                {/* Confidence */}
-                <div className="flex items-center space-x-1">
-                  <span className="text-gray-400">Confidence:</span>
-                  <span className="font-mono text-white font-semibold">{(currentRun.confidence * 100).toFixed(1)}%</span>
-                </div>
-
-                {/* Coverage */}
-                <div className="flex items-center space-x-1">
-                  <span className="text-gray-400">Coverage:</span>
-                  <span className="font-mono text-white font-semibold">{(currentRun.token_coverage * 100).toFixed(1)}%</span>
-                </div>
-
-                {/* Representability */}
-                <div className="flex items-center space-x-1">
-                  <span className="text-gray-400">TSR:</span>
-                  <span className="font-mono text-white font-semibold">{(currentRun.representability_score * 100).toFixed(1)}%</span>
-                </div>
+                ) : (
+                  <span className="font-mono text-white font-semibold">--</span>
+                )}
               </div>
-            )}
+
+              {/* Confidence */}
+              <div className="flex items-center space-x-1">
+                <span className="text-gray-400">Confidence:</span>
+                <span className="font-mono text-white font-semibold">
+                  {currentRun ? `${(currentRun.confidence * 100).toFixed(1)}%` : '--'}
+                </span>
+              </div>
+
+              {/* Coverage */}
+              <div className="flex items-center space-x-1">
+                <span className="text-gray-400">Coverage:</span>
+                <span className="font-mono text-white font-semibold">
+                  {currentRun ? `${(currentRun.token_coverage * 100).toFixed(1)}%` : '--'}
+                </span>
+              </div>
+
+              {/* Representability */}
+              <div className="flex items-center space-x-1">
+                <span className="text-gray-400">TSR:</span>
+                <span className="font-mono text-white font-semibold">
+                  {currentRun ? `${(currentRun.representability_score * 100).toFixed(1)}%` : '--'}
+                </span>
+              </div>
+            </div>
 
             {/* Actions */}
             <div className="flex items-center space-x-2">
