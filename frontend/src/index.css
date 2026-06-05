@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #0b0f17;
+  color: #c9d1d9;
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom Scrollbar for dense developer dashboard */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #21262d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
+}
+
+/* Scrollable container styling */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #21262d #0d1117;
+}
+
+/* Selection highlight color */
+::selection {
+  background-color: rgba(56, 139, 253, 0.4);
+  color: #ffffff;
+}
+
+/* Code monospace formatting helper */
+.font-mono-custom {
+  font-family: var(--font-mono);
+}
+
+/* Image viewer pan & zoom container */
+.image-zoom-container {
+  cursor: grab;
+}
+
+.image-zoom-container:active {
+  cursor: grabbing;
+}
