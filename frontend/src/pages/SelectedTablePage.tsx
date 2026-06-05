@@ -30,7 +30,7 @@ export const SelectedTablePage: React.FC = () => {
         const mappings = await apiClient.getSemanticMapping(activeId);
         setSemanticCols(mappings);
 
-        if (table && table.cells.length > 1 && table.cells[1] && table.cells[1].length > 0) {
+        if (table && Array.isArray(table.cells) && table.cells.length > 1 && Array.isArray(table.cells[1]) && table.cells[1].length > 0) {
           // Default select the first data cell
           setSelectedCellId(table.cells[1][0].cell_id);
         }
@@ -66,8 +66,28 @@ export const SelectedTablePage: React.FC = () => {
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
           Backend response did not contain structured table data.
         </div>
-      ) : (
-        <>
+      ) : (() => {
+        // Defensive grid extraction
+        const grid: TableCell[][] = Array.isArray(selectedTable?.cells) ? selectedTable.cells : [];
+        const headerRow: TableCell[] = Array.isArray(grid[0]) ? grid[0] : [];
+
+        if (!grid.length || !headerRow.length) {
+          return (
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 space-y-3">
+              <div className="text-center text-amber-400 text-sm font-semibold">
+                Selected table exists but no renderable cell grid was built.
+              </div>
+              <div className="text-center text-gray-500 text-xs font-mono space-y-1">
+                <div>Table ID: <span className="text-[#00f0ff]">{selectedTable.table_id}</span></div>
+                <div>Rows: {selectedTable.rows} | Cols: {selectedTable.cols}</div>
+                <div>Cells array length: {Array.isArray(selectedTable.cells) ? selectedTable.cells.length : 'N/A'}</div>
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <>
           {/* Top Metric Cards */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             
@@ -131,7 +151,7 @@ export const SelectedTablePage: React.FC = () => {
                     <thead className="bg-[#0d1117] border-b border-[#30363d] text-[10px]">
                       <tr>
                         <th className="p-2 border-r border-[#30363d] text-center text-gray-600 w-10">#</th>
-                        {selectedTable.cells[0].map((hdr, cIdx) => {
+                        {headerRow.map((hdr, cIdx) => {
                           const semCol = semanticCols.find(sc => sc.col_id === cIdx);
                           return (
                             <th key={cIdx} className="p-3 border-r border-[#30363d] text-gray-400 align-top min-w-[130px]">
@@ -151,12 +171,14 @@ export const SelectedTablePage: React.FC = () => {
 
                     {/* Table Body rows */}
                     <tbody className="divide-y divide-[#30363d]">
-                      {selectedTable.cells.slice(1).map((rowCells, rIdx) => (
+                      {grid.slice(1).map((rowCells, rIdx) => {
+                        const safeRow = Array.isArray(rowCells) ? rowCells : [];
+                        return (
                         <tr key={rIdx} className="hover:bg-[#1f242c]/50">
                           <td className="p-2 border-r border-[#30363d] text-center text-gray-600 bg-[#0d1117] select-none">
                             {(rIdx + 1).toString().padStart(2, '0')}
                           </td>
-                          {rowCells.map(cell => {
+                          {safeRow.map(cell => {
                             const isSelected = selectedCellId === cell.cell_id;
                             
                             let cellStyles = '';
@@ -181,7 +203,8 @@ export const SelectedTablePage: React.FC = () => {
                             );
                           })}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
 
                   </table>
@@ -313,7 +336,8 @@ export const SelectedTablePage: React.FC = () => {
 
           </div>
         </>
-      )}
+        );
+      })()}
 
     </div>
   );

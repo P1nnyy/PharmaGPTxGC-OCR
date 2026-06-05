@@ -313,6 +313,235 @@ export const getDetailsData = (runId: string): any | null => {
   return null;
 };
 
+/**
+ * Extracts a numeric index from a row/col identifier.
+ * Handles: finite number, numeric string "14", prefixed string "row_14" / "col_0".
+ * Returns null if extraction fails.
+ */
+function extractIndex(value: any, _prefix: 'row' | 'col'): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    // Direct numeric string: "14", "0"
+    if (/^\d+$/.test(value)) return Number(value);
+    // Prefixed: "row_14", "col_0", "r_2", "c_5"
+    const match = value.match(/(\d+)$/);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+/**
+ * Builds a dense TableCell[][] grid from backend cells that use string IDs
+ * like row_id="row_14", col_id="col_0". Maps sparse row/col keys to dense
+ * 0-based indexes so the resulting 2D array has no gaps.
+ *
+ * For Abka heuristic_region_6:
+ *   row_14, row_15 → dense rows 0, 1
+ *   col_0..col_5   → dense cols 0..5
+ */
+function buildDenseTableGrid(rawCells: any[]): TableCell[][] {
+  if (!Array.isArray(rawCells) || rawCells.length === 0) return [];
+
+  // ----- Collect all unique raw row and col keys -----
+  const rowKeySet = new Set<string>();
+  const colKeySet = new Set<string>();
+
+  for (const cell of rawCells) {
+    const rawRow = String(cell.row_index ?? cell.row_id ?? '0');
+    const rawCol = String(cell.col_index ?? cell.col_id ?? '0');
+    rowKeySet.add(rawRow);
+    colKeySet.add(rawCol);
+  }
+
+  // ----- Sort keys by their extracted numeric index -----
+  const sortByIndex = (a: string, b: string, prefix: 'row' | 'col'): number => {
+    const ia = extractIndex(a, prefix);
+    const ib = extractIndex(b, prefix);
+    if (ia !== null && ib !== null) return ia - ib;
+    if (ia !== null) return -1;
+    if (ib !== null) return 1;
+    return a.localeCompare(b);
+  };
+
+  const sortedRowKeys = [...rowKeySet].sort((a, b) => sortByIndex(a, b, 'row'));
+  const sortedColKeys = [...colKeySet].sort((a, b) => sortByIndex(a, b, 'col'));
+
+  // ----- Map raw keys to dense 0-based indexes -----
+  const rowToDense: Record<string, number> = {};
+  sortedRowKeys.forEach((key, idx) => { rowToDense[key] = idx; });
+
+  const colToDense: Record<string, number> = {};
+  sortedColKeys.forEach((key, idx) => { colToDense[key] = idx; });
+
+  const numRows = sortedRowKeys.length;
+  const numCols = sortedColKeys.length;
+
+  // ----- Initialize empty grid -----
+  const grid: TableCell[][] = Array.from({ length: numRows }, (_, r) =>
+    Array.from({ length: numCols }, (_, c) => ({
+      cell_id: `c_${r}_${c}`,
+      row_id: r,
+      col_id: c,
+      text: '',
+      confidence: 1.0,
+      semantic_label: '',
+      bbox: [0, 0, 0, 0] as [number, number, number, number],
+      normalized_bbox: [0, 0, 0, 0] as [number, number, number, number],
+      source_blocks: [] as string[],
+      status: 'good' as const,
+      warnings: [] as string[],
+    }))
+  );
+
+  // ----- Populate grid with actual cell data -----
+  for (const cell of rawCells) {
+    const rawRow = String(cell.row_index ?? cell.row_id ?? '0');
+    const rawCol = String(cell.col_index ?? cell.col_id ?? '0');
+    const denseRow = rowToDense[rawRow] ?? 0;
+    const denseCol = colToDense[rawCol] ?? 0;
+
+    const conf = cell.confidence ?? cell.assignment_confidence ?? 1.0;
+    const bbox = normalizeBBox(cell) || [0, 0, 0, 0] as [number, number, number, number];
+    const nbbox = normalizeBBox(cell.normalized_bbox) || bbox;
+
+    const status: 'good' | 'warning' | 'error' =
+      cell.status || (conf < 0.6 ? 'error' : conf < 0.85 ? 'warning' : 'good');
+
+    grid[denseRow][denseCol] = {
+      cell_id: cell.cell_id || `c_${denseRow}_${denseCol}`,
+      row_id: denseRow,
+      col_id: denseCol,
+      text: cell.text || '',
+      confidence: conf,
+      semantic_label: cell.semantic_label || cell.label || '',
+      bbox: bbox as [number, number, number, number],
+      normalized_bbox: nbbox as [number, number, number, number],
+      source_blocks: cell.mapped_block_ids || cell.source_blocks || [],
+      status,
+      warnings: cell.warnings || [],
+    };
+  }
+
+  return grid;
+}
+
+// ----- Footer/bank/tax/metadata text patterns for penalizing non-item regions -----
+const FOOTER_PHRASES = /\b(bank\s*detail|account|ifsc|neft|rtgs|branch|upi|terms?\s*(?:and|&)\s*condition|subject\s*to|disclaimer|e\.?\s*&?\s*o\.?\s*e|signature|authorised|stamp|for\s*m\/s|goods\s*once\s*sold|cheque|self|bearer|original\s*copy|duplicate\s*copy)\b/i;
+
+/**
+ * Selects the main medicine/item table from the normalized diagnostics object.
+ * Priority chain:
+ *  1. detail.selected_table.table_id (explicit backend selection)
+ *  2. detail.metrics.selected_main_table_id (metric-level selection)
+ *  3. detail.metrics.main_table_candidate_scores[0].table_id (ranked candidates)
+ *  4. detail.metrics.tsr_candidate_decision.selected mapped to structured table
+ *  5. Heuristic scoring across structured_tables
+ *  6. structured_tables[0] fallback
+ *
+ * Returns the table object from structured_tables, or null if none found.
+ */
+export function selectMainTable(detail: any): any {
+  const tables: any[] = detail?.structured_tables;
+  if (!Array.isArray(tables) || tables.length === 0) {
+    // Fall through to other shapes
+    return detail?.selected_table || detail?.main_table || null;
+  }
+
+  // Build a quick lookup by table_id
+  const byId: Record<string, any> = {};
+  for (const t of tables) {
+    if (t.table_id) byId[t.table_id] = t;
+  }
+
+  const findById = (id: string | undefined | null): any | null => {
+    if (!id || id === 'unknown') return null;
+    return byId[id] ?? null;
+  };
+
+  // ---------- 1. Explicit backend selection ----------
+  if (detail.selected_table?.table_id) {
+    const match = findById(detail.selected_table.table_id);
+    if (match) return match;
+  }
+
+  // ---------- 2. metrics.selected_main_table_id ----------
+  const metrics = detail.metrics || detail.metadata?.metrics;
+  if (metrics?.selected_main_table_id) {
+    const match = findById(metrics.selected_main_table_id);
+    if (match) return match;
+  }
+
+  // ---------- 3. metrics.main_table_candidate_scores[0] ----------
+  if (Array.isArray(metrics?.main_table_candidate_scores) && metrics.main_table_candidate_scores.length > 0) {
+    const topId = metrics.main_table_candidate_scores[0]?.table_id;
+    const match = findById(topId);
+    if (match) return match;
+  }
+
+  // ---------- 4. tsr_candidate_decision.selected ----------
+  const tsrDecision = detail.tsr_candidate_decision || metrics?.tsr_candidate_decision;
+  if (tsrDecision?.selected) {
+    // tsr_candidate_decision.selected is a source key like "heuristic_anchor",
+    // not a table_id directly. But the candidate may reference a table_id.
+    const cand = tsrDecision.candidates?.[tsrDecision.selected];
+    if (cand?.table_id) {
+      const match = findById(cand.table_id);
+      if (match) return match;
+    }
+    // Also try matching the selected key itself as a table_id prefix
+    const match = findById(tsrDecision.selected);
+    if (match) return match;
+  }
+
+  // ---------- 5. Heuristic scoring ----------
+  let bestTable: any = null;
+  let bestScore = -Infinity;
+
+  for (const t of tables) {
+    const rows = t.rows ?? (Array.isArray(t.cells) ? new Set(t.cells.map((c: any) => c.row_index ?? c.row_id ?? 0)).size : 0);
+    const cols = t.cols ?? t.columns ?? (Array.isArray(t.cells) ? new Set(t.cells.map((c: any) => c.col_index ?? c.col_id ?? 0)).size : 0);
+    const cellCount = Array.isArray(t.cells) ? t.cells.length : 0;
+
+    let score = 0;
+
+    // Dimensional bonuses
+    if (rows >= 2) score += 50;
+    if (cols >= 4) score += 50;
+    if (cellCount >= 8) score += 30;
+    score += Math.min(rows * 5, 100);   // row count bonus, capped
+    score += Math.min(cols * 3, 30);    // col count bonus, capped
+
+    // Medicine table type bonus
+    if (t.region_type === 'medicine_table') score += 200;
+
+    // Sample text evidence
+    const sampleText = (t.sample || '') + ' ' +
+      (Array.isArray(t.cells) ? t.cells.map((c: any) => c.text || '').join(' ') : '');
+
+    if (/\b(batch|lot)\b/i.test(sampleText)) score += 30;
+    if (/\b(exp(?:iry)?|mfg)\b/i.test(sampleText)) score += 30;
+    if (/\b(hsn|sac)\b/i.test(sampleText)) score += 20;
+    if (/\d+\.\d{2}/.test(sampleText)) score += 15;  // money-like decimals
+    if (/\d{2}\/\d{2,4}/.test(sampleText)) score += 10; // date-like
+
+    // Penalize footer/bank/tax/metadata regions
+    if (FOOTER_PHRASES.test(sampleText)) score -= 200;
+    if (t.region_type && /footer|bank|tax|metadata|header|summary/i.test(t.region_type)) score -= 150;
+
+    // Penalize single-row or single-column tables
+    if (rows <= 1) score -= 80;
+    if (cols <= 1) score -= 80;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestTable = t;
+    }
+  }
+
+  // ---------- 6. Ultimate fallback ----------
+  return bestTable || tables[0];
+}
+
 // Normalizes and preserves multi-path backend diagnostics formats
 export function normalizeBackendDiagnostics(backendData: any): any {
   if (!backendData || typeof backendData !== 'object') {
@@ -376,7 +605,8 @@ export function normalizeBackendDiagnostics(backendData: any): any {
     backendData.metadata?.semantic_columns || 
     backendData.column_semantics || 
     backendData.metadata?.column_semantics || 
-    backendData.structured_tables?.[0]?.metadata?.column_semantics;
+    backendData.structured_tables?.[0]?.metadata?.column_semantics ||
+    selectMainTable(backendData)?.metadata?.column_semantics;
   if (semantic_columns) {
     res.semantic_columns = semantic_columns;
     res.metadata.semantic_columns = semantic_columns;
@@ -1167,10 +1397,18 @@ export const apiClient = {
         confidence: conf,
         token_coverage: tokCov,
         representability_score: repScore,
-        selected_table_id: normalizedDetail.structured_tables?.[0]?.table_id || 'ITEMS_001',
-        selected_table_shape: normalizedDetail.structured_tables?.[0] 
-          ? `${normalizedDetail.structured_tables[0].cells?.filter((c: any) => (c.col_index ?? c.col_id) === 0).length ?? 4} Rows x ${normalizedDetail.structured_tables[0].cells?.filter((c: any) => (c.row_index ?? c.row_id) === 0).length ?? 8} Columns`
-          : '4 Rows x 8 Columns',
+        // Use backend-ranked main table instead of structured_tables[0]
+        selected_table_id: (() => {
+          const mainTbl = selectMainTable(normalizedDetail);
+          return mainTbl?.table_id || 'ITEMS_001';
+        })(),
+        selected_table_shape: (() => {
+          const mainTbl = selectMainTable(normalizedDetail);
+          if (!mainTbl) return '0 Rows x 0 Columns';
+          const rows = mainTbl.rows ?? (Array.isArray(mainTbl.cells) ? new Set(mainTbl.cells.map((c: any) => c.row_index ?? c.row_id ?? 0)).size : 0);
+          const cols = mainTbl.cols ?? mainTbl.columns ?? (Array.isArray(mainTbl.cells) ? new Set(mainTbl.cells.map((c: any) => c.col_index ?? c.col_id ?? 0)).size : 0);
+          return `${rows} Rows x ${cols} Columns`;
+        })(),
         missing_fields: normalizedDetail.quality_gate?.missing_fields || (normalizedDetail.metadata?.quality_gate?.missing_fields || []),
         row_math_status: normalizedDetail.quality_gate?.row_math_status || (normalizedDetail.metadata?.quality_gate?.row_math_status || 'pass'),
         is_demo: false
@@ -1391,9 +1629,13 @@ export const apiClient = {
           detail.reconstructed_tables;
         
         if (Array.isArray(structured_tables)) {
+          // Use selectMainTable to determine which table_id is the selected one
+          const mainTable = selectMainTable(detail);
+          const mainTableId = mainTable?.table_id;
           structured_tables.forEach((table: any, index: number) => {
+            const tableId = table.table_id || `table_${index + 1}`;
             candidates.push({
-              table_id: table.table_id || `table_${index + 1}`,
+              table_id: tableId,
               source_engine: table.source_engine || 'backend_structured_table',
               rows: table.rows || 0,
               cols: table.cols || table.columns || 0,
@@ -1402,8 +1644,8 @@ export const apiClient = {
               cell_count: table.cell_count || table.cells?.length || 0,
               non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
               score: table.score || table.confidence || 1.0,
-              labels: [table.table_id || `table_${index + 1}`],
-              selected: index === 0,
+              labels: [tableId],
+              selected: mainTableId ? (tableId === mainTableId) : (index === 0),
               rejection_reason: undefined,
               representability_score: table.representability_score || 1.0,
               preview_cells: (table.cells || []).slice(0, 10).map((cell: any) => ({
@@ -1457,69 +1699,12 @@ export const apiClient = {
         return getMockSelectedTable(runId);
       }
 
-      let table = null;
-      if (detail.structured_tables && detail.structured_tables.length > 0) {
-        table = detail.structured_tables[0];
-      } else if (detail.selected_table) {
-        table = detail.selected_table;
-      } else if (detail.main_table) {
-        table = detail.main_table;
-      } else if (detail.tables && detail.tables.length > 0) {
-        table = detail.tables[0];
-      } else if (detail.reconstructed_tables && detail.reconstructed_tables.length > 0) {
-        table = detail.reconstructed_tables[0];
-      }
+      // Use backend-ranked main table selection instead of structured_tables[0]
+      const table = selectMainTable(detail);
 
       if (table) {
-        const cells: TableCell[][] = [];
-        
-        if (table.cells && Array.isArray(table.cells)) {
-          const rowMap: Record<number, TableCell[]> = {};
-          for (const cell of table.cells) {
-            const rowIdx = cell.row_index ?? cell.row_id ?? 0;
-            const colIdx = cell.col_index ?? cell.col_id ?? 0;
-            const tableCell: TableCell = {
-              cell_id: cell.cell_id || `c_${rowIdx}_${colIdx}`,
-              row_id: rowIdx,
-              col_id: colIdx,
-              text: cell.text || '',
-              confidence: cell.confidence ?? 1.0,
-              semantic_label: cell.semantic_label || cell.label || '',
-              bbox: cell.bbox || [0,0,0,0],
-              normalized_bbox: cell.normalized_bbox || [0,0,0,0],
-              source_blocks: cell.mapped_block_ids || cell.source_blocks || [],
-              status: cell.status || (cell.confidence < 0.6 ? 'error' : 'good'),
-              warnings: cell.warnings || []
-            };
-            if (!rowMap[rowIdx]) {
-              rowMap[rowIdx] = [];
-            }
-            rowMap[rowIdx][colIdx] = tableCell;
-          }
-          
-          const maxRow = Math.max(...Object.keys(rowMap).map(Number), -1);
-          for (let r = 0; r <= maxRow; r++) {
-            const rowCells = rowMap[r] || [];
-            const cleanRow: TableCell[] = [];
-            const maxCol = Math.max(...Object.keys(rowCells).map(Number), -1);
-            for (let c = 0; c <= maxCol; c++) {
-              cleanRow.push(rowCells[c] || {
-                cell_id: `c_${r}_${c}`,
-                row_id: r,
-                col_id: c,
-                text: '',
-                confidence: 1.0,
-                semantic_label: '',
-                bbox: [0,0,0,0],
-                normalized_bbox: [0,0,0,0],
-                source_blocks: [],
-                status: 'good',
-                warnings: []
-              });
-            }
-            cells.push(cleanRow);
-          }
-        }
+        // Use dense grid builder to handle string IDs like "row_14", "col_0"
+        const cells = buildDenseTableGrid(table.cells || []);
 
         return {
           table_id: table.table_id || 'ITEMS_001',
@@ -1555,7 +1740,7 @@ export const apiClient = {
         detail.semantic_columns || 
         detail.table_semantics || 
         detail.column_semantics || 
-        detail.structured_tables?.[0]?.metadata?.column_semantics;
+        selectMainTable(detail)?.metadata?.column_semantics;
 
       if (rawSemantics) {
         if (Array.isArray(rawSemantics)) {
@@ -1588,39 +1773,29 @@ export const apiClient = {
         }
       }
 
-      let table = null;
-      if (detail.structured_tables && detail.structured_tables.length > 0) {
-        table = detail.structured_tables[0];
-      } else if (detail.selected_table) {
-        table = detail.selected_table;
-      } else if (detail.main_table) {
-        table = detail.main_table;
-      } else if (detail.tables && detail.tables.length > 0) {
-        table = detail.tables[0];
-      } else if (detail.reconstructed_tables && detail.reconstructed_tables.length > 0) {
-        table = detail.reconstructed_tables[0];
-      }
+      // Use backend-ranked main table selection instead of structured_tables[0]
+      const table = selectMainTable(detail);
 
       if (table && table.cells && Array.isArray(table.cells)) {
-        const mappings: SemanticColumn[] = [];
-        const headerCells = table.cells.filter((c: any) => (c.row_index ?? c.row_id) === 0);
-        headerCells.sort((a: any, b: any) => (a.col_index ?? a.col_id) - (b.col_index ?? b.col_id));
-        for (const cell of headerCells) {
-          const colId = cell.col_index ?? cell.col_id ?? 0;
-          const predictedType = cell.semantic_label || cell.label || 'unknown';
-          mappings.push({
-            col_id: colId,
-            predicted_type: predictedType,
-            confidence: cell.confidence ?? 1.0,
-            header_text: cell.text || '',
-            sample_values: [],
-            competing_candidates: [
-              { type: predictedType, confidence: cell.confidence ?? 1.0 }
-            ],
-            conflict_resolution_reason: 'Inferred from cell headers classification'
+        // Build dense grid to handle string IDs like "row_14", "col_0"
+        const denseGrid = buildDenseTableGrid(table.cells);
+        if (denseGrid.length > 0 && denseGrid[0].length > 0) {
+          return denseGrid[0].map((hdrCell, colIdx) => {
+            const predictedType = hdrCell.semantic_label || 'unknown';
+            return {
+              col_id: colIdx,
+              predicted_type: predictedType,
+              confidence: hdrCell.confidence ?? 1.0,
+              header_text: hdrCell.text || '',
+              sample_values: [] as string[],
+              competing_candidates: [
+                { type: predictedType, confidence: hdrCell.confidence ?? 1.0 }
+              ],
+              conflict_resolution_reason: 'Inferred from cell headers classification'
+            };
           });
         }
-        return mappings;
+        return [];
       }
     }
 
