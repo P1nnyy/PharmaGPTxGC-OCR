@@ -163,9 +163,9 @@ export const SettingsPage: React.FC = () => {
               </span>
             </div>
             <button
-              onClick={() => {
+              onClick={async () => {
                 const clearSettings = window.confirm("Do you also want to clear your workbench settings/preferences?");
-                clearWorkbenchState(clearSettings);
+                await clearWorkbenchState(clearSettings);
                 showToast("Workbench state cleared successfully.");
                 setTimeout(() => {
                   navigate('/runs');

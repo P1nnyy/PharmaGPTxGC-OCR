@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient } from '../api/client';
+import { apiClient, getDetailsData, getInvoiceImageUrl, ENABLE_MOCK_DATA } from '../api/client';
 import type { OCRBlock, CandidateTable, SelectedTable, RunSummary } from '../api/types';
-import { getInvoiceImageSvgUrl } from '../api/client';
+import { normalizeBBox, mapBBoxToDisplaySpace, getRenderedImageMetrics } from '../utils/overlayGeometry';
+import type { BBox } from '../utils/overlayGeometry';
 import {
   ZoomIn,
   ZoomOut,
@@ -49,6 +50,13 @@ export const DebuggerPage: React.FC = () => {
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Geometry tracking states
+  const [runDetail, setRunDetail] = useState<any | null>(null);
+  const [imageSize, setImageSize] = useState({ width: 800, height: 1000 });
+  const [showDebugCoords, setShowDebugCoords] = useState(false);
+  const [, setMetricsTrigger] = useState(0);
+  const imageRef = useRef<HTMLImageElement>(null);
+
   // Inspector Selection state
   const [selectedObject, setSelectedObject] = useState<{
     type: 'ocr_block' | 'table_cell' | 'candidate_table' | 'none';
@@ -58,6 +66,8 @@ export const DebuggerPage: React.FC = () => {
   // UI state for modals & tooltips
   const [showAnomalyModal, setShowAnomalyModal] = useState(false);
   const [anomalyNote, setAnomalyNote] = useState('');
+
+  const missingGeometryCount = ocrBlocks.filter(b => !b.bbox || b.bbox.length !== 4).length;
   const [showForceOCRModal, setShowForceOCRModal] = useState(false);
   const [actionLoading, setActionLoading] = useState<'idle' | 'ocr' | 'reconstruct'>('idle');
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -84,6 +94,9 @@ export const DebuggerPage: React.FC = () => {
 
         const table = await apiClient.getSelectedTable(activeId);
         setSelectedTable(table);
+
+        const detail = getDetailsData(activeId);
+        setRunDetail(detail);
       } catch (err) {
         console.error('Failed to load run details:', err);
       }
@@ -108,9 +121,12 @@ export const DebuggerPage: React.FC = () => {
       const updatedTable = await apiClient.getSelectedTable(currentRunId);
       setSelectedTable(updatedTable);
       
+      const detail = getDetailsData(currentRunId);
+      setRunDetail(detail);
+      
       showToast(force ? 'Forced OCR Re-recognition completed!' : 'OCR completed successfully!');
-    } catch (err) {
-      showToast('OCR execution failed.', 'error');
+    } catch (err: any) {
+      showToast(err.message || 'OCR execution failed.', 'error');
     } finally {
       setActionLoading('idle');
       setShowForceOCRModal(false);
@@ -127,13 +143,145 @@ export const DebuggerPage: React.FC = () => {
       setCandidateTables(candidates);
       const table = await apiClient.getSelectedTable(currentRunId);
       setSelectedTable(table);
+      
+      const detail = getDetailsData(currentRunId);
+      setRunDetail(detail);
+      
       showToast('Layout Reconstruction pipeline completed!');
-    } catch (err) {
-      showToast('Reconstruction pipeline failed.', 'error');
+    } catch (err: any) {
+      showToast(err.message || 'Reconstruction pipeline failed.', 'error');
     } finally {
       setActionLoading('idle');
     }
   };
+
+  // Geometry computation helper functions
+  const getSourceSize = () => {
+    if (runDetail) {
+      // 1. image_width / image_height
+      if (typeof runDetail.image_width === 'number' && typeof runDetail.image_height === 'number') {
+        return { width: runDetail.image_width, height: runDetail.image_height };
+      }
+      // 2. metadata.image_width / metadata.image_height
+      if (runDetail.metadata && typeof runDetail.metadata.image_width === 'number' && typeof runDetail.metadata.image_height === 'number') {
+        return { width: runDetail.metadata.image_width, height: runDetail.metadata.image_height };
+      }
+      // 3. source_image_dimensions (array or object)
+      if (runDetail.source_image_dimensions) {
+        const dims = runDetail.source_image_dimensions;
+        if (Array.isArray(dims) && dims.length === 2 && typeof dims[0] === 'number' && typeof dims[1] === 'number') {
+          return { width: dims[0], height: dims[1] };
+        }
+        if (typeof dims.width === 'number' && typeof dims.height === 'number') {
+          return { width: dims.width, height: dims.height };
+        }
+      }
+      // 4. image_validation.properties.width / height
+      if (runDetail.image_validation && runDetail.image_validation.properties) {
+        const props = runDetail.image_validation.properties;
+        if (typeof props.width === 'number' && typeof props.height === 'number') {
+          return { width: props.width, height: props.height };
+        }
+      }
+    }
+    // Fallback to imageElement.naturalWidth / naturalHeight
+    if (imageRef.current && imageRef.current.naturalWidth && imageRef.current.naturalHeight) {
+      return { width: imageRef.current.naturalWidth, height: imageRef.current.naturalHeight };
+    }
+    // Ultimate fallback
+    return { width: imageSize.width, height: imageSize.height };
+  };
+
+  const sourceSize = getSourceSize();
+  const baseWidth = 800;
+  const aspectRatio = sourceSize.width > 0 ? sourceSize.height / sourceSize.width : 1.25;
+  const baseHeight = baseWidth * aspectRatio;
+
+  const metrics = getRenderedImageMetrics(imageRef.current, containerRef.current);
+
+  const getDisplayMockBBox = (x: number, y: number, w: number, h: number): BBox => {
+    const scaledBBox: BBox = [
+      (x * sourceSize.width) / 800,
+      (y * sourceSize.height) / 1000,
+      ((x + w) * sourceSize.width) / 800,
+      ((y + h) * sourceSize.height) / 1000
+    ];
+    return mapBBoxToDisplaySpace(scaledBBox, sourceSize, metrics);
+  };
+
+  const getDisplayBBox = (rawBbox: any): BBox | null => {
+    const bbox = normalizeBBox(rawBbox);
+    if (!bbox) return null;
+    return mapBBoxToDisplaySpace(bbox, sourceSize, metrics);
+  };
+
+  const isDemoRun = ENABLE_MOCK_DATA && activeRun?.is_demo === true;
+
+  const realRowBBoxes = !isDemoRun ? (() => {
+    const bboxes: BBox[] = [];
+    const rows = runDetail?.structured_tables?.[0]?.rows;
+    if (Array.isArray(rows)) {
+      for (const r of rows) {
+        const bbox = normalizeBBox(r);
+        if (bbox) bboxes.push(bbox);
+      }
+    }
+    return bboxes;
+  })() : [];
+
+  const realColBoundariesX = !isDemoRun ? (() => {
+    const xCoords = new Set<number>();
+    const columns = runDetail?.structured_tables?.[0]?.columns;
+    if (Array.isArray(columns)) {
+      for (const col of columns) {
+        const bbox = normalizeBBox(col);
+        if (bbox) {
+          xCoords.add(bbox[0]);
+          xCoords.add(bbox[2]);
+        }
+      }
+    }
+    return Array.from(xCoords).sort((a, b) => a - b);
+  })() : [];
+
+  const hasRealSelectedTableGeometry = !!(selectedTable?.bbox);
+  const hasRealCandidateTableGeometry = candidateTables.some(t => !!t.bbox);
+
+  const showMissingGeometryWarning = !isDemoRun && (
+    (settings.overlayRowBoxes && realRowBBoxes.length === 0) ||
+    (settings.overlayColBoundaries && realColBoundariesX.length === 0) ||
+    (settings.overlaySelectedTable && !hasRealSelectedTableGeometry) ||
+    (settings.overlayCandidateTables && !hasRealCandidateTableGeometry)
+  );
+
+  // Overlay HUD counts
+  const ocrBlocksTotal = ocrBlocks.length;
+  const ocrBlocksDrawable = ocrBlocks.filter(b => !!getDisplayBBox(b.bbox || b.normalized_bbox)).length;
+  const ocrBlocksMissing = ocrBlocksTotal - ocrBlocksDrawable;
+
+  const candidateTablesTotal = candidateTables.length;
+  const candidateTablesDrawable = candidateTables.filter(tbl => {
+    if (tbl.bbox) return true;
+    if (isDemoRun) return true;
+    return false;
+  }).length;
+  const candidateTablesMissing = candidateTablesTotal - candidateTablesDrawable;
+
+  const selectedTableGeometryPresent = !!(selectedTable && (selectedTable.bbox || isDemoRun));
+
+  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.naturalWidth && img.naturalHeight) {
+      setImageSize({ width: img.naturalWidth, height: img.naturalHeight });
+    }
+    setMetricsTrigger(prev => prev + 1);
+  };
+
+  useEffect(() => {
+    const handleResize = () => setMetricsTrigger(prev => prev + 1);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Zoom helpers
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.1, 2.0));
@@ -231,6 +379,24 @@ export const DebuggerPage: React.FC = () => {
               </button>
             );
           })}
+          
+          <button
+            onClick={() => setShowDebugCoords(prev => !prev)}
+            className={`px-2.5 py-1 rounded text-[11px] font-medium border font-mono transition-all cursor-pointer ${
+              showDebugCoords
+                ? 'bg-[#1f242c] border-[#58a6ff] text-[#58a6ff] font-semibold'
+                : 'bg-[#0d1117] border-[#30363d] text-gray-400 hover:text-white'
+            }`}
+          >
+            Debug Coords
+          </button>
+
+          {missingGeometryCount > 0 && (
+            <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-semibold font-mono bg-rose-950 text-rose-400 border border-rose-800 flex items-center space-x-1">
+              <AlertTriangle size={11} />
+              <span>{missingGeometryCount} OCR blocks missing geometry</span>
+            </span>
+          )}
         </div>
 
         {/* Action Controls */}
@@ -331,187 +497,325 @@ export const DebuggerPage: React.FC = () => {
             className={`flex-1 overflow-hidden relative flex items-center justify-center bg-[#0d1117] ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`}
           >
             {activeRun ? (
-              <div
-                style={{
-                  transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
-                  transformOrigin: 'center center',
-                  transition: isPanning ? 'none' : 'transform 0.1s ease-out'
-                }}
-                className="relative w-[800px] h-[1000px] select-none"
-              >
-                {/* SVG Rendered Invoice Image beneath */}
-                <img
-                  src={getInvoiceImageSvgUrl(activeRun.filename)}
-                  alt="Invoice Scanned Document"
-                  className="w-full h-full pointer-events-none select-none"
-                  draggable={false}
-                />
+              <>
+                {/* 1. Zoomed / Panned Image Wrapper */}
+                <div
+                  style={{
+                    transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
+                    transformOrigin: 'center center',
+                    transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+                    width: `${baseWidth}px`,
+                    height: `${baseHeight}px`
+                  }}
+                  className="relative select-none"
+                >
+                  {/* SVG Rendered Invoice Image beneath */}
+                  <img
+                    ref={imageRef}
+                    src={getInvoiceImageUrl(activeRun.run_id, activeRun.filename)}
+                    alt="Invoice Scanned Document"
+                    className="w-full h-full pointer-events-none select-none"
+                    draggable={false}
+                    onLoad={handleImageLoad}
+                  />
+                </div>
 
-                {/* SVG OVERLAY RECTANGLES LAYER */}
+                {/* 2. SVG OVERLAY RECTANGLES LAYER (Absolute over container, pointer-events-none) */}
                 <svg
-                  width="800"
-                  height="1000"
-                  viewBox="0 0 800 1000"
-                  className="absolute inset-0 w-full h-full pointer-events-auto"
+                  className="absolute inset-0 w-full h-full pointer-events-none z-10"
                 >
                   
                   {/* Row Boxes overlay */}
                   {settings.overlayRowBoxes && (
                     <g opacity="0.15">
-                      <rect x="40" y="255" width="720" height="40" fill="#a855f7" stroke="#c084fc" strokeWidth="2" />
-                      <rect x="40" y="295" width="720" height="40" fill="#a855f7" stroke="#c084fc" strokeWidth="2" />
-                      <rect x="40" y="335" width="720" height="40" fill="#a855f7" stroke="#c084fc" strokeWidth="2" />
+                      {isDemoRun ? (
+                        <>
+                          {(() => {
+                            const [xMin, yMin, xMax, yMax] = getDisplayMockBBox(40, 255, 720, 40);
+                            return <rect x={xMin} y={yMin} width={xMax - xMin} height={yMax - yMin} fill="#a855f7" stroke="#c084fc" strokeWidth="2" />;
+                          })()}
+                          {(() => {
+                            const [xMin, yMin, xMax, yMax] = getDisplayMockBBox(40, 295, 720, 40);
+                            return <rect x={xMin} y={yMin} width={xMax - xMin} height={yMax - yMin} fill="#a855f7" stroke="#c084fc" strokeWidth="2" />;
+                          })()}
+                          {(() => {
+                            const [xMin, yMin, xMax, yMax] = getDisplayMockBBox(40, 335, 720, 40);
+                            return <rect x={xMin} y={yMin} width={xMax - xMin} height={yMax - yMin} fill="#a855f7" stroke="#c084fc" strokeWidth="2" />;
+                          })()}
+                        </>
+                      ) : (
+                        realRowBBoxes.map((bbox, idx) => {
+                          const displayBbox = mapBBoxToDisplaySpace(bbox, sourceSize, metrics);
+                          const [xMin, yMin, xMax, yMax] = displayBbox;
+                          return (
+                            <rect
+                              key={idx}
+                              x={xMin}
+                              y={yMin}
+                              width={xMax - xMin}
+                              height={yMax - yMin}
+                              fill="#a855f7"
+                              stroke="#c084fc"
+                              strokeWidth="2"
+                            />
+                          );
+                        })
+                      )}
                     </g>
                   )}
 
                   {/* Column Boundaries overlay */}
                   {settings.overlayColBoundaries && (
                     <g opacity="0.45" stroke="#38bdf8" strokeWidth="1.5" strokeDasharray="3 3">
-                      <line x1="40" y1="220" x2="40" y2="420" />
-                      <line x1="80" y1="220" x2="80" y2="420" />
-                      <line x1="330" y1="220" x2="330" y2="420" />
-                      <line x1="430" y1="220" x2="430" y2="420" />
-                      <line x1="510" y1="220" x2="510" y2="420" />
-                      <line x1="560" y1="220" x2="560" y2="420" />
-                      <line x1="620" y1="220" x2="620" y2="420" />
-                      <line x1="680" y1="220" x2="680" y2="420" />
-                      <line x1="760" y1="220" x2="760" y2="420" />
+                      {isDemoRun ? (
+                        [40, 80, 330, 430, 510, 560, 620, 680, 760].map((colX, idx) => {
+                          const [xMin, yMin, , yMax] = getDisplayMockBBox(colX, 220, 0, 200);
+                          return <line key={idx} x1={xMin} y1={yMin} x2={xMin} y2={yMax} />;
+                        })
+                      ) : (
+                        realColBoundariesX.map((colX, idx) => {
+                          const tableBBox = selectedTable?.bbox || (runDetail?.structured_tables?.[0] ? normalizeBBox(runDetail.structured_tables[0]) : null);
+                          const yMin = tableBBox ? tableBBox[1] : 0;
+                          const yMax = tableBBox ? tableBBox[3] : sourceSize.height;
+                          
+                          const [xMin, yMinDisplay, , yMaxDisplay] = mapBBoxToDisplaySpace([colX, yMin, colX, yMax], sourceSize, metrics);
+                          return <line key={idx} x1={xMin} y1={yMinDisplay} x2={xMin} y2={yMaxDisplay} />;
+                        })
+                      )}
                     </g>
                   )}
 
                   {/* Selected Table outline */}
-                  {settings.overlaySelectedTable && (
-                    <rect
-                      x="38"
-                      y="218"
-                      width="724"
-                      height="204"
-                      fill="none"
-                      stroke="#00f0ff"
-                      strokeWidth="2.5"
-                      opacity="0.8"
-                    />
-                  )}
+                  {settings.overlaySelectedTable && (() => {
+                    if (isDemoRun) {
+                      const [xMin, yMin, xMax, yMax] = getDisplayMockBBox(38, 218, 724, 204);
+                      return (
+                        <rect
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="none"
+                          stroke="#00f0ff"
+                          strokeWidth="2.5"
+                          opacity="0.8"
+                        />
+                      );
+                    } else if (selectedTable?.bbox) {
+                      const [xMin, yMin, xMax, yMax] = mapBBoxToDisplaySpace(selectedTable.bbox, sourceSize, metrics);
+                      return (
+                        <rect
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="none"
+                          stroke="#00f0ff"
+                          strokeWidth="2.5"
+                          opacity="0.8"
+                        />
+                      );
+                    }
+                    return null;
+                  })()}
 
                   {/* Candidate Table outlines */}
-                  {settings.overlayCandidateTables && candidateTables.map(tbl => (
-                    <rect
-                      key={tbl.table_id}
-                      x={tbl.table_id.includes('001') ? 36 : 320}
-                      y={tbl.table_id.includes('001') ? 216 : 50}
-                      width={tbl.table_id.includes('001') ? 728 : 440}
-                      height={tbl.table_id.includes('001') ? 208 : 100}
-                      fill="none"
-                      stroke={tbl.selected ? '#00f0ff' : '#f59e0b'}
-                      strokeWidth="1.5"
-                      opacity="0.65"
-                      className="cursor-pointer"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedObject({ type: 'candidate_table', data: tbl });
-                      }}
-                      onMouseEnter={() => setHoveredOverlay({ id: tbl.table_id, text: `TSR Candidate: ${tbl.source_engine} Grid (${tbl.rows}x${tbl.cols})`, confidence: tbl.score })}
-                      onMouseLeave={() => setHoveredOverlay(null)}
-                    />
-                  ))}
+                  {settings.overlayCandidateTables && candidateTables.map(tbl => {
+                    if (tbl.bbox) {
+                      const [xMin, yMin, xMax, yMax] = mapBBoxToDisplaySpace(tbl.bbox, sourceSize, metrics);
+                      return (
+                        <rect
+                          key={tbl.table_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="none"
+                          stroke={tbl.selected ? '#00f0ff' : '#f59e0b'}
+                          strokeWidth="1.5"
+                          opacity="0.65"
+                          className="cursor-pointer pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'candidate_table', data: tbl });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: tbl.table_id, text: `TSR Candidate: ${tbl.source_engine} Grid (${tbl.rows}x${tbl.cols})`, confidence: tbl.score })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    } else if (isDemoRun) {
+                      const tblX = tbl.table_id.includes('001') ? 36 : 320;
+                      const tblY = tbl.table_id.includes('001') ? 216 : 50;
+                      const tblW = tbl.table_id.includes('001') ? 728 : 440;
+                      const tblH = tbl.table_id.includes('001') ? 208 : 100;
+                      const [xMin, yMin, xMax, yMax] = getDisplayMockBBox(tblX, tblY, tblW, tblH);
+                      return (
+                        <rect
+                          key={tbl.table_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="none"
+                          stroke={tbl.selected ? '#00f0ff' : '#f59e0b'}
+                          strokeWidth="1.5"
+                          opacity="0.65"
+                          className="cursor-pointer pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'candidate_table', data: tbl });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: tbl.table_id, text: `TSR Candidate: ${tbl.source_engine} Grid (${tbl.rows}x${tbl.cols})`, confidence: tbl.score })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    }
+                    return null;
+                  })}
 
                   {/* Raw OCR Blocks */}
                   {settings.overlayOCRBlocks && ocrBlocks
                     .filter(b => b.status !== 'orphan' && b.status !== 'low_confidence')
-                    .map(b => (
-                      <rect
-                        key={b.block_id}
-                        x={b.bbox[0]}
-                        y={b.bbox[1]}
-                        width={b.bbox[2] - b.bbox[0]}
-                        height={b.bbox[3] - b.bbox[1]}
-                        fill="rgba(56, 139, 253, 0.05)"
-                        stroke="#58a6ff"
-                        strokeWidth="1"
-                        opacity="0.75"
-                        className="cursor-pointer hover:fill-blue-500/20"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedObject({ type: 'ocr_block', data: b });
-                        }}
-                        onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: b.text, confidence: b.confidence })}
-                        onMouseLeave={() => setHoveredOverlay(null)}
-                      />
-                    ))}
+                    .map(b => {
+                      const displayBbox = getDisplayBBox(b.bbox || b.normalized_bbox);
+                      if (!displayBbox) return null;
+                      const [xMin, yMin, xMax, yMax] = displayBbox;
+                      return (
+                        <rect
+                          key={b.block_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="rgba(56, 139, 253, 0.05)"
+                          stroke="#58a6ff"
+                          strokeWidth="1"
+                          opacity="0.75"
+                          className="cursor-pointer hover:fill-blue-500/20 pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'ocr_block', data: b });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: b.text, confidence: b.confidence })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    })}
 
                   {/* Orphan Tokens highlight */}
                   {settings.overlayOrphans && ocrBlocks
                     .filter(b => b.status === 'orphan')
-                    .map(b => (
-                      <rect
-                        key={b.block_id}
-                        x={b.bbox[0]}
-                        y={b.bbox[1]}
-                        width={b.bbox[2] - b.bbox[0]}
-                        height={b.bbox[3] - b.bbox[1]}
-                        fill="rgba(239, 68, 68, 0.08)"
-                        stroke="#ef4444"
-                        strokeWidth="1.5"
-                        strokeDasharray="3 3"
-                        className="cursor-pointer hover:fill-red-500/20"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedObject({ type: 'ocr_block', data: b });
-                        }}
-                        onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: `Orphan: ${b.text}`, confidence: b.confidence })}
-                        onMouseLeave={() => setHoveredOverlay(null)}
-                      />
-                    ))}
+                    .map(b => {
+                      const displayBbox = getDisplayBBox(b.bbox || b.normalized_bbox);
+                      if (!displayBbox) return null;
+                      const [xMin, yMin, xMax, yMax] = displayBbox;
+                      return (
+                        <rect
+                          key={b.block_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="rgba(239, 68, 68, 0.08)"
+                          stroke="#ef4444"
+                          strokeWidth="1.5"
+                          strokeDasharray="3 3"
+                          className="cursor-pointer hover:fill-red-500/20 pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'ocr_block', data: b });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: `Orphan: ${b.text}`, confidence: b.confidence })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    })}
 
                   {/* Low Confidence Blocks highlight */}
                   {settings.overlayLowConfidence && ocrBlocks
                     .filter(b => b.status === 'low_confidence')
-                    .map(b => (
-                      <rect
-                        key={b.block_id}
-                        x={b.bbox[0]}
-                        y={b.bbox[1]}
-                        width={b.bbox[2] - b.bbox[0]}
-                        height={b.bbox[3] - b.bbox[1]}
-                        fill="rgba(245, 158, 11, 0.08)"
-                        stroke="#f59e0b"
-                        strokeWidth="1.5"
-                        className="cursor-pointer hover:fill-amber-500/20"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedObject({ type: 'ocr_block', data: b });
-                        }}
-                        onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: `Low Conf: ${b.text}`, confidence: b.confidence })}
-                        onMouseLeave={() => setHoveredOverlay(null)}
-                      />
-                    ))}
+                    .map(b => {
+                      const displayBbox = getDisplayBBox(b.bbox || b.normalized_bbox);
+                      if (!displayBbox) return null;
+                      const [xMin, yMin, xMax, yMax] = displayBbox;
+                      return (
+                        <rect
+                          key={b.block_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="rgba(245, 158, 11, 0.08)"
+                          stroke="#f59e0b"
+                          strokeWidth="1.5"
+                          className="cursor-pointer hover:fill-amber-500/20 pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'ocr_block', data: b });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: b.block_id, text: `Low Conf: ${b.text}`, confidence: b.confidence })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    })}
 
                   {/* Selected Table Cells overlap (handles cell clicking) */}
                   {selectedTable && selectedTable.cells.map((rowCells) => 
-                    rowCells.map(cell => (
-                      <rect
-                        key={cell.cell_id}
-                        x={cell.bbox[0]}
-                        y={cell.bbox[1]}
-                        width={cell.bbox[2] - cell.bbox[0]}
-                        height={cell.bbox[3] - cell.bbox[1]}
-                        fill="none"
-                        stroke="transparent"
-                        strokeWidth="1"
-                        className="cursor-pointer pointer-events-auto"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedObject({ type: 'table_cell', data: cell });
-                        }}
-                        onMouseEnter={() => setHoveredOverlay({ id: cell.cell_id, text: `Cell (${cell.row_id}, ${cell.col_id}): ${cell.text}`, confidence: cell.confidence })}
-                        onMouseLeave={() => setHoveredOverlay(null)}
-                      />
-                    ))
+                    rowCells.map(cell => {
+                      const displayBbox = getDisplayBBox(cell.bbox || cell.normalized_bbox);
+                      if (!displayBbox) return null;
+                      const [xMin, yMin, xMax, yMax] = displayBbox;
+                      return (
+                        <rect
+                          key={cell.cell_id}
+                          x={xMin}
+                          y={yMin}
+                          width={xMax - xMin}
+                          height={yMax - yMin}
+                          fill="none"
+                          stroke="transparent"
+                          strokeWidth="1"
+                          className="cursor-pointer pointer-events-auto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedObject({ type: 'table_cell', data: cell });
+                          }}
+                          onMouseEnter={() => setHoveredOverlay({ id: cell.cell_id, text: `Cell (${cell.row_id}, ${cell.col_id}): ${cell.text}`, confidence: cell.confidence })}
+                          onMouseLeave={() => setHoveredOverlay(null)}
+                        />
+                      );
+                    })
                   )}
 
                 </svg>
 
-              </div>
+                {/* 3. Debug Coordinates HUD Readout */}
+                {showDebugCoords && (
+                  <div className="absolute top-14 left-3 bg-[#0d1117]/90 border border-[#30363d] rounded p-2.5 z-20 backdrop-blur-sm text-[10px] font-mono text-gray-300 space-y-1 shadow-md pointer-events-none">
+                    <div>source image: {sourceSize.width} x {sourceSize.height}</div>
+                    <div>rendered image: {Math.round(metrics.width)} x {Math.round(metrics.height)}</div>
+                    <div>scaleX / scaleY: {metrics.scaleX.toFixed(3)} / {metrics.scaleY.toFixed(3)}</div>
+                    <div>offsetX / offsetY: {Math.round(metrics.offsetLeft)} / {Math.round(metrics.offsetTop)}</div>
+                    <div>zoom: {(zoom * 100).toFixed(0)}%</div>
+                  </div>
+                )}
+
+                {/* 4. Overlay HUD Status Counts */}
+                <div className="absolute top-3 right-3 bg-[#0d1117]/85 border border-[#30363d] rounded p-2 z-20 backdrop-blur-sm text-[10px] font-mono text-gray-300 space-y-0.5 shadow-md pointer-events-none">
+                  <div className="text-gray-400 font-bold uppercase tracking-wider text-[8px] mb-1">Overlay Status</div>
+                  <div>OCR Blocks: {ocrBlocksTotal} total / {ocrBlocksDrawable} drawable / {ocrBlocksMissing} missing</div>
+                  <div>Candidate Tables: {candidateTablesTotal} total / {candidateTablesDrawable} drawable / {candidateTablesMissing} missing</div>
+                  <div>Selected Table: <span className={selectedTableGeometryPresent ? 'text-emerald-400' : 'text-rose-400'}>{selectedTableGeometryPresent ? 'PRESENT' : 'MISSING'}</span></div>
+                </div>
+
+                {/* 5. Missing Geometry Warn HUD */}
+                {showMissingGeometryWarning && (
+                  <div className="absolute bottom-16 right-3 bg-[#0d1117]/95 border border-[#30363d] rounded p-2.5 z-20 backdrop-blur-sm text-[10px] font-mono text-amber-300 max-w-xs shadow-lg flex items-center space-x-1.5 pointer-events-none">
+                    <AlertTriangle size={12} className="text-amber-400 shrink-0" />
+                    <span>No real row/table geometry available for this overlay.</span>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="text-gray-500 font-mono text-xs">Loading Invoice Viewer...</div>
             )}
@@ -623,14 +927,16 @@ export const DebuggerPage: React.FC = () => {
                         </div>
                         <div>
                           <span className="text-[10px] text-gray-500 uppercase block">Status</span>
-                          <span className="text-gray-300 capitalize">{selectedObject.data.status}</span>
+                          <span className={`text-xs font-semibold ${!selectedObject.data.bbox ? 'text-rose-400' : 'text-gray-300'} capitalize`}>
+                            {!selectedObject.data.bbox ? 'missing_geometry' : selectedObject.data.status}
+                          </span>
                         </div>
                       </div>
 
                       <div>
                         <span className="text-[10px] text-gray-500 uppercase block">Geometry (BBox)</span>
-                        <span className="text-gray-400 font-semibold text-[10px] block">
-                          [{selectedObject.data.bbox.join(', ')}]
+                        <span className={`font-semibold text-[10px] block ${!selectedObject.data.bbox ? 'text-rose-400' : 'text-gray-400'}`}>
+                          {!selectedObject.data.bbox ? 'missing' : `[${selectedObject.data.bbox.join(', ')}]`}
                         </span>
                       </div>
 

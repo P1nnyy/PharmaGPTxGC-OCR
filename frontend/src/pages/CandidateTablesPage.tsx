@@ -17,6 +17,7 @@ export const CandidateTablesPage: React.FC = () => {
   const [candidates, setCandidates] = useState<CandidateTable[]>([]);
   const [compareCandidates, setCompareCandidates] = useState<CandidateTable[]>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [showRawJson, setShowRawJson] = useState(false);
 
   // Fetch run and candidate tables
   useEffect(() => {
@@ -65,6 +66,44 @@ export const CandidateTablesPage: React.FC = () => {
   const compScore = getStructureScore(compareCandidates);
   const scoreDiff = compScore ? primaryScore - compScore : 0;
 
+  const getGridShape = (shape: string) => {
+    if (!shape || shape === '—') return '—';
+    const parts = shape.split(' ');
+    if (parts.length >= 4) {
+      return `${parts[0]}x${parts[3]}`;
+    }
+    return shape;
+  };
+
+  const rawBackendData = activeRun ? localStorage.getItem(`ocr_workbench_raw_backend_${activeRun.run_id}`) : null;
+
+  if (candidates.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-bold text-white tracking-tight">TSR &amp; Candidate Tables</h2>
+          <p className="text-gray-400 text-sm">Audit Table Structure Recognition (TSR) engines, inspect heuristics, and trace candidate rejection reasons.</p>
+        </div>
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center space-y-4">
+          <p className="text-gray-400 text-sm">Backend response did not contain candidate table diagnostics.</p>
+          <button
+            onClick={() => setShowRawJson(!showRawJson)}
+            className="bg-[#21262d] hover:bg-[#30363d] text-white px-4 py-2 border border-[#30363d] rounded text-xs font-semibold cursor-pointer"
+          >
+            {showRawJson ? 'Hide Raw Backend JSON' : 'View Raw Backend JSON'}
+          </button>
+          {showRawJson && (
+            <div className="text-left mt-4">
+              <pre className="p-4 text-[11px] font-mono leading-relaxed bg-[#0d1117] rounded border border-[#30363d] overflow-auto max-h-[30rem] text-gray-300 custom-scrollbar">
+                {rawBackendData ? JSON.stringify(JSON.parse(rawBackendData), null, 2) : 'No raw backend data found.'}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       
@@ -97,7 +136,7 @@ export const CandidateTablesPage: React.FC = () => {
         <div className="space-y-1">
           <span className="text-[10px] font-mono text-gray-500 uppercase block">Baseline Grid</span>
           <strong className="text-2xl font-bold font-mono text-white">
-            {compareRun ? compareRun.selected_table_shape.split(' ')[0] + 'x' + compareRun.selected_table_shape.split(' ')[3] : '2x2'}
+            {compareRun ? getGridShape(compareRun.selected_table_shape) : '2x2'}
           </strong>
           <span className="text-[10px] text-gray-500 block font-sans">Before reconstruction metrics</span>
         </div>
@@ -106,7 +145,7 @@ export const CandidateTablesPage: React.FC = () => {
         <div className="space-y-1">
           <span className="text-[10px] font-mono text-gray-500 uppercase block">Resolved Grid</span>
           <strong className="text-2xl font-bold font-mono text-[#00f0ff]">
-            {activeRun ? activeRun.selected_table_shape.split(' ')[0] + 'x' + activeRun.selected_table_shape.split(' ')[3] : '4x8'}
+            {activeRun ? getGridShape(activeRun.selected_table_shape) : '4x8'}
           </strong>
           <span className="text-[10px] text-gray-500 block font-sans">After alignment heuristics</span>
         </div>

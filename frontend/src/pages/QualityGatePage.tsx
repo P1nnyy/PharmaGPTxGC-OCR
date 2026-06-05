@@ -68,7 +68,7 @@ export const QualityGatePage: React.FC = () => {
                   {qualityGate.safe_for_erp
                     ? '✓ SAFE FOR ERP INGESTION'
                     : qualityGate.status_effective === 'failed'
-                      ? '❌ PIPELINE INGRESTION FAILURE'
+                      ? '❌ PIPELINE INGESTION FAILURE'
                       : '⚠ MANUAL CLASSIFICATION RECONCILIATION NEEDED'}
                 </h3>
                 <p className="text-xs text-gray-400 max-w-2xl leading-relaxed">

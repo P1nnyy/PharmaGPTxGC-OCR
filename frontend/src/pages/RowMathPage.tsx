@@ -129,13 +129,13 @@ export const RowMathPage: React.FC = () => {
                               {row.product}
                             </td>
                             <td className="py-2.5 px-4 text-right text-gray-300">{row.qty}</td>
-                            <td className="py-2.5 px-4 text-right text-gray-300">${row.rate.toFixed(2)}</td>
+                            <td className="py-2.5 px-4 text-right text-gray-300">₹{row.rate.toFixed(2)}</td>
                             <td className="py-2.5 px-4 text-right text-gray-400">{row.discount}%</td>
                             <td className="py-2.5 px-4 text-right text-gray-400">{row.gst}%</td>
-                            <td className="py-2.5 px-4 text-right text-gray-300">${row.expected_amount.toFixed(2)}</td>
-                            <td className="py-2.5 px-4 text-right text-white font-semibold">${row.actual_amount.toFixed(2)}</td>
+                            <td className="py-2.5 px-4 text-right text-gray-300">₹{row.expected_amount.toFixed(2)}</td>
+                            <td className="py-2.5 px-4 text-right text-white font-semibold">₹{row.actual_amount.toFixed(2)}</td>
                             <td className={`py-2.5 px-4 text-right font-bold ${row.difference !== 0 ? 'text-rose-400' : 'text-gray-500'}`}>
-                              ${row.difference.toFixed(2)}
+                              ₹{row.difference.toFixed(2)}
                             </td>
                             <td className="py-2.5 px-4 text-center">
                               <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
@@ -180,7 +180,7 @@ export const RowMathPage: React.FC = () => {
                         </div>
                         <div>
                           <span className="text-gray-500 block text-[9px]">UNIT RATE:</span>
-                          <strong className="text-white font-bold">${activeRow.rate.toFixed(2)}</strong>
+                          <strong className="text-white font-bold">₹{activeRow.rate.toFixed(2)}</strong>
                         </div>
                         <div>
                           <span className="text-gray-500 block text-[9px]">DISCOUNT:</span>
@@ -206,16 +206,16 @@ export const RowMathPage: React.FC = () => {
                       <span className="text-[10px] text-gray-500 uppercase block">Expected vs Actual</span>
                       <div className="flex justify-between">
                         <span className="text-gray-400">Calculated Expected:</span>
-                        <span className="text-white">${activeRow.expected_amount.toFixed(2)}</span>
+                        <span className="text-white">₹{activeRow.expected_amount.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-400">Extracted Invoiced:</span>
-                        <span className="text-white font-bold">${activeRow.actual_amount.toFixed(2)}</span>
+                        <span className="text-white font-bold">₹{activeRow.actual_amount.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between pt-1 border-t border-[#21262d] font-bold">
                         <span className="text-gray-400">Difference:</span>
                         <span className={activeRow.difference !== 0 ? 'text-rose-400' : 'text-emerald-400'}>
-                          ${activeRow.difference.toFixed(2)}
+                          ₹{activeRow.difference.toFixed(2)}
                         </span>
                       </div>
                     </div>
@@ -247,7 +247,7 @@ export const RowMathPage: React.FC = () => {
 
                   {/* Inspector footer info */}
                   <div className="text-[10px] text-gray-500 border-t border-[#30363d] pt-4">
-                    Reconciliation Tolerance: <strong className="text-white">0.01 USD</strong>
+                    Reconciliation Tolerance: <strong className="text-white">₹0.01</strong>
                   </div>
 
                 </div>

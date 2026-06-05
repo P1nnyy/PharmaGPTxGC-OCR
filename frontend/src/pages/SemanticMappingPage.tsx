@@ -41,6 +41,20 @@ export const SemanticMappingPage: React.FC = () => {
   const requiredSemantics = ['product_name', 'quantity', 'unit_price', 'row_total', 'batch_no', 'expiry_date'];
   const mappedSemantics = semanticCols.map(sc => sc.predicted_type);
 
+  if (semanticCols.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-bold text-white tracking-tight">Column Classifier &amp; Semantic Mapping</h2>
+          <p className="text-gray-400 text-sm">Audit column taxonomy predictions, examine classifier confidence distributions, and review competing candidates.</p>
+        </div>
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
+          Backend response did not contain semantic column diagnostics.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       
@@ -117,7 +131,7 @@ export const SemanticMappingPage: React.FC = () => {
                   {/* Sample Values snippet */}
                   <div className="bg-[#0d1117] border border-[#21262d] rounded p-2 text-[10px] font-mono text-gray-400 space-y-0.5">
                     <div className="text-gray-600 font-bold border-b border-[#21262d] pb-0.5 uppercase text-[8px]">Sample Values</div>
-                    {col.sample_values.slice(0, 3).map((v, i) => (
+                    {(col.sample_values || []).slice(0, 3).map((v, i) => (
                       <div key={i} className="truncate">"{v}"</div>
                     ))}
                   </div>

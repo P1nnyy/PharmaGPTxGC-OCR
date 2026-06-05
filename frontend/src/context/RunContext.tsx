@@ -82,8 +82,13 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return defaultSettings;
   });
 
-  const clearWorkbenchState = (clearSettings = false) => {
+  const clearWorkbenchState = async (clearSettings = false) => {
     apiClient.clearWorkbenchRunStorage();
+    try {
+      await apiClient.clearBackendCache();
+    } catch (e) {
+      console.error('Failed to clear backend cache:', e);
+    }
     if (clearSettings) {
       localStorage.removeItem('ocr_workbench_settings');
       setSettings(defaultSettings);
@@ -167,7 +172,9 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const data = await apiClient.getRuns();
       setRuns(data);
     } catch (err: any) {
-      setError(err.message || 'OCR re-run failed');
+      const errMsg = err.message || 'OCR re-run failed';
+      setError(errMsg);
+      throw new Error(errMsg);
     } finally {
       setIsLoading(false);
     }
@@ -182,7 +189,9 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const data = await apiClient.getRuns();
       setRuns(data);
     } catch (err: any) {
-      setError(err.message || 'Reconstruction failed');
+      const errMsg = err.message || 'Reconstruction failed';
+      setError(errMsg);
+      throw new Error(errMsg);
     } finally {
       setIsLoading(false);
     }

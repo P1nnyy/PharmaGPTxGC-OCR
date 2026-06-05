@@ -30,7 +30,7 @@ export const SelectedTablePage: React.FC = () => {
         const mappings = await apiClient.getSemanticMapping(activeId);
         setSemanticCols(mappings);
 
-        if (table && table.cells.length > 1 && table.cells[1].length > 0) {
+        if (table && table.cells.length > 1 && table.cells[1] && table.cells[1].length > 0) {
           // Default select the first data cell
           setSelectedCellId(table.cells[1][0].cell_id);
         }
@@ -62,7 +62,11 @@ export const SelectedTablePage: React.FC = () => {
         <p className="text-gray-400 text-sm">Review the primary resolved table structure, examine cells transformations, and audit column data types alignment.</p>
       </div>
 
-      {selectedTable && activeRun && (
+      {!selectedTable || !activeRun ? (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
+          Backend response did not contain structured table data.
+        </div>
+      ) : (
         <>
           {/* Top Metric Cards */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -295,7 +299,7 @@ export const SelectedTablePage: React.FC = () => {
                   <div className="space-y-1">
                     <span className="text-[10px] text-gray-500 block uppercase">Cell Geometry</span>
                     <div className="text-[10px] text-gray-400 font-mono">
-                      BBox: [{selectedCell.bbox.join(', ')}]
+                      BBox: {selectedCell.bbox ? `[${selectedCell.bbox.join(', ')}]` : 'missing'}
                     </div>
                   </div>
 

@@ -13,6 +13,7 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 def health_check():
+    # Detect active GPU status to report back VM initialization state
     gpu_available = torch.cuda.is_available()
     response = HealthResponse(
         status="ok",
@@ -23,8 +24,28 @@ def health_check():
         response.cuda_version = torch.version.cuda
     return response
 
+@router.post("/clear-cache")
+async def clear_cache():
+    """
+    Clears the OCR cache directory. Called when clearing the workbench state.
+    """
+    try:
+        deleted_count = cache_service.clear_all_cache()
+        return {"status": "success", "deleted_count": deleted_count}
+    except Exception as e:
+        logger.error(f"Error clearing OCR scan cache: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/upload-invoice", response_model=OCRResponse)
-async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False, reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE, extract: bool = False, benchmark_mode: bool = False, bypass_cache: bool = False):
+async def upload_invoice(
+    file: UploadFile = File(...),
+    reconstruct: bool = False,
+    reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE,
+    extract: bool = False,
+    benchmark_mode: bool = False,
+    bypass_cache: bool = False
+):
+    # Enforce basic image upload validation checks on content-type and size limits
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
     if file.size is not None and file.size > settings.MAX_UPLOAD_SIZE_BYTES:
@@ -45,6 +66,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
                 detail=val_report.get("error_message", "Uploaded file is not a valid invoice image.")
             )
             
+        # Compute MD5 hash on bytes for exact file equivalence check
         invoice_id = cache_service.compute_md5(file_bytes)
         
         logger.info(f"Received file: {file.filename}, computed invoice_id: {invoice_id}")
@@ -78,9 +100,12 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
                 metadata=metadata
             )
             
+        # Convert raw file bytes into PIL Image representation
         image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        # Run primary deep learning model OCR extraction suite (Surya OCR / PaddleOCR)
         ocr_result = ocr_engine.process_image(image)
         
+        # Commit raw primitives to file cache
         cache_service.save_result(invoice_id, ocr_result)
         
         blocks = ocr_result.get("blocks", [])
@@ -112,6 +137,7 @@ async def upload_invoice(file: UploadFile = File(...), reconstruct: bool = False
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
+        # Map dynamic exceptions to structured classifier error profiles
         classification = classify_error(e, stage="upload_invoice").to_dict()
         logger.error(f"Error processing upload: {e}", extra={"error_classification": classification})
         raise HTTPException(status_code=500, detail=str(e))

@@ -9,6 +9,7 @@ import type {
   Artifact,
   TableCell
 } from './types';
+import { normalizeBBox } from '../utils/geometry';
 
 // Gating flag for mock / demo data
 export const ENABLE_MOCK_DATA = import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
@@ -18,6 +19,30 @@ const getTimestamp = (offsetHours = 0) => {
   const date = new Date();
   date.setHours(date.getHours() - offsetHours);
   return date.toISOString();
+};
+
+// Helper to cache uploaded image as base64 in sessionStorage
+async function cacheImageLocal(runId: string, file: File): Promise<void> {
+  try {
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+      reader.readAsDataURL(file);
+    });
+    sessionStorage.setItem(`ocr_workbench_image_${runId}`, base64);
+  } catch (e) {
+    console.warn('Failed to cache image in sessionStorage:', e);
+  }
+}
+
+// Retrieves the cached image URL if present, otherwise returns mock SVG representation
+export const getInvoiceImageUrl = (runId: string, filename: string): string => {
+  const cached = sessionStorage.getItem(`ocr_workbench_image_${runId}`);
+  if (cached) {
+    return cached;
+  }
+  return getInvoiceImageSvgUrl(filename);
 };
 
 // Generates a mock invoice image as an SVG data URL matching coordinates
@@ -175,7 +200,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_001',
     selected_table_shape: '4 Rows x 8 Columns',
     missing_fields: ['subtotal'],
-    row_math_status: 'unmeasurable'
+    row_math_status: 'unmeasurable',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_2',
@@ -188,7 +214,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_002',
     selected_table_shape: '2 Rows x 6 Columns',
     missing_fields: ['grand_total'],
-    row_math_status: 'unmeasurable'
+    row_math_status: 'unmeasurable',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_3',
@@ -201,7 +228,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_003',
     selected_table_shape: '9 Rows x 7 Columns',
     missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable'
+    row_math_status: 'unmeasurable',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_4',
@@ -214,7 +242,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_004',
     selected_table_shape: '11 Rows x 8 Columns',
     missing_fields: [],
-    row_math_status: 'pass'
+    row_math_status: 'pass',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_5',
@@ -227,7 +256,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_005',
     selected_table_shape: '6 Rows x 8 Columns',
     missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable'
+    row_math_status: 'unmeasurable',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_6',
@@ -240,7 +270,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_006',
     selected_table_shape: '10 Rows x 7 Columns',
     missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable'
+    row_math_status: 'unmeasurable',
+    is_demo: true
   },
   {
     run_id: 'RUN_20260603_213604_7',
@@ -253,7 +284,8 @@ const initialRuns: RunSummary[] = [
     selected_table_id: 'ITEMS_007',
     selected_table_shape: '6 Rows x 4 Columns',
     missing_fields: ['subtotal', 'cgst', 'sgst'],
-    row_math_status: 'fail'
+    row_math_status: 'fail',
+    is_demo: true
   }
 ];
 
@@ -280,6 +312,127 @@ export const getDetailsData = (runId: string): any | null => {
   }
   return null;
 };
+
+// Normalizes and preserves multi-path backend diagnostics formats
+export function normalizeBackendDiagnostics(backendData: any): any {
+  if (!backendData || typeof backendData !== 'object') {
+    return {};
+  }
+
+  // Preserve all raw keys by cloning the top-level structure
+  const res: any = { ...backendData };
+
+  // Make sure we have a metadata object to store fallback normalized results
+  if (!res.metadata) {
+    res.metadata = {};
+  }
+
+  // Resolve OCR blocks
+  const blocks = 
+    backendData.blocks || 
+    backendData.ocr_blocks || 
+    backendData.metadata?.blocks || 
+    backendData.metadata?.ocr_blocks || 
+    backendData.reconstruction?.blocks || 
+    backendData.raw_ocr?.blocks;
+  if (blocks) {
+    res.blocks = blocks;
+    res.metadata.blocks = blocks;
+  }
+
+  // Resolve Structured Tables
+  const structured_tables = 
+    backendData.structured_tables || 
+    backendData.metadata?.structured_tables || 
+    backendData.reconstructed_tables || 
+    backendData.metadata?.reconstructed_tables || 
+    backendData.tables || 
+    backendData.metadata?.tables;
+  if (structured_tables) {
+    res.structured_tables = structured_tables;
+    res.metadata.structured_tables = structured_tables;
+  }
+
+  // Resolve Candidate Table Decision
+  const tsr_candidate_decision = 
+    backendData.tsr_candidate_decision || 
+    backendData.metadata?.tsr_candidate_decision || 
+    backendData.metrics?.tsr_candidate_decision || 
+    backendData.metadata?.metrics?.tsr_candidate_decision || 
+    backendData.routing_diagnostics || 
+    backendData.metadata?.routing_diagnostics || 
+    backendData.table_candidates || 
+    backendData.metadata?.table_candidates;
+  if (tsr_candidate_decision) {
+    res.tsr_candidate_decision = tsr_candidate_decision;
+    res.metadata.tsr_candidate_decision = tsr_candidate_decision;
+  }
+
+  // Resolve Semantic Data
+  const semantic_columns = 
+    backendData.table_semantics || 
+    backendData.metadata?.table_semantics || 
+    backendData.semantic_columns || 
+    backendData.metadata?.semantic_columns || 
+    backendData.column_semantics || 
+    backendData.metadata?.column_semantics || 
+    backendData.structured_tables?.[0]?.metadata?.column_semantics;
+  if (semantic_columns) {
+    res.semantic_columns = semantic_columns;
+    res.metadata.semantic_columns = semantic_columns;
+  }
+
+  // Resolve Financial Reconciliation
+  const financial_reconciliation = 
+    backendData.financial_reconciliation || 
+    backendData.metadata?.financial_reconciliation || 
+    backendData.metrics?.financial_reconciliation || 
+    backendData.metadata?.metrics?.financial_reconciliation;
+  if (financial_reconciliation) {
+    res.financial_reconciliation = financial_reconciliation;
+    res.metadata.financial_reconciliation = financial_reconciliation;
+  }
+
+  // Resolve Quality Gate
+  const quality_gate = 
+    backendData.quality_gate || 
+    backendData.metadata?.quality_gate || 
+    backendData.canonical_invoice?.quality_gate || 
+    backendData.metadata?.canonical_invoice?.quality_gate;
+  if (quality_gate) {
+    res.quality_gate = quality_gate;
+    res.metadata.quality_gate = quality_gate;
+  }
+
+  // Dev mode logging
+  if (import.meta.env.DEV) {
+    console.log('[DEV] Raw Backend Data Keys:', Object.keys(backendData));
+    console.log('[DEV] Raw Metadata Keys:', Object.keys(backendData.metadata || {}));
+    console.log('[DEV] Normalized OCR blocks count:', res.blocks?.length || 0);
+    console.log('[DEV] Normalized Structured Tables count:', res.structured_tables?.length || 0);
+    
+    let candCount = 0;
+    if (res.tsr_candidate_decision?.candidates) {
+      candCount = Object.keys(res.tsr_candidate_decision.candidates).length;
+    } else if (Array.isArray(res.tsr_candidate_decision)) {
+      candCount = res.tsr_candidate_decision.length;
+    } else if (res.tsr_candidate_decision?.table_regions) {
+      candCount = res.tsr_candidate_decision.table_regions.length;
+    }
+    console.log('[DEV] Normalized Candidate Tables count:', candCount);
+
+    let semanticCount = 0;
+    if (Array.isArray(res.semantic_columns)) {
+      semanticCount = res.semantic_columns.length;
+    } else if (res.semantic_columns && typeof res.semantic_columns === 'object') {
+      semanticCount = Object.keys(res.semantic_columns).length;
+    }
+    console.log('[DEV] Normalized Semantic Columns count:', semanticCount);
+    console.log('[DEV] Normalized Quality Gate present:', !!res.quality_gate);
+  }
+
+  return res;
+}
 
 // Helper to store Runs in local storage to keep state across page refreshes
 const getStoredRuns = (): RunSummary[] => {
@@ -980,11 +1133,11 @@ export const apiClient = {
   async uploadInvoice(file: File) {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('reconstruct', 'true');
-    formData.append('extract', 'true');
 
     try {
-      const response = await fetch('/upload-invoice', {
+      // reconstruct & extract must be query params (FastAPI reads them as
+      // Query(...) not Form(...)). Without these, backend skips TSR/extraction.
+      const response = await fetch('/upload-invoice?reconstruct=true&extract=true', {
         method: 'POST',
         body: formData
       });
@@ -995,29 +1148,42 @@ export const apiClient = {
       }
 
       const backendData = await response.json();
+      const normalizedDetail = normalizeBackendDiagnostics(backendData);
       
       // Successfully uploaded. Add a new run to our store.
       const runs = getStoredRuns();
       const newRunId = `RUN_${Date.now()}`;
       
+      const isSafe = normalizedDetail.quality_gate?.safe_for_erp ?? (normalizedDetail.metadata?.quality_gate?.safe_for_erp ?? false);
+      const conf = normalizedDetail.quality_gate?.confidence ?? (normalizedDetail.invoice_confidence ?? 0.880);
+      const tokCov = normalizedDetail.metadata?.token_coverage ?? 0.920;
+      const repScore = normalizedDetail.metadata?.reconstruction_score ?? 0.850;
+      
       const newRun: RunSummary = {
         run_id: newRunId,
         filename: file.name,
         timestamp: new Date().toISOString(),
-        status: backendData.metadata?.quality_gate?.safe_for_erp ? 'safe_for_erp' : 'needs_review',
-        confidence: backendData.metadata?.image_validation?.invoice_confidence || 0.880,
-        token_coverage: backendData.metadata?.token_coverage || 0.920,
-        representability_score: backendData.metadata?.reconstruction_score || 0.850,
-        selected_table_id: 'ITEMS_001',
-        selected_table_shape: backendData.metadata?.structured_tables?.[0] 
-          ? `${backendData.metadata.structured_tables[0].cells?.filter((c: any) => (c.col_index ?? c.col_id) === 0).length ?? 4} Rows x ${backendData.metadata.structured_tables[0].cells?.filter((c: any) => (c.row_index ?? c.row_id) === 0).length ?? 8} Columns`
+        status: isSafe ? 'safe_for_erp' : 'needs_review',
+        confidence: conf,
+        token_coverage: tokCov,
+        representability_score: repScore,
+        selected_table_id: normalizedDetail.structured_tables?.[0]?.table_id || 'ITEMS_001',
+        selected_table_shape: normalizedDetail.structured_tables?.[0] 
+          ? `${normalizedDetail.structured_tables[0].cells?.filter((c: any) => (c.col_index ?? c.col_id) === 0).length ?? 4} Rows x ${normalizedDetail.structured_tables[0].cells?.filter((c: any) => (c.row_index ?? c.row_id) === 0).length ?? 8} Columns`
           : '4 Rows x 8 Columns',
-        missing_fields: backendData.metadata?.quality_gate?.missing_fields || [],
-        row_math_status: backendData.metadata?.quality_gate?.row_math_status || 'pass'
+        missing_fields: normalizedDetail.quality_gate?.missing_fields || (normalizedDetail.metadata?.quality_gate?.missing_fields || []),
+        row_math_status: normalizedDetail.quality_gate?.row_math_status || (normalizedDetail.metadata?.quality_gate?.row_math_status || 'pass'),
+        is_demo: false
       };
 
-      // Store the backend metadata details
-      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(backendData.metadata || {}));
+      // Cache the uploaded image file locally
+      await cacheImageLocal(newRunId, file);
+
+      // Store the normalized diagnostics details
+      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(normalizedDetail));
+
+      // Also store raw backend response for debugging
+      localStorage.setItem(`ocr_workbench_raw_backend_${newRunId}`, JSON.stringify(backendData));
 
       runs.unshift(newRun);
       saveStoredRuns(runs);
@@ -1045,8 +1211,12 @@ export const apiClient = {
         selected_table_id: 'ITEMS_001',
         selected_table_shape: '4 Rows x 8 Columns',
         missing_fields: ['subtotal'],
-        row_math_status: 'unmeasurable'
+        row_math_status: 'unmeasurable',
+        is_demo: true
       };
+
+      // Cache the uploaded image file locally in mock fallback too
+      await cacheImageLocal(newRunId, file);
 
       runs.unshift(newRun);
       saveStoredRuns(runs);
@@ -1057,26 +1227,36 @@ export const apiClient = {
 
   // Simulates OCR processing execution
   async runOCR(runId: string) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
     const runs = getStoredRuns();
     const run = runs.find(r => r.run_id === runId);
-    if (run) {
-      run.confidence = Math.min(1.0, parseFloat((run.confidence + 0.02).toFixed(3)));
-      run.token_coverage = Math.min(1.0, parseFloat((run.token_coverage + 0.01).toFixed(3)));
-      saveStoredRuns(runs);
+    if (!run) {
+      throw new Error('Run not found');
     }
+    if (!run.is_demo) {
+      throw new Error('Not implemented for backend yet');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    run.confidence = Math.min(1.0, parseFloat((run.confidence + 0.02).toFixed(3)));
+    run.token_coverage = Math.min(1.0, parseFloat((run.token_coverage + 0.01).toFixed(3)));
+    saveStoredRuns(runs);
     return { success: true };
   },
 
   // Simulates Re-run reconstruction pipeline
   async rerunReconstruction(runId: string) {
-    await new Promise((resolve) => setTimeout(resolve, 1200));
     const runs = getStoredRuns();
     const run = runs.find(r => r.run_id === runId);
-    if (run) {
-      run.representability_score = Math.min(1.0, parseFloat((run.representability_score + 0.03).toFixed(3)));
-      saveStoredRuns(runs);
+    if (!run) {
+      throw new Error('Run not found');
     }
+    if (!run.is_demo) {
+      throw new Error('Not implemented for backend yet');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    run.representability_score = Math.min(1.0, parseFloat((run.representability_score + 0.03).toFixed(3)));
+    saveStoredRuns(runs);
     return { success: true };
   },
 
@@ -1100,9 +1280,19 @@ export const apiClient = {
   async getOCRBlocks(runId: string): Promise<OCRBlock[]> {
     const detail = getDetailsData(runId);
     if (detail && detail.blocks) {
-      return detail.blocks;
+      return detail.blocks.map((block: any) => {
+        const bbox = normalizeBBox(block);
+        const normBbox = block.normalized_bbox ? normalizeBBox({ bbox: block.normalized_bbox }) : null;
+        return {
+          ...block,
+          bbox,
+          normalized_bbox: normBbox || bbox,
+          status: bbox ? (block.status || 'mapped') : 'missing_geometry'
+        };
+      });
     }
-    if (ENABLE_MOCK_DATA) {
+    const run = getStoredRuns().find(r => r.run_id === runId);
+    if (run?.is_demo && ENABLE_MOCK_DATA) {
       return getMockOCRBlocks(runId);
     }
     return [];
@@ -1112,30 +1302,144 @@ export const apiClient = {
   async getCandidateTables(runId: string): Promise<CandidateTable[]> {
     const detail = getDetailsData(runId);
     if (detail) {
+      const run = getStoredRuns().find(r => r.run_id === runId);
+      if (run?.is_demo && ENABLE_MOCK_DATA) {
+        return getMockCandidateTables(runId);
+      }
+
       const candidates: CandidateTable[] = [];
-      const decision = detail.tsr_candidate_decision || detail.metrics?.tsr_candidate_decision;
-      if (decision && decision.candidates) {
-        for (const [key, cand] of Object.entries(decision.candidates)) {
-          const c = cand as any;
-          if (!c.available && key !== 'ppstructure') continue;
-          candidates.push({
-            table_id: key,
-            source_engine: c.source || key,
-            rows: c.rows || 0,
-            cols: c.columns || 0,
-            x_coverage: c.x_coverage || 0,
-            y_coverage: c.y_coverage || 0,
-            cell_count: c.cells || 0,
-            non_empty_cells: c.non_empty_cells || c.cells || 0,
-            score: c.score || c.confidence || 0,
-            labels: c.labels || [key],
-            selected: decision.selected === key,
-            rejection_reason: c.blocked_by?.join(', ') || null,
-            representability_score: c.score || c.confidence || 0,
-            preview_cells: c.preview_cells || []
+      const decision = 
+        detail.tsr_candidate_decision || 
+        detail.metrics?.tsr_candidate_decision || 
+        detail.candidate_tables || 
+        detail.table_candidates || 
+        detail.routing_diagnostics || 
+        (detail.routing_diagnostics?.candidates ? { candidates: detail.routing_diagnostics.candidates, selected: detail.routing_diagnostics.selected } : null);
+
+      if (decision) {
+        if (decision.candidates && typeof decision.candidates === 'object') {
+          for (const [key, cand] of Object.entries(decision.candidates)) {
+            const c = cand as any;
+            if (!c.available && key !== 'ppstructure') continue;
+            candidates.push({
+              table_id: key,
+              source_engine: c.source || key,
+              rows: c.rows || 0,
+              cols: c.columns || 0,
+              x_coverage: c.x_coverage || 0,
+              y_coverage: c.y_coverage || 0,
+              cell_count: c.cells || 0,
+              non_empty_cells: c.non_empty_cells || c.cells || 0,
+              score: c.score || c.confidence || 0,
+              labels: c.labels || [key],
+              selected: decision.selected === key,
+              rejection_reason: c.blocked_by?.join(', ') || null,
+              representability_score: c.score || c.confidence || 0,
+              preview_cells: c.preview_cells || [],
+              bbox: normalizeBBox(c)
+            });
+          }
+        } else if (Array.isArray(decision)) {
+          decision.forEach((c: any, index: number) => {
+            candidates.push({
+              table_id: c.table_id || `cand_${index}`,
+              source_engine: c.source_engine || c.source || 'backend_candidate',
+              rows: c.rows || 0,
+              cols: c.columns || c.cols || 0,
+              x_coverage: c.x_coverage || 0,
+              y_coverage: c.y_coverage || 0,
+              cell_count: c.cell_count || c.cells || 0,
+              non_empty_cells: c.non_empty_cells || c.cells || 0,
+              score: c.score || c.confidence || 0.90,
+              labels: c.labels || [c.table_id || `cand_${index}`],
+              selected: c.selected ?? (index === 0),
+              rejection_reason: c.rejection_reason || c.blocked_by?.join(', ') || null,
+              representability_score: c.score || c.confidence || 0.90,
+              preview_cells: c.preview_cells || [],
+              bbox: normalizeBBox(c)
+            });
+          });
+        } else if (decision.table_regions && Array.isArray(decision.table_regions)) {
+          decision.table_regions.forEach((c: any, index: number) => {
+            candidates.push({
+              table_id: c.table_id || `region_${index}`,
+              source_engine: c.source_engine || c.source || 'routing_table_region',
+              rows: c.rows || 0,
+              cols: c.columns || c.cols || 0,
+              x_coverage: c.x_coverage || 0,
+              y_coverage: c.y_coverage || 0,
+              cell_count: c.cell_count || c.cells || 0,
+              non_empty_cells: c.non_empty_cells || c.cells || 0,
+              score: c.score || c.confidence || 0.90,
+              labels: c.labels || [c.table_id || `region_${index}`],
+              selected: c.selected ?? (index === 0),
+              rejection_reason: c.rejection_reason || null,
+              representability_score: c.score || c.confidence || 0.90,
+              preview_cells: c.preview_cells || [],
+              bbox: normalizeBBox(c)
+            });
           });
         }
       }
+
+      if (candidates.length === 0) {
+        const structured_tables = 
+          detail.structured_tables || 
+          detail.selected_table || 
+          detail.main_table || 
+          detail.tables || 
+          detail.reconstructed_tables;
+        
+        if (Array.isArray(structured_tables)) {
+          structured_tables.forEach((table: any, index: number) => {
+            candidates.push({
+              table_id: table.table_id || `table_${index + 1}`,
+              source_engine: table.source_engine || 'backend_structured_table',
+              rows: table.rows || 0,
+              cols: table.cols || table.columns || 0,
+              x_coverage: table.x_coverage || 100,
+              y_coverage: table.y_coverage || 100,
+              cell_count: table.cell_count || table.cells?.length || 0,
+              non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
+              score: table.score || table.confidence || 1.0,
+              labels: [table.table_id || `table_${index + 1}`],
+              selected: index === 0,
+              rejection_reason: undefined,
+              representability_score: table.representability_score || 1.0,
+              preview_cells: (table.cells || []).slice(0, 10).map((cell: any) => ({
+                row_id: cell.row_index ?? cell.row_id ?? 0,
+                col_id: cell.col_index ?? cell.col_id ?? 0,
+                text: cell.text || ''
+              })),
+              bbox: normalizeBBox(table)
+            });
+          });
+        } else if (structured_tables && typeof structured_tables === 'object') {
+          const table = structured_tables;
+          candidates.push({
+            table_id: table.table_id || 'table_1',
+            source_engine: table.source_engine || 'backend_structured_table',
+            rows: table.rows || 0,
+            cols: table.cols || table.columns || 0,
+            x_coverage: table.x_coverage || 100,
+            y_coverage: table.y_coverage || 100,
+            cell_count: table.cell_count || table.cells?.length || 0,
+            non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
+            score: table.score || table.confidence || 1.0,
+            labels: [table.table_id || 'table_1'],
+            selected: true,
+            rejection_reason: undefined,
+            representability_score: table.representability_score || 1.0,
+            preview_cells: (table.cells || []).slice(0, 10).map((cell: any) => ({
+              row_id: cell.row_index ?? cell.row_id ?? 0,
+              col_id: cell.col_index ?? cell.col_id ?? 0,
+              text: cell.text || ''
+            })),
+            bbox: normalizeBBox(table)
+          });
+        }
+      }
+
       return candidates;
     }
     if (ENABLE_MOCK_DATA) {
@@ -1147,70 +1451,91 @@ export const apiClient = {
   // Gets the final selected table structure
   async getSelectedTable(runId: string): Promise<SelectedTable | null> {
     const detail = getDetailsData(runId);
-    if (detail && detail.structured_tables && detail.structured_tables.length > 0) {
-      const table = detail.structured_tables[0];
-      const cells: TableCell[][] = [];
-      
-      if (table.cells && Array.isArray(table.cells)) {
-        const rowMap: Record<number, TableCell[]> = {};
-        for (const cell of table.cells) {
-          const rowIdx = cell.row_index ?? cell.row_id ?? 0;
-          const colIdx = cell.col_index ?? cell.col_id ?? 0;
-          const tableCell: TableCell = {
-            cell_id: cell.cell_id || `c_${rowIdx}_${colIdx}`,
-            row_id: rowIdx,
-            col_id: colIdx,
-            text: cell.text || '',
-            confidence: cell.confidence ?? 1.0,
-            semantic_label: cell.semantic_label || cell.label || '',
-            bbox: cell.bbox || [0,0,0,0],
-            normalized_bbox: cell.normalized_bbox || [0,0,0,0],
-            source_blocks: cell.mapped_block_ids || cell.source_blocks || [],
-            status: cell.status || (cell.confidence < 0.6 ? 'error' : 'good'),
-            warnings: cell.warnings || []
-          };
-          if (!rowMap[rowIdx]) {
-            rowMap[rowIdx] = [];
-          }
-          rowMap[rowIdx][colIdx] = tableCell;
-        }
-        
-        const maxRow = Math.max(...Object.keys(rowMap).map(Number), -1);
-        for (let r = 0; r <= maxRow; r++) {
-          const rowCells = rowMap[r] || [];
-          const cleanRow: TableCell[] = [];
-          const maxCol = Math.max(...Object.keys(rowCells).map(Number), -1);
-          for (let c = 0; c <= maxCol; c++) {
-            cleanRow.push(rowCells[c] || {
-              cell_id: `c_${r}_${c}`,
-              row_id: r,
-              col_id: c,
-              text: '',
-              confidence: 1.0,
-              semantic_label: '',
-              bbox: [0,0,0,0],
-              normalized_bbox: [0,0,0,0],
-              source_blocks: [],
-              status: 'good',
-              warnings: []
-            });
-          }
-          cells.push(cleanRow);
-        }
+    if (detail) {
+      const run = getStoredRuns().find(r => r.run_id === runId);
+      if (run?.is_demo && ENABLE_MOCK_DATA) {
+        return getMockSelectedTable(runId);
       }
 
-      return {
-        table_id: table.table_id || 'ITEMS_001',
-        rows: cells.length,
-        cols: cells[0]?.length || 0,
-        x_coverage: table.x_coverage || 100.0,
-        non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
-        representability_score: table.representability_score || detail.reconstruction_score || 1.0,
-        required_fields_present: table.required_fields_present || [],
-        required_fields_missing: table.required_fields_missing || detail.quality_gate?.missing_fields || [],
-        cells
-      };
+      let table = null;
+      if (detail.structured_tables && detail.structured_tables.length > 0) {
+        table = detail.structured_tables[0];
+      } else if (detail.selected_table) {
+        table = detail.selected_table;
+      } else if (detail.main_table) {
+        table = detail.main_table;
+      } else if (detail.tables && detail.tables.length > 0) {
+        table = detail.tables[0];
+      } else if (detail.reconstructed_tables && detail.reconstructed_tables.length > 0) {
+        table = detail.reconstructed_tables[0];
+      }
+
+      if (table) {
+        const cells: TableCell[][] = [];
+        
+        if (table.cells && Array.isArray(table.cells)) {
+          const rowMap: Record<number, TableCell[]> = {};
+          for (const cell of table.cells) {
+            const rowIdx = cell.row_index ?? cell.row_id ?? 0;
+            const colIdx = cell.col_index ?? cell.col_id ?? 0;
+            const tableCell: TableCell = {
+              cell_id: cell.cell_id || `c_${rowIdx}_${colIdx}`,
+              row_id: rowIdx,
+              col_id: colIdx,
+              text: cell.text || '',
+              confidence: cell.confidence ?? 1.0,
+              semantic_label: cell.semantic_label || cell.label || '',
+              bbox: cell.bbox || [0,0,0,0],
+              normalized_bbox: cell.normalized_bbox || [0,0,0,0],
+              source_blocks: cell.mapped_block_ids || cell.source_blocks || [],
+              status: cell.status || (cell.confidence < 0.6 ? 'error' : 'good'),
+              warnings: cell.warnings || []
+            };
+            if (!rowMap[rowIdx]) {
+              rowMap[rowIdx] = [];
+            }
+            rowMap[rowIdx][colIdx] = tableCell;
+          }
+          
+          const maxRow = Math.max(...Object.keys(rowMap).map(Number), -1);
+          for (let r = 0; r <= maxRow; r++) {
+            const rowCells = rowMap[r] || [];
+            const cleanRow: TableCell[] = [];
+            const maxCol = Math.max(...Object.keys(rowCells).map(Number), -1);
+            for (let c = 0; c <= maxCol; c++) {
+              cleanRow.push(rowCells[c] || {
+                cell_id: `c_${r}_${c}`,
+                row_id: r,
+                col_id: c,
+                text: '',
+                confidence: 1.0,
+                semantic_label: '',
+                bbox: [0,0,0,0],
+                normalized_bbox: [0,0,0,0],
+                source_blocks: [],
+                status: 'good',
+                warnings: []
+              });
+            }
+            cells.push(cleanRow);
+          }
+        }
+
+        return {
+          table_id: table.table_id || 'ITEMS_001',
+          rows: cells.length,
+          cols: cells[0]?.length || 0,
+          x_coverage: table.x_coverage || 100.0,
+          non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
+          representability_score: table.representability_score || detail.reconstruction_score || 1.0,
+          required_fields_present: table.required_fields_present || [],
+          required_fields_missing: table.required_fields_missing || detail.quality_gate?.missing_fields || [],
+          cells,
+          bbox: normalizeBBox(table)
+        };
+      }
     }
+
     if (ENABLE_MOCK_DATA) {
       return getMockSelectedTable(runId);
     }
@@ -1220,11 +1545,64 @@ export const apiClient = {
   // Gets the Column semantic mapper
   async getSemanticMapping(runId: string): Promise<SemanticColumn[]> {
     const detail = getDetailsData(runId);
-    if (detail && detail.structured_tables && detail.structured_tables.length > 0) {
-      const table = detail.structured_tables[0];
-      const mappings: SemanticColumn[] = [];
-      
-      if (table.cells && Array.isArray(table.cells)) {
+    if (detail) {
+      const run = getStoredRuns().find(r => r.run_id === runId);
+      if (run?.is_demo && ENABLE_MOCK_DATA) {
+        return getMockSemanticMapping(runId);
+      }
+
+      const rawSemantics = 
+        detail.semantic_columns || 
+        detail.table_semantics || 
+        detail.column_semantics || 
+        detail.structured_tables?.[0]?.metadata?.column_semantics;
+
+      if (rawSemantics) {
+        if (Array.isArray(rawSemantics)) {
+          return rawSemantics.map((col: any, index: number) => ({
+            col_id: col.col_id ?? index,
+            predicted_type: col.predicted_type || col.semantic_label || col.label || 'unknown',
+            confidence: col.confidence ?? 1.0,
+            header_text: col.header_text || col.text || '',
+            sample_values: col.sample_values || [],
+            competing_candidates: col.competing_candidates || [
+              { type: col.predicted_type || col.semantic_label || col.label || 'unknown', confidence: col.confidence ?? 1.0 }
+            ],
+            conflict_resolution_reason: col.conflict_resolution_reason || 'Backend semantic column classification'
+          }));
+        } else if (typeof rawSemantics === 'object') {
+          return Object.entries(rawSemantics).map(([key, val]: [string, any]) => {
+            const colId = parseInt(key, 10) || 0;
+            const type = typeof val === 'string' ? val : (val.label || val.type || 'unknown');
+            const conf = typeof val === 'object' ? (val.confidence ?? val.score ?? 1.0) : 1.0;
+            return {
+              col_id: colId,
+              predicted_type: type,
+              confidence: conf,
+              header_text: val.header_text || val.text || `Col ${colId}`,
+              sample_values: val.sample_values || [],
+              competing_candidates: val.competing_candidates || [{ type, confidence: conf }],
+              conflict_resolution_reason: val.conflict_resolution_reason || 'Mapped from backend semantic map'
+            };
+          });
+        }
+      }
+
+      let table = null;
+      if (detail.structured_tables && detail.structured_tables.length > 0) {
+        table = detail.structured_tables[0];
+      } else if (detail.selected_table) {
+        table = detail.selected_table;
+      } else if (detail.main_table) {
+        table = detail.main_table;
+      } else if (detail.tables && detail.tables.length > 0) {
+        table = detail.tables[0];
+      } else if (detail.reconstructed_tables && detail.reconstructed_tables.length > 0) {
+        table = detail.reconstructed_tables[0];
+      }
+
+      if (table && table.cells && Array.isArray(table.cells)) {
+        const mappings: SemanticColumn[] = [];
         const headerCells = table.cells.filter((c: any) => (c.row_index ?? c.row_id) === 0);
         headerCells.sort((a: any, b: any) => (a.col_index ?? a.col_id) - (b.col_index ?? b.col_id));
         for (const cell of headerCells) {
@@ -1239,12 +1617,13 @@ export const apiClient = {
             competing_candidates: [
               { type: predictedType, confidence: cell.confidence ?? 1.0 }
             ],
-            conflict_resolution_reason: 'Inferred from backend semantic column classification'
+            conflict_resolution_reason: 'Inferred from cell headers classification'
           });
         }
+        return mappings;
       }
-      return mappings;
     }
+
     if (ENABLE_MOCK_DATA) {
       return getMockSemanticMapping(runId);
     }
@@ -1254,22 +1633,37 @@ export const apiClient = {
   // Gets the Row Mathematical Reconciliation checks
   async getRowMath(runId: string): Promise<RowMathResult[]> {
     const detail = getDetailsData(runId);
-    if (detail && detail.financial_reconciliation) {
-      const rows = detail.financial_reconciliation.rows || [];
-      return rows.map((r: any) => ({
-        row_id: r.row_id,
-        product: r.product_name || r.product || 'Unknown',
-        qty: r.qty || r.quantity || 0,
-        rate: r.rate || r.unit_price || 0,
-        discount: r.discount || 0,
-        gst: r.gst || 0,
-        expected_amount: r.expected_amount || 0,
-        actual_amount: r.actual_amount || 0,
-        difference: r.difference || 0,
-        status: r.status || 'pass',
-        formula_used: r.formula_used || ''
-      }));
+    if (detail) {
+      const run = getStoredRuns().find(r => r.run_id === runId);
+      if (run?.is_demo && ENABLE_MOCK_DATA) {
+        return getMockRowMath(runId);
+      }
+
+      const mathData = 
+        detail.financial_reconciliation || 
+        detail.metrics?.financial_reconciliation || 
+        detail.row_math || 
+        detail.row_math_repair || 
+        detail.canonical_invoice?.row_math;
+
+      if (mathData) {
+        const rows = mathData.rows || (Array.isArray(mathData) ? mathData : []);
+        return rows.map((r: any, idx: number) => ({
+          row_id: r.row_id ?? idx,
+          product: r.product_name || r.product || 'Unknown',
+          qty: r.qty || r.quantity || 0,
+          rate: r.rate || r.unit_price || r.rate_unit || 0,
+          discount: r.discount || 0,
+          gst: r.gst || r.gst_rate || 0,
+          expected_amount: r.expected_amount || r.calculated_amount || 0,
+          actual_amount: r.actual_amount || r.amount || 0,
+          difference: r.difference || r.diff || 0,
+          status: r.status || (Math.abs(r.difference || 0) < 0.01 ? 'pass' : 'fail'),
+          formula_used: r.formula_used || r.formula || ''
+        }));
+      }
     }
+
     if (ENABLE_MOCK_DATA) {
       return getMockRowMath(runId);
     }
@@ -1279,19 +1673,49 @@ export const apiClient = {
   // Gets Quality Gate ERP checklist validation
   async getQualityGate(runId: string): Promise<QualityGate | null> {
     const detail = getDetailsData(runId);
-    if (detail && detail.quality_gate) {
-      const qg = detail.quality_gate;
-      return {
-        safe_for_erp: qg.safe_for_erp ?? false,
-        status_effective: (qg.safe_for_erp ? 'safe_for_erp' : 'needs_review') as 'safe_for_erp' | 'needs_review' | 'failed',
-        confidence: qg.confidence ?? detail.invoice_confidence ?? 1.0,
-        reasons: qg.reasons || [],
-        missing_fields: qg.missing_fields || [],
-        footer_status: qg.footer_status || '',
-        row_math_status: qg.row_math_status || 'unmeasurable',
-        checklist: qg.checklist || []
-      };
+    const run = getStoredRuns().find(r => r.run_id === runId);
+
+    if (detail) {
+      if (run?.is_demo && ENABLE_MOCK_DATA) {
+        return getMockQualityGate(runId);
+      }
+
+      const qg = 
+        detail.quality_gate || 
+        detail.metadata?.quality_gate || 
+        detail.canonical_invoice?.quality_gate || 
+        detail.metadata?.canonical_invoice?.quality_gate;
+
+      if (qg) {
+        return {
+          safe_for_erp: qg.safe_for_erp ?? false,
+          status_effective: (qg.safe_for_erp ? 'safe_for_erp' : (qg.status_effective || 'needs_review')) as 'safe_for_erp' | 'needs_review' | 'failed',
+          confidence: qg.confidence ?? detail.invoice_confidence ?? run?.confidence ?? 1.0,
+          reasons: qg.reasons || [],
+          missing_fields: qg.missing_fields || [],
+          footer_status: qg.footer_status || '',
+          row_math_status: qg.row_math_status || 'unmeasurable',
+          checklist: qg.checklist || []
+        };
+      }
+
+      if (run) {
+        return {
+          safe_for_erp: run.status === 'safe_for_erp',
+          status_effective: (run.status === 'safe_for_erp' ? 'safe_for_erp' : 'needs_review') as 'safe_for_erp' | 'needs_review' | 'failed',
+          confidence: run.confidence,
+          reasons: run.status !== 'safe_for_erp' ? ['Manual verification required. No backend quality gate parsed.'] : [],
+          missing_fields: run.missing_fields || [],
+          footer_status: 'Built from local run summary',
+          row_math_status: run.row_math_status || 'unmeasurable',
+          checklist: [
+            { name: 'OCR Extraction Quality Check', status: run.confidence > 0.8 ? 'pass' : 'fail', explanation: `Confidence is ${(run.confidence * 100).toFixed(0)}%` },
+            { name: 'Row Math Consistency Check', status: run.row_math_status === 'pass' ? 'pass' : 'fail', explanation: `Status is ${run.row_math_status.toUpperCase()}` }
+          ]
+        };
+      }
     }
+
     if (ENABLE_MOCK_DATA) {
       return getMockQualityGate(runId);
     }
@@ -1334,9 +1758,10 @@ export const apiClient = {
         }
       ];
     }
-    if (ENABLE_MOCK_DATA) {
-      const run = await this.getRun(runId);
-      return getMockArtifacts(runId, run.filename);
+    const run = getStoredRuns().find(r => r.run_id === runId);
+    if (run?.is_demo && ENABLE_MOCK_DATA) {
+      const r = await this.getRun(runId);
+      return getMockArtifacts(runId, r.filename);
     }
     return [];
   },
@@ -1344,6 +1769,22 @@ export const apiClient = {
   // Expose the storage clearing helper
   clearWorkbenchRunStorage() {
     clearWorkbenchRunStorage();
+  },
+
+  // Calls backend to clear OCR results/scans cache
+  async clearBackendCache(): Promise<{ status: string; deleted_count: number }> {
+    try {
+      const response = await fetch('/clear-cache', {
+        method: 'POST'
+      });
+      if (response.ok) {
+        return await response.json();
+      }
+      throw new Error('Failed to clear backend cache');
+    } catch (error) {
+      console.error('Error calling /clear-cache:', error);
+      return { status: 'failed', deleted_count: 0 };
+    }
   },
 
   // Downloads specific output artifact

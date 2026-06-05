@@ -4,7 +4,7 @@ import { useRun } from '../context/RunContext';
 import { apiClient } from '../api/client';
 import type { OCRBlock, RunSummary } from '../api/types';
 import { Search, Filter, AlertTriangle, Hash, Calendar, Link as LinkIcon, Info } from 'lucide-react';
-import { getInvoiceImageSvgUrl } from '../api/client';
+import { getInvoiceImageUrl } from '../api/client';
 
 export const OcrTokensPage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
@@ -172,7 +172,9 @@ export const OcrTokensPage: React.FC = () => {
                           }`}>
                             {(tok.confidence * 100).toFixed(1)}%
                           </td>
-                          <td className="py-2.5 px-4 text-gray-500 text-[10px]">[{tok.bbox.join(', ')}]</td>
+                          <td className="py-2.5 px-4 text-gray-500 text-[10px]">
+                            {tok.bbox ? `[${tok.bbox.join(', ')}]` : 'missing'}
+                          </td>
                           <td className="py-2.5 px-4 text-center text-gray-300">{tok.assigned_row_id !== undefined ? tok.assigned_row_id : '—'}</td>
                           <td className="py-2.5 px-4 text-center text-gray-300">{tok.assigned_col_id !== undefined ? tok.assigned_col_id : '—'}</td>
                           <td className="py-2.5 px-4 text-center text-[#00f0ff]">{tok.assigned_cell_id || '—'}</td>
@@ -182,7 +184,9 @@ export const OcrTokensPage: React.FC = () => {
                                 ? 'bg-emerald-950/45 text-emerald-400 border border-emerald-900/20'
                                 : tok.status === 'orphan'
                                   ? 'bg-rose-950/45 text-rose-400 border border-rose-900/20'
-                                  : 'bg-amber-950/45 text-amber-400 border border-amber-900/20'
+                                  : tok.status === 'missing_geometry'
+                                    ? 'bg-rose-950/60 text-rose-400 border border-rose-800'
+                                    : 'bg-amber-950/45 text-amber-400 border border-amber-900/20'
                             }`}>
                               {tok.status.toUpperCase()}
                             </span>
@@ -234,7 +238,9 @@ export const OcrTokensPage: React.FC = () => {
 
               <div>
                 <span className="text-[10px] text-gray-500 block uppercase">Absolute BBox</span>
-                <span className="text-gray-400">[{selectedToken.bbox.join(', ')}]</span>
+                <span className="text-gray-400">
+                  {selectedToken.bbox ? `[${selectedToken.bbox.join(', ')}]` : 'missing'}
+                </span>
               </div>
 
               <div className="border-t border-[#30363d] pt-3">
@@ -277,23 +283,25 @@ export const OcrTokensPage: React.FC = () => {
                   {/* Styled Document preview box */}
                   <div className="w-[300px] h-[375px] relative shrink-0" style={{ transform: 'scale(0.38)', transformOrigin: 'center center' }}>
                     <img
-                      src={getInvoiceImageSvgUrl(activeRun.filename)}
+                      src={getInvoiceImageUrl(activeRun.run_id, activeRun.filename)}
                       alt="Mini Invoice View"
                       className="absolute inset-0 w-full h-full pointer-events-none"
                     />
                     
                     {/* SVG boundary highlight box */}
-                    <svg className="absolute inset-0 w-full h-full">
-                      <rect
-                        x={selectedToken.bbox[0]}
-                        y={selectedToken.bbox[1]}
-                        width={selectedToken.bbox[2] - selectedToken.bbox[0]}
-                        height={selectedToken.bbox[3] - selectedToken.bbox[1]}
-                        fill="rgba(0, 240, 255, 0.25)"
-                        stroke="#00f0ff"
-                        strokeWidth="4"
-                      />
-                    </svg>
+                    {selectedToken.bbox && (
+                      <svg className="absolute inset-0 w-full h-full">
+                        <rect
+                          x={selectedToken.bbox[0]}
+                          y={selectedToken.bbox[1]}
+                          width={selectedToken.bbox[2] - selectedToken.bbox[0]}
+                          height={selectedToken.bbox[3] - selectedToken.bbox[1]}
+                          fill="rgba(0, 240, 255, 0.25)"
+                          stroke="#00f0ff"
+                          strokeWidth="4"
+                        />
+                      </svg>
+                    )}
                   </div>
 
                 </div>

@@ -6,13 +6,17 @@ from typing import Optional
 from core.config import settings
 from core.logger import logger
 
+# Log the active pipeline version on initialization
 logger.info(f"[PIPELINE VERSION] {settings.PIPELINE_VERSION}")
 
+# Track cache status globally to prevent repetitive check overhead
 _CACHE_WRITABLE: Optional[bool] = None
 _CACHE_STATUS_LOGGED = False
 _CACHE_WARNING_LOGGED = False
 _SAVE_DISABLED_FOR_PROCESS = False
 
+# Keys representing layout reconstruction results that should not be cached.
+# We always regenerate reconstruction on the fly to support live layout edits.
 RECONSTRUCTION_RESPONSE_KEYS = {
     "reconstructed_rows",
     "detected_table_rows",
@@ -30,16 +34,19 @@ RECONSTRUCTION_RESPONSE_KEYS = {
 }
 
 def _cache_fix_suggestion(path: str) -> str:
+    # Generates a standard command suggestion to resolve file permissions on the directory
     return f"Fix with: sudo chown -R $USER:$USER {path} && chmod -R u+rwX {path}"
 
 def _versioned_key(invoice_id: str) -> str:
     """Generate a cache key incorporating pipeline version to prevent stale reuse."""
+    # Append the pipeline version to make caches self-invalidating when version increments
     return f"{invoice_id}_v{settings.PIPELINE_VERSION}"
 
 def _log_cache_warning_once(path: str, reason: str):
     global _CACHE_WARNING_LOGGED
     if _CACHE_WARNING_LOGGED:
         return
+    # Use global tracking to ensure we only log the warning once per process lifecycle
     logger.warning(
         f"[CACHE STATUS] Cache disabled due to unwritable path. "
         f"path={path} reason={reason}. {_cache_fix_suggestion(path)}"
@@ -62,7 +69,9 @@ def check_cache_status(log_status: bool = True) -> bool:
         _SAVE_DISABLED_FOR_PROCESS = True
     else:
         try:
+            # Recursively build paths to cache output directory
             os.makedirs(path, exist_ok=True)
+            # Create a short-lived random probe file to guarantee write/delete capabilities
             probe_path = os.path.join(path, f".cache_write_probe_{uuid.uuid4().hex}")
             with open(probe_path, "w", encoding="utf-8") as f:
                 f.write("ok")
@@ -88,6 +97,7 @@ def check_cache_status(log_status: bool = True) -> bool:
     return writable
 
 def compute_md5(file_bytes: bytes) -> str:
+    # MD5 hashing logic that supports both python standard libraries with security flags and standard platforms
     try:
         return hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()
     except TypeError:
@@ -127,6 +137,7 @@ def get_cached_result(invoice_id: str) -> Optional[dict]:
             with open(cache_path, "r", encoding="utf-8") as f:
                 cached_data = json.load(f)
             logger.info("Cached reconstruction response disabled")
+            # Strip out cached layout topology and return clean primitive OCR coordinates
             return _ocr_only_payload(cached_data)
         except Exception as e:
             logger.error(f"Failed to read cache for {cache_key}: {e}")
@@ -148,6 +159,7 @@ def save_result(invoice_id: str, data: dict):
     cache_key = _versioned_key(invoice_id)
     cache_path = os.path.join(settings.OCR_RESULTS_DIR, f"{cache_key}.json")
     try:
+        # Strip all reconstruction items from results before dumping to cache
         data = _ocr_only_payload(data)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -162,3 +174,27 @@ def save_result(invoice_id: str, data: dict):
         _log_cache_warning_once(settings.OCR_RESULTS_DIR, f"os_error:{e}")
     except Exception as e:
         logger.warning(f"Failed to save cache for {cache_key}: {type(e).__name__}: {e}")
+
+def clear_all_cache() -> int:
+    """
+    Deletes all JSON files stored in the OCR_RESULTS_DIR directory.
+    Returns the total number of files successfully deleted.
+    """
+    path = settings.OCR_RESULTS_DIR
+    if not os.path.exists(path):
+        logger.info(f"Cache directory does not exist, nothing to clear: {path}")
+        return 0
+        
+    deleted_count = 0
+    # List files and filter for JSON results
+    for filename in os.listdir(path):
+        if filename.endswith(".json"):
+            file_path = os.path.join(path, filename)
+            try:
+                os.remove(file_path)
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to remove cache file {file_path}: {e}")
+                
+    logger.info(f"Cleared OCR cache: deleted {deleted_count} files from {path}")
+    return deleted_count

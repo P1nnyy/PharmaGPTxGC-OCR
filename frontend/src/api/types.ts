@@ -10,18 +10,19 @@ export interface RunSummary {
   selected_table_shape: string; // e.g. "16 Rows x 8 Columns"
   missing_fields: string[];
   row_math_status: 'pass' | 'fail' | 'unmeasurable';
+  is_demo?: boolean;
 }
 
 export interface OCRBlock {
   block_id: string;
   text: string;
   confidence: number;
-  bbox: [number, number, number, number]; // [x_min, y_min, x_max, y_max] in absolute or relative pixels
-  normalized_bbox: [number, number, number, number]; // [x_min, y_min, x_max, y_max] normalized (0 to 1)
+  bbox: [number, number, number, number] | null; // [x_min, y_min, x_max, y_max] in absolute or relative pixels
+  normalized_bbox?: [number, number, number, number] | null; // [x_min, y_min, x_max, y_max] normalized (0 to 1)
   assigned_row_id?: number;
   assigned_col_id?: number;
   assigned_cell_id?: string;
-  status: 'mapped' | 'orphan' | 'ambiguous' | 'merged' | 'split_candidate' | 'low_confidence';
+  status: 'mapped' | 'orphan' | 'ambiguous' | 'merged' | 'split_candidate' | 'low_confidence' | 'missing_geometry';
   warnings?: string[];
 }
 
@@ -54,6 +55,7 @@ export interface CandidateTable {
   rejection_reason?: string;
   representability_score: number;
   preview_cells: string[][]; // 2D grid preview text
+  bbox?: [number, number, number, number] | null;
 }
 
 export interface SelectedTable {
@@ -66,6 +68,7 @@ export interface SelectedTable {
   required_fields_present: string[];
   required_fields_missing: string[];
   cells: TableCell[][]; // 2D array of TableCell
+  bbox?: [number, number, number, number] | null;
 }
 
 export interface SemanticColumn {
