@@ -414,6 +414,8 @@ function buildDenseTableGrid(rawCells: any[]): TableCell[][] {
       text: cell.text || '',
       confidence: conf,
       semantic_label: cell.semantic_label || cell.label || '',
+      row_role: cell.row_role,
+      role: cell.role,
       bbox: bbox as [number, number, number, number],
       normalized_bbox: nbbox as [number, number, number, number],
       source_blocks: cell.mapped_block_ids || cell.source_blocks || [],

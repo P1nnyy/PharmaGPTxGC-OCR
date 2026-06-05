@@ -33,6 +33,8 @@ export interface TableCell {
   text: string;
   confidence: number;
   semantic_label: string;
+  row_role?: string;
+  role?: string;
   bbox: [number, number, number, number];
   normalized_bbox: [number, number, number, number];
   source_blocks: string[]; // block_ids

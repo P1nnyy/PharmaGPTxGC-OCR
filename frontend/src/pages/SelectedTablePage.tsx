@@ -5,6 +5,59 @@ import { apiClient } from '../api/client';
 import type { SelectedTable, SemanticColumn, TableCell, RunSummary } from '../api/types';
 import { AlertTriangle, CheckCircle } from 'lucide-react';
 
+const HEADER_TERMS_RE = /\b(ITEM|DESCRIPTION|PRODUCT|HSN|PACK|BATCH|QTY|QUANTITY|RATE|EXP|EXPIRY|MRP|GST|AMOUNT|AMT|DISC|DISCOUNT)\b/gi;
+const HEADER_ROLE_RE = /\b(header|column_header|table_header)\b/i;
+const BODY_ROLE_RE = /\b(item|data|body)\b/i;
+
+const getCellSignal = (cell: TableCell, key: string): string => {
+  const value = (cell as unknown as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : '';
+};
+
+const countHeaderTerms = (text: string): number => {
+  const matches = text.toUpperCase().match(HEADER_TERMS_RE) || [];
+  return new Set(matches.map(match => match.toUpperCase())).size;
+};
+
+const isHeaderRow = (row: TableCell[]): boolean => {
+  const populatedCells = row.filter(cell => cell && cell.text && cell.text.trim());
+  if (populatedCells.length === 0) return false;
+
+  const roleSignals = populatedCells
+    .flatMap(cell => [
+      getCellSignal(cell, 'row_role'),
+      getCellSignal(cell, 'role'),
+      getCellSignal(cell, 'status'),
+    ])
+    .filter(Boolean);
+
+  if (roleSignals.some(signal => HEADER_ROLE_RE.test(signal))) return true;
+  if (roleSignals.some(signal => BODY_ROLE_RE.test(signal))) return false;
+
+  const semanticSignals = populatedCells
+    .map(cell => cell.semantic_label || '')
+    .filter(Boolean);
+  if (semanticSignals.some(signal => HEADER_ROLE_RE.test(signal))) return true;
+
+  const rowText = populatedCells.map(cell => cell.text).join(' ');
+  return countHeaderTerms(rowText) >= 2;
+};
+
+const getColumnCount = (grid: TableCell[][], selectedTable: SelectedTable): number => {
+  const gridColumnCount = grid.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0);
+  return Math.max(selectedTable.cols || 0, gridColumnCount);
+};
+
+const getTableViewRows = (selectedTable: SelectedTable) => {
+  const grid: TableCell[][] = Array.isArray(selectedTable.cells) ? selectedTable.cells : [];
+  const firstRow: TableCell[] = Array.isArray(grid[0]) ? grid[0] : [];
+  const columnCount = getColumnCount(grid, selectedTable);
+  const hasHeaderRow = isHeaderRow(firstRow);
+  const bodyRows = hasHeaderRow ? grid.slice(1) : grid;
+
+  return { grid, firstRow, columnCount, hasHeaderRow, bodyRows };
+};
+
 export const SelectedTablePage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
   const { currentRunId } = useRun();
@@ -30,9 +83,12 @@ export const SelectedTablePage: React.FC = () => {
         const mappings = await apiClient.getSemanticMapping(activeId);
         setSemanticCols(mappings);
 
-        if (table && Array.isArray(table.cells) && table.cells.length > 1 && Array.isArray(table.cells[1]) && table.cells[1].length > 0) {
-          // Default select the first data cell
-          setSelectedCellId(table.cells[1][0].cell_id);
+        if (table) {
+          const { bodyRows } = getTableViewRows(table);
+          const firstBodyCell = bodyRows.find(row => Array.isArray(row) && row.length > 0)?.[0];
+          if (firstBodyCell) {
+            setSelectedCellId(firstBodyCell.cell_id);
+          }
         }
       } catch (err) {
         console.error('Failed to load selected table:', err);
@@ -68,10 +124,9 @@ export const SelectedTablePage: React.FC = () => {
         </div>
       ) : (() => {
         // Defensive grid extraction
-        const grid: TableCell[][] = Array.isArray(selectedTable?.cells) ? selectedTable.cells : [];
-        const headerRow: TableCell[] = Array.isArray(grid[0]) ? grid[0] : [];
+        const { grid, firstRow, columnCount, hasHeaderRow, bodyRows } = getTableViewRows(selectedTable);
 
-        if (!grid.length || !headerRow.length) {
+        if (!grid.length || columnCount === 0) {
           return (
             <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 space-y-3">
               <div className="text-center text-amber-400 text-sm font-semibold">
@@ -151,12 +206,14 @@ export const SelectedTablePage: React.FC = () => {
                     <thead className="bg-[#0d1117] border-b border-[#30363d] text-[10px]">
                       <tr>
                         <th className="p-2 border-r border-[#30363d] text-center text-gray-600 w-10">#</th>
-                        {headerRow.map((hdr, cIdx) => {
+                        {Array.from({ length: columnCount }, (_, cIdx) => {
+                          const hdr = hasHeaderRow ? firstRow[cIdx] : null;
+                          const headerText = hasHeaderRow ? (hdr?.text || `COL_${cIdx}`) : `COL_${cIdx}`;
                           const semCol = semanticCols.find(sc => sc.col_id === cIdx);
                           return (
                             <th key={cIdx} className="p-3 border-r border-[#30363d] text-gray-400 align-top min-w-[130px]">
-                              <div className="text-[10px] text-gray-500">COL_{cIdx}</div>
-                              <div className="text-white font-bold tracking-tight text-xs uppercase truncate" title={hdr.text}>{hdr.text}</div>
+                              <div className="text-[10px] text-gray-500">{hasHeaderRow ? `COL_${cIdx}` : 'Generated'}</div>
+                              <div className="text-white font-bold tracking-tight text-xs uppercase truncate" title={headerText}>{headerText}</div>
                               {semCol && (
                                 <div className="mt-1 pt-1 border-t border-[#21262d] text-[9px]">
                                   <span className="text-[#00f0ff] font-semibold">{semCol.predicted_type}</span>
@@ -171,7 +228,7 @@ export const SelectedTablePage: React.FC = () => {
 
                     {/* Table Body rows */}
                     <tbody className="divide-y divide-[#30363d]">
-                      {grid.slice(1).map((rowCells, rIdx) => {
+                      {bodyRows.map((rowCells, rIdx) => {
                         const safeRow = Array.isArray(rowCells) ? rowCells : [];
                         return (
                         <tr key={rIdx} className="hover:bg-[#1f242c]/50">
