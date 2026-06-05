@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient, getDetailsData, getInvoiceImageUrl, ENABLE_MOCK_DATA } from '../api/client';
+import { apiClient, getDetailsData, getInvoiceImageUrl, getProcessedInvoiceImageUrl, ENABLE_MOCK_DATA } from '../api/client';
 import type { OCRBlock, CandidateTable, SelectedTable, RunSummary } from '../api/types';
 import { normalizeBBox, mapBBoxToDisplaySpace, getRenderedImageMetrics } from '../utils/overlayGeometry';
 import type { BBox } from '../utils/overlayGeometry';
@@ -53,6 +53,7 @@ export const DebuggerPage: React.FC = () => {
   // Geometry tracking states
   const [runDetail, setRunDetail] = useState<any | null>(null);
   const [imageSize, setImageSize] = useState({ width: 800, height: 1000 });
+  const [imageDisplayMode, setImageDisplayMode] = useState<'original' | 'ocr_corrected'>('ocr_corrected');
   const [showDebugCoords, setShowDebugCoords] = useState(false);
   const [, setMetricsTrigger] = useState(0);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -72,6 +73,28 @@ export const DebuggerPage: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<'idle' | 'ocr' | 'reconstruct'>('idle');
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [hoveredOverlay, setHoveredOverlay] = useState<{ id: string; text: string; confidence: number } | null>(null);
+
+  const activeImageRunId = activeRun?.run_id || runId || currentRunId || '';
+  const processedImageMeta = runDetail?.metadata?.processed_image || runDetail?.processed_image || null;
+  const processedImageUrl = (activeImageRunId ? getProcessedInvoiceImageUrl(activeImageRunId) : null)
+    || processedImageMeta?.processed_image_data_url
+    || null;
+  const processedImageAvailable = Boolean(
+    processedImageUrl &&
+    processedImageMeta?.coordinate_space === 'processed_image' &&
+    typeof processedImageMeta?.processed_width === 'number' &&
+    typeof processedImageMeta?.processed_height === 'number'
+  );
+  const activeImageMode = processedImageAvailable && imageDisplayMode === 'ocr_corrected'
+    ? 'ocr_corrected'
+    : 'original';
+  const displayedImageUrl = activeRun
+    ? (activeImageMode === 'ocr_corrected' && processedImageUrl
+      ? processedImageUrl
+      : getInvoiceImageUrl(activeRun.run_id, activeRun.filename))
+    : '';
+  const overlayCoordinateSpace = processedImageMeta?.coordinate_space || 'original_image';
+  const showingOriginalWithProcessedOverlays = activeImageMode === 'original' && overlayCoordinateSpace === 'processed_image';
 
   // Load run details when active run ID changes
   useEffect(() => {
@@ -103,6 +126,12 @@ export const DebuggerPage: React.FC = () => {
     };
     fetchRunData();
   }, [runId, currentRunId]);
+
+  useEffect(() => {
+    if (processedImageAvailable) {
+      setImageDisplayMode('ocr_corrected');
+    }
+  }, [processedImageAvailable]);
 
   // Utility toast helper
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
@@ -156,7 +185,7 @@ export const DebuggerPage: React.FC = () => {
   };
 
   // Geometry computation helper functions
-  const getSourceSize = () => {
+  const getOriginalSourceSize = () => {
     if (runDetail) {
       // 1. image_width / image_height
       if (typeof runDetail.image_width === 'number' && typeof runDetail.image_height === 'number') {
@@ -190,6 +219,20 @@ export const DebuggerPage: React.FC = () => {
     }
     // Ultimate fallback
     return { width: imageSize.width, height: imageSize.height };
+  };
+
+  const getSourceSize = () => {
+    if (
+      activeImageMode === 'ocr_corrected' &&
+      typeof processedImageMeta?.processed_width === 'number' &&
+      typeof processedImageMeta?.processed_height === 'number'
+    ) {
+      return {
+        width: processedImageMeta.processed_width,
+        height: processedImageMeta.processed_height,
+      };
+    }
+    return getOriginalSourceSize();
   };
 
   const sourceSize = getSourceSize();
@@ -397,6 +440,37 @@ export const DebuggerPage: React.FC = () => {
               <span>{missingGeometryCount} OCR blocks missing geometry</span>
             </span>
           )}
+
+          <div className="ml-3 flex items-center space-x-1 border-l border-[#30363d] pl-3">
+            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold font-mono border ${
+              activeImageMode === 'ocr_corrected'
+                ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                : 'bg-[#0d1117] text-gray-400 border-[#30363d]'
+            }`}>
+              Viewing: {activeImageMode === 'ocr_corrected' ? 'OCR-corrected image' : 'Original upload'}
+            </span>
+            <button
+              onClick={() => setImageDisplayMode('original')}
+              className={`px-2 py-1 rounded text-[10px] font-medium border font-mono transition-all cursor-pointer ${
+                activeImageMode === 'original'
+                  ? 'bg-[#1f242c] border-[#58a6ff] text-[#58a6ff]'
+                  : 'bg-[#0d1117] border-[#30363d] text-gray-400 hover:text-white'
+              }`}
+            >
+              Original
+            </button>
+            <button
+              onClick={() => setImageDisplayMode('ocr_corrected')}
+              disabled={!processedImageAvailable}
+              className={`px-2 py-1 rounded text-[10px] font-medium border font-mono transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                activeImageMode === 'ocr_corrected'
+                  ? 'bg-[#1f242c] border-[#58a6ff] text-[#58a6ff]'
+                  : 'bg-[#0d1117] border-[#30363d] text-gray-400 hover:text-white'
+              }`}
+            >
+              OCR Corrected
+            </button>
+          </div>
         </div>
 
         {/* Action Controls */}
@@ -512,7 +586,7 @@ export const DebuggerPage: React.FC = () => {
                   {/* SVG Rendered Invoice Image beneath */}
                   <img
                     ref={imageRef}
-                    src={getInvoiceImageUrl(activeRun.run_id, activeRun.filename)}
+                    src={displayedImageUrl}
                     alt="Invoice Scanned Document"
                     className="w-full h-full pointer-events-none select-none"
                     draggable={false}
@@ -789,10 +863,18 @@ export const DebuggerPage: React.FC = () => {
 
                 </svg>
 
+                {showingOriginalWithProcessedOverlays && (
+                  <div className="absolute top-14 left-3 bg-[#0d1117]/95 border border-amber-800 rounded p-2.5 z-20 backdrop-blur-sm text-[10px] font-mono text-amber-300 max-w-sm shadow-lg flex items-start space-x-1.5 pointer-events-none">
+                    <AlertTriangle size={12} className="text-amber-400 shrink-0 mt-0.5" />
+                    <span>Overlay coordinates are based on OCR-corrected image; original image display may not align.</span>
+                  </div>
+                )}
+
                 {/* 3. Debug Coordinates HUD Readout */}
                 {showDebugCoords && (
                   <div className="absolute top-14 left-3 bg-[#0d1117]/90 border border-[#30363d] rounded p-2.5 z-20 backdrop-blur-sm text-[10px] font-mono text-gray-300 space-y-1 shadow-md pointer-events-none">
                     <div>source image: {sourceSize.width} x {sourceSize.height}</div>
+                    <div>viewing: {activeImageMode === 'ocr_corrected' ? 'OCR-corrected' : 'original'}</div>
                     <div>rendered image: {Math.round(metrics.width)} x {Math.round(metrics.height)}</div>
                     <div>scaleX / scaleY: {metrics.scaleX.toFixed(3)} / {metrics.scaleY.toFixed(3)}</div>
                     <div>offsetX / offsetY: {Math.round(metrics.offsetLeft)} / {Math.round(metrics.offsetTop)}</div>

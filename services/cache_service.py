@@ -33,6 +33,17 @@ RECONSTRUCTION_RESPONSE_KEYS = {
     "fast_fail_reason",
 }
 
+OCR_METADATA_KEYS = {
+    "rotation_detection",
+    "rotation_applied",
+    "rotation_angle",
+    "rotation_auto_correct_threshold",
+    "legacy_rotation_applied",
+    "legacy_rotation_angle",
+    "legacy_rotation_confidence",
+    "processed_image",
+}
+
 def _cache_fix_suggestion(path: str) -> str:
     # Generates a standard command suggestion to resolve file permissions on the directory
     return f"Fix with: sudo chown -R $USER:$USER {path} && chmod -R u+rwX {path}"
@@ -120,9 +131,16 @@ def _ocr_only_payload(data: dict) -> dict:
     if not text and isinstance(metadata.get("text"), str):
         text = metadata.get("text", "")
 
+    ocr_metadata = {
+        key: metadata[key]
+        for key in OCR_METADATA_KEYS
+        if key in metadata
+    }
+
     return {
         "text": text,
         "blocks": blocks or [],
+        "metadata": ocr_metadata,
     }
 
 def get_cached_result(invoice_id: str) -> Optional[dict]:

@@ -36,6 +36,43 @@ async function cacheImageLocal(runId: string, file: File): Promise<void> {
   }
 }
 
+function cacheProcessedImageLocal(runId: string, dataUrl?: string): void {
+  if (!dataUrl || typeof dataUrl !== 'string') return;
+  try {
+    sessionStorage.setItem(`ocr_workbench_processed_image_${runId}`, dataUrl);
+  } catch (e) {
+    console.warn('Failed to cache processed image in sessionStorage:', e);
+  }
+}
+
+function sanitizeForLocalStorage(value: any): any {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeForLocalStorage);
+  }
+
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+
+    for (const [key, val] of Object.entries(value)) {
+      const lowerKey = key.toLowerCase();
+
+      if (
+        lowerKey.includes('data_url') ||
+        lowerKey.includes('base64') ||
+        lowerKey.includes('image_data')
+      ) {
+        out[key] = `<redacted ${String(val).length} chars>`;
+      } else {
+        out[key] = sanitizeForLocalStorage(val);
+      }
+    }
+
+    return out;
+  }
+
+  return value;
+}
+
 // Retrieves the cached image URL if present, otherwise returns mock SVG representation
 export const getInvoiceImageUrl = (runId: string, filename: string): string => {
   const cached = sessionStorage.getItem(`ocr_workbench_image_${runId}`);
@@ -43,6 +80,10 @@ export const getInvoiceImageUrl = (runId: string, filename: string): string => {
     return cached;
   }
   return getInvoiceImageSvgUrl(filename);
+};
+
+export const getProcessedInvoiceImageUrl = (runId: string): string | null => {
+  return sessionStorage.getItem(`ocr_workbench_processed_image_${runId}`);
 };
 
 // Generates a mock invoice image as an SVG data URL matching coordinates
@@ -623,6 +664,15 @@ export function normalizeBackendDiagnostics(backendData: any): any {
   if (financial_reconciliation) {
     res.financial_reconciliation = financial_reconciliation;
     res.metadata.financial_reconciliation = financial_reconciliation;
+  }
+
+  const processed_image =
+    backendData.processed_image ||
+    backendData.metadata?.processed_image ||
+    backendData.metadata?.image_processing?.processed_image;
+  if (processed_image) {
+    res.processed_image = processed_image;
+    res.metadata.processed_image = processed_image;
   }
 
   // Resolve Quality Gate
@@ -1418,12 +1468,23 @@ export const apiClient = {
 
       // Cache the uploaded image file locally
       await cacheImageLocal(newRunId, file);
+      const processedImageDataUrl = normalizedDetail.metadata?.processed_image?.processed_image_data_url;
+      cacheProcessedImageLocal(newRunId, processedImageDataUrl);
+      if (normalizedDetail.metadata?.processed_image) {
+        delete normalizedDetail.metadata.processed_image.processed_image_data_url;
+      }
+      if (normalizedDetail.processed_image) {
+        delete normalizedDetail.processed_image.processed_image_data_url;
+      }
 
       // Store the normalized diagnostics details
       localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(normalizedDetail));
 
       // Also store raw backend response for debugging
-      localStorage.setItem(`ocr_workbench_raw_backend_${newRunId}`, JSON.stringify(backendData));
+      localStorage.setItem(
+        `ocr_workbench_raw_backend_${newRunId}`,
+        JSON.stringify(sanitizeForLocalStorage(backendData))
+      );
 
       runs.unshift(newRun);
       saveStoredRuns(runs);
@@ -1904,7 +1965,8 @@ export const apiClient = {
     const detail = getDetailsData(runId);
     if (detail) {
       const run = await this.getRun(runId);
-      return [
+      const processedImage = detail.metadata?.processed_image || detail.processed_image;
+      const artifacts: Artifact[] = [
         {
           name: `${run.filename}`,
           type: 'image',
@@ -1934,6 +1996,16 @@ export const apiClient = {
           created_at: run.timestamp
         }
       ];
+      if (processedImage?.processed_image_path) {
+        artifacts.splice(1, 0, {
+          name: 'ocr_corrected_image.png',
+          type: 'image',
+          path: processedImage.processed_image_path,
+          size: 'Generated',
+          created_at: run.timestamp
+        });
+      }
+      return artifacts;
     }
     const run = getStoredRuns().find(r => r.run_id === runId);
     if (run?.is_demo && ENABLE_MOCK_DATA) {

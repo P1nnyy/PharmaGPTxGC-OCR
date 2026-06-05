@@ -3,6 +3,9 @@ import threading
 from PIL import Image, ImageOps
 import numpy as np
 from typing import List, Dict, Any, Tuple
+from pathlib import Path
+from io import BytesIO
+import base64
 from core.logger import logger
 from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
@@ -15,6 +18,20 @@ _detection_predictor = None
 _recognition_predictor = None
 _model_load_lock = threading.Lock()
 ROTATION_AUTO_CORRECT_CONFIDENCE_THRESHOLD = 0.85
+
+
+def _image_data_url(image: Image.Image) -> str:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _save_processed_image(image: Image.Image, path: str) -> str:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, format="PNG")
+    return str(output_path)
 
 
 def _apply_rotation_if_confident(
@@ -73,9 +90,15 @@ def load_models_if_needed():
             _recognition_predictor = RecognitionPredictor(_foundation_predictor)
             logger.info("Recognition Predictor loaded.")
 
-def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, Any]:
+def process_image(
+    image: Image.Image,
+    langs: List[str] = ["en"],
+    processed_image_path: str | None = None,
+    include_processed_image_data_url: bool = False,
+) -> Dict[str, Any]:
     load_models_if_needed()
     image = image.copy()
+    original_width, original_height = image.size
     
     # 1. Orientation Normalization
     try:
@@ -116,6 +139,27 @@ def process_image(image: Image.Image, langs: List[str] = ["en"]) -> Dict[str, An
         "legacy_rotation_angle": int(applied_rotation or 0),
         "legacy_rotation_confidence": float(rot_confidence or 0.0),
     })
+    coordinate_image = image.copy()
+    rotation_applied_degrees = (
+        int(rotation_metadata.get("legacy_rotation_angle") or 0)
+        or int(rotation_metadata.get("rotation_angle") or 0)
+    )
+    processed_image_metadata = {
+        "original_width": int(original_width),
+        "original_height": int(original_height),
+        "processed_width": int(coordinate_image.width),
+        "processed_height": int(coordinate_image.height),
+        "rotation_applied_degrees": rotation_applied_degrees,
+        "coordinate_space": "processed_image",
+    }
+    if processed_image_path:
+        processed_image_metadata["processed_image_path"] = _save_processed_image(
+            coordinate_image,
+            processed_image_path,
+        )
+    if include_processed_image_data_url:
+        processed_image_metadata["processed_image_data_url"] = _image_data_url(coordinate_image)
+    rotation_metadata["processed_image"] = processed_image_metadata
 
     # 2. Adaptive Resolution Upscaling
     # Run coarse detection height validation after potential rotation correction

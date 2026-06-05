@@ -8,6 +8,7 @@ from services.llm_extractor import LLMExtractor
 from PIL import Image
 import io
 import torch
+from pathlib import Path
 
 router = APIRouter()
 
@@ -76,7 +77,9 @@ async def upload_invoice(
         if cached_result:
             logger.info("OCR cache hit: reusing OCR blocks only")
             blocks = cached_result.get("blocks", [])
+            cached_metadata = cached_result.get("metadata") if isinstance(cached_result.get("metadata"), dict) else {}
             metadata = {
+                **cached_metadata,
                 "blocks": blocks,
                 "image_validation": val_report
             }
@@ -103,7 +106,12 @@ async def upload_invoice(
         # Convert raw file bytes into PIL Image representation
         image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
         # Run primary deep learning model OCR extraction suite (Surya OCR / PaddleOCR)
-        ocr_result = ocr_engine.process_image(image)
+        processed_image_path = str(Path("datasets/debug") / f"{invoice_id}_ocr_corrected.png")
+        ocr_result = ocr_engine.process_image(
+            image,
+            processed_image_path=processed_image_path,
+            include_processed_image_data_url=True,
+        )
         
         # Commit raw primitives to file cache
         cache_service.save_result(invoice_id, ocr_result)
