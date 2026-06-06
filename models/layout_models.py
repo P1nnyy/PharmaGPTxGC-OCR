@@ -86,6 +86,10 @@ class TableCell(BaseModel):
     semantic_outlier_reason: Optional[str] = None
     assignment_confidence: float = 1.0  # Composite confidence of token-to-cell assignment
     assignment_strategy: str = "unassigned"  # "row_scoped", "neighbor_row", "global_fallback"
+    row_role: Optional[str] = None
+    role: Optional[str] = None
+    semantic_label: Optional[str] = None
+    label: Optional[str] = None
 
 class CellOwnership(BaseModel):
     """Granular provenance record for a single token-to-cell assignment."""
@@ -108,3 +112,6 @@ class TableRegion(BaseModel):
     confidence: float = 1.0
     source_engine: str = "unknown"
     topology_confidence: float = 1.0  # TSR-level reliability signal (degraded for heuristic fallback)
+    required_fields_present: List[str] = Field(default_factory=list)
+    required_fields_missing: List[str] = Field(default_factory=list)
+    representability_score: float = 1.0

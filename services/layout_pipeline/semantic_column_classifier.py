@@ -892,6 +892,20 @@ class SemanticColumnClassifier:
         Annotates semantic outliers without deleting OCR text.
         """
         results = self.analyze_table_columns(region)
+        
+        # Populate cells' semantic labels from column classification
+        for col_id, data in results.items():
+            if col_id.startswith("_"):
+                continue
+            col_type = data.get("type", ColumnSemantics.UNKNOWN)
+            col_conf = data.get("confidence", 0.5)
+            if col_type == ColumnSemantics.UNKNOWN:
+                col_conf = 0.0
+            for cell in [c for c in region.cells if c.col_id == col_id]:
+                cell.semantic_label = col_type
+                cell.label = col_type
+                cell.confidence = col_conf
+
         numeric_whitelist = r"^[ \d\+\*xX\.,₹$RS%\s\(\)-]+$"
 
         outliers = 0

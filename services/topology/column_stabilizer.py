@@ -1,6 +1,11 @@
-from typing import List, Dict, Any, Tuple
+from __future__ import annotations
+
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from core.logger import logger
 from models.layout_models import TableRegion, ColumnRegion
+
+if TYPE_CHECKING:
+    from services.layout_pipeline.wide_table_detector import WideTableEvidence
 
 class ColumnStabilizer:
     """
@@ -19,15 +24,21 @@ class ColumnStabilizer:
     def __init__(self):
         pass
         
-    def stabilize_region(self, region: TableRegion) -> Dict[str, int]:
+    def stabilize_region(
+        self,
+        region: TableRegion,
+        wide_table_evidence: Optional["WideTableEvidence"] = None,
+    ) -> Dict[str, int]:
         """
         Geometry-only scan: detects and repairs phantom/fractured column bands in-place.
         Does NOT read cell.text - safe to call before token assignment.
         """
+        is_wide = bool(wide_table_evidence and wide_table_evidence.is_wide)
         metrics = {
             "phantom_column_count": 0,
             "repaired_columns": 0,
-            "semantic_column_drift": 0
+            "semantic_column_drift": 0,
+            "numeric_merge_blocked_count": 0,
         }
         
         if not region.columns or not region.cells:
@@ -92,10 +103,29 @@ class ColumnStabilizer:
                 curr_occupancy_ratio = col_occupancy.get(curr_cid, 0) / total_cells
                 nxt_occupancy_ratio = col_occupancy.get(nxt_cid, 0) / total_cells
                 
+                # ── Wide-table merge gate ──────────────────────────
+                # In wide-table mode, block merges of narrow columns that
+                # both carry significant cell occupancy.  These are real
+                # numeric/date columns, not phantom fragments.
+                if is_wide:
+                    both_occupied = (curr_occupancy_ratio >= 0.4 and
+                                     nxt_occupancy_ratio >= 0.4)
+                    both_narrow = (is_curr_phantom or is_nxt_phantom)
+                    if both_occupied and both_narrow:
+                        metrics["numeric_merge_blocked_count"] += 1
+                        logger.info(
+                            f"[WIDE TABLE GATE] Blocked merge of '{curr_cid}' + '{nxt_cid}' "
+                            f"(both occupied ≥40%, wide-table mode)"
+                        )
+                        continue
+                
+                # Raise gap threshold in wide-table mode (8 → 25 px)
+                phantom_gap_limit = 25.0 if is_wide else 8.0
+                
                 should_merge = False
                 if overlap > 5.0:  # Direct horizontal entanglement
                     should_merge = True
-                elif (is_curr_phantom or is_nxt_phantom) and gap < 8.0:  # Phantom touching healthy column
+                elif (is_curr_phantom or is_nxt_phantom) and gap < phantom_gap_limit:
                     should_merge = True
                     if is_curr_phantom: metrics["phantom_column_count"] += 1
                     if is_nxt_phantom: metrics["phantom_column_count"] += 1

@@ -86,7 +86,9 @@ def classify_row_roles(region: TableRegion) -> Dict[str, Any]:
         )
         populated_count = len([c for c in cells if c.text.strip()])
 
-        if FOOTER_RE.search(upper) or right_heavy_summary:
+        if getattr(row, "row_role", None) in ("header_row", "header"):
+            role = "header_row"
+        elif FOOTER_RE.search(upper) or right_heavy_summary:
             role = "footer_summary_row"
         elif has_product_text and money_count >= 1 and table_evidence_count >= 2:
             role = "item_row"
@@ -105,6 +107,9 @@ def classify_row_roles(region: TableRegion) -> Dict[str, Any]:
 
         row.row_role = role
         row_roles[row.row_id] = role
+        for cell in cells:
+            cell.row_role = role
+            cell.role = role
 
         if role == "item_row":
             counts["item_rows_count"] += 1

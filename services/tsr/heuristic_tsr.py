@@ -7,6 +7,7 @@ applying coordinate transposes to find the best layout angle and then mapping
 geometries back.
 """
 
+import re
 from PIL import Image
 from typing import List, Dict, Tuple, Any, Optional
 from models.layout_models import (
@@ -20,6 +21,8 @@ from services.layout_pipeline.row_clustering import cluster_into_rows
 from services.layout_pipeline.row_classification import classify_rows
 from services.layout_pipeline.column_projection import get_last_projection_debug, project_column_boundaries
 from services.layout_pipeline.multiline_merging import merge_multiline_rows
+from services.layout_pipeline.wide_table_detector import detect_wide_table, split_fused_block
+
 
 def rotate_blocks(blocks: List[OCRBlock], angle: int) -> List[OCRBlock]:
     """Rotates OCR block normalized coordinates clock-wise to evaluate structural cohesion."""
@@ -77,6 +80,7 @@ def rotate_blocks(blocks: List[OCRBlock], angle: int) -> List[OCRBlock]:
         
     return rotated
 
+
 def invert_geometry(geom: GeometryBox, angle: int, max_x: float, max_y: float) -> GeometryBox:
     """Applies inverse rotation (360 - angle) to map geometries back to original coordinates."""
     if angle == 0 or angle % 360 == 0:
@@ -112,11 +116,20 @@ def invert_geometry(geom: GeometryBox, angle: int, max_x: float, max_y: float) -
         center_y=(new_min_y + new_max_y) / 2.0
     )
 
+
 class HeuristicTSREngine(BaseTSREngine):
     """Deterministic geometric primitive analyzer for table segment extraction."""
 
     def _detect_tables_single(self, blocks: List[OCRBlock]) -> Tuple[List[TableRegion], Dict[str, Any]]:
         """Core layout primitive segmentation on a static single coordinate space."""
+        # 0. Check wide table evidence and run pre-reconstruction block splitting if active
+        raw_wide_table_evidence = detect_wide_table(blocks, [])
+        if raw_wide_table_evidence.is_wide:
+            split_blocks = []
+            for b in blocks:
+                split_blocks.extend(split_fused_block(b))
+            blocks = split_blocks
+
         # 1. Compose Base Primitives
         reconstructed_rows = cluster_into_rows(blocks)
         reconstructed_rows = classify_rows(reconstructed_rows)
@@ -125,19 +138,26 @@ class HeuristicTSREngine(BaseTSREngine):
         # 2. Segment rows into contiguous semantic regions
         segmented_regions = []
         if reconstructed_rows:
+            def get_segment_group(classification: str) -> str:
+                # Group Column Header and Medicine Table Row into the same contiguous item table segment
+                if classification in ("Column Header", "Medicine Table Row"):
+                    return "Medicine Table Row"
+                return classification
+
             current_segment = [reconstructed_rows[0]]
-            current_class = reconstructed_rows[0].classification
+            current_group = get_segment_group(reconstructed_rows[0].classification)
             
             for row in reconstructed_rows[1:]:
-                if row.classification == current_class:
+                row_group = get_segment_group(row.classification)
+                if row_group == current_group:
                     current_segment.append(row)
                 else:
-                    segmented_regions.append((current_class, current_segment))
+                    segmented_regions.append((current_group, current_segment))
                     current_segment = [row]
-                    current_class = row.classification
+                    current_group = row_group
             
             if current_segment:
-                segmented_regions.append((current_class, current_segment))
+                segmented_regions.append((current_group, current_segment))
                 
         # 3. Process Each Segment as an independent TableRegion
         table_regions = []
@@ -154,6 +174,54 @@ class HeuristicTSREngine(BaseTSREngine):
                 
             # Local Column boundaries
             col_bounds = project_column_boundaries(region_blocks)
+            
+            # 3.5. Header Anchor Override (if wide table mode is active and columns collapsed)
+            if raw_wide_table_evidence.is_wide and len(col_bounds) < 10:
+                header_row = None
+                for r in region_rows:
+                    if r.classification == "Column Header":
+                        header_row = r
+                        break
+                if not header_row and region_rows:
+                    # Fallback header match pattern
+                    header_label_pat = re.compile(
+                        r"\b(PRODUCT|ITEM|DESCRIPTION|PARTICULARS|MEDICINE|DRUG|NAME|HSN|SAC|BATCH|B\.?\s*NO|LOT|QTY|QUANTITY|BILLED|FREE|SCHEME|SCH|RATE|PTR|PRICE|DISC|DISCOUNT|TD|CD|EXP|EXPIRY|MRP|GST|CGST|SGST|IGST|TAX|AMOUNT|AMT|VALUE|NET|PACK|COMPANY|MFR|MANUFACTURER|SR\.?\s*NO|S\.?\s*NO|SHO|SL|NO)\b",
+                        re.I
+                    )
+                    first_r = region_rows[0]
+                    header_hits = sum(1 for b in first_r.blocks if header_label_pat.search(b.text))
+                    if header_hits >= 3:
+                        header_row = first_r
+                
+                if header_row:
+                    header_blocks = sorted(header_row.blocks, key=lambda b: b.normalized_geometry.min_x if b.normalized_geometry else 0)
+                    anchor_spans = []
+                    for b in header_blocks:
+                        geom = b.normalized_geometry
+                        if geom:
+                            anchor_spans.append((geom.min_x, geom.max_x))
+                    
+                    anchor_spans.sort(key=lambda s: s[0])
+                    if len(anchor_spans) >= 8:
+                        derived_bounds = []
+                        for i in range(len(anchor_spans)):
+                            # Left limit
+                            if i == 0:
+                                b_left = 0.0
+                            else:
+                                b_left = (anchor_spans[i-1][1] + anchor_spans[i][0]) / 2.0
+                            
+                            # Right limit
+                            if i == len(anchor_spans) - 1:
+                                b_right = float('inf')
+                            else:
+                                b_right = (anchor_spans[i][1] + anchor_spans[i+1][0]) / 2.0
+                            
+                            derived_bounds.append((b_left, b_right))
+                        
+                        col_bounds = derived_bounds
+                        logger.info(f"[HEURISTIC TSR] Overrode collapsed columns with {len(col_bounds)} header partition bands.")
+
             table_id = f"heuristic_region_{region_idx}"
             column_projection_debug[table_id] = {
                 **get_last_projection_debug(),
@@ -201,7 +269,8 @@ class HeuristicTSREngine(BaseTSREngine):
                     center_x=(r_min_x + r_max_x) / 2.0,
                     center_y=(r_min_y + r_max_y) / 2.0
                 )
-                table_rows.append(RowRegion(row_id=row_id, geometry=row_geom, confidence=1.0))
+                row_role = "header_row" if r.classification == "Column Header" else "unknown_row"
+                table_rows.append(RowRegion(row_id=row_id, geometry=row_geom, confidence=1.0, row_role=row_role))
                 
                 # Cells (Intersection of row and column)
                 for c_idx, col in enumerate(col_regions):

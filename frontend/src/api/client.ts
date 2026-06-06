@@ -468,6 +468,89 @@ function buildDenseTableGrid(rawCells: any[]): TableCell[][] {
   return grid;
 }
 
+function getCellAxisKey(cell: any, axis: 'row' | 'col'): string {
+  const key = axis === 'row'
+    ? (cell.row_index ?? cell.row_id ?? cell.row ?? 0)
+    : (cell.col_index ?? cell.col_id ?? cell.col ?? 0);
+  return String(key);
+}
+
+function sortCellAxisKeys(a: string, b: string, axis: 'row' | 'col'): number {
+  const ia = extractIndex(a, axis);
+  const ib = extractIndex(b, axis);
+  if (ia !== null && ib !== null) return ia - ib;
+  if (ia !== null) return -1;
+  if (ib !== null) return 1;
+  return a.localeCompare(b);
+}
+
+function countUniqueCellAxis(cells: any, axis: 'row' | 'col'): number {
+  if (!Array.isArray(cells) || cells.length === 0) return 0;
+  return new Set(cells.map((cell: any) => getCellAxisKey(cell, axis))).size;
+}
+
+function resolveTableDimension(value: any, cells: any, axis: 'row' | 'col'): number {
+  if (Array.isArray(value)) return value.length;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue)) return numericValue;
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value).length;
+  }
+  return countUniqueCellAxis(cells, axis);
+}
+
+function tableRows(table: any): number {
+  return resolveTableDimension(table?.rows, table?.cells, 'row');
+}
+
+function tableCols(table: any): number {
+  const colSource = table?.columns ?? table?.cols;
+  return resolveTableDimension(colSource, table?.cells, 'col');
+}
+
+function toDensePreviewGrid(previewCells: any): string[][] {
+  if (!Array.isArray(previewCells) || previewCells.length === 0) return [];
+
+  if (Array.isArray(previewCells[0])) {
+    return previewCells.map((row: any[]) =>
+      row.map((cell: any) => {
+        if (cell === null || cell === undefined) return '';
+        if (typeof cell === 'object') return String(cell.text ?? '');
+        return String(cell);
+      })
+    );
+  }
+
+  const sparseCells = previewCells.filter((cell: any) => cell && typeof cell === 'object');
+  if (sparseCells.length === 0) return [];
+
+  const rowKeys = [...new Set(sparseCells.map((cell: any) => getCellAxisKey(cell, 'row')))]
+    .sort((a, b) => sortCellAxisKeys(a, b, 'row'));
+  const colKeys = [...new Set(sparseCells.map((cell: any) => getCellAxisKey(cell, 'col')))]
+    .sort((a, b) => sortCellAxisKeys(a, b, 'col'));
+
+  const rowToDense: Record<string, number> = {};
+  const colToDense: Record<string, number> = {};
+  rowKeys.forEach((key, index) => { rowToDense[key] = index; });
+  colKeys.forEach((key, index) => { colToDense[key] = index; });
+
+  const grid = Array.from({ length: rowKeys.length }, () =>
+    Array.from({ length: colKeys.length }, () => '')
+  );
+
+  for (const cell of sparseCells) {
+    const denseRow = rowToDense[getCellAxisKey(cell, 'row')];
+    const denseCol = colToDense[getCellAxisKey(cell, 'col')];
+    if (denseRow === undefined || denseCol === undefined) continue;
+    grid[denseRow][denseCol] = String(cell.text ?? '');
+  }
+
+  return grid;
+}
+
 // ----- Footer/bank/tax/metadata text patterns for penalizing non-item regions -----
 const FOOTER_PHRASES = /\b(bank\s*detail|account|ifsc|neft|rtgs|branch|upi|terms?\s*(?:and|&)\s*condition|subject\s*to|disclaimer|e\.?\s*&?\s*o\.?\s*e|signature|authorised|stamp|for\s*m\/s|goods\s*once\s*sold|cheque|self|bearer|original\s*copy|duplicate\s*copy)\b/i;
 
@@ -541,8 +624,8 @@ export function selectMainTable(detail: any): any {
   let bestScore = -Infinity;
 
   for (const t of tables) {
-    const rows = t.rows ?? (Array.isArray(t.cells) ? new Set(t.cells.map((c: any) => c.row_index ?? c.row_id ?? 0)).size : 0);
-    const cols = t.cols ?? t.columns ?? (Array.isArray(t.cells) ? new Set(t.cells.map((c: any) => c.col_index ?? c.col_id ?? 0)).size : 0);
+    const rows = tableRows(t);
+    const cols = tableCols(t);
     const cellCount = Array.isArray(t.cells) ? t.cells.length : 0;
 
     let score = 0;
@@ -1457,8 +1540,8 @@ export const apiClient = {
         selected_table_shape: (() => {
           const mainTbl = selectMainTable(normalizedDetail);
           if (!mainTbl) return '0 Rows x 0 Columns';
-          const rows = mainTbl.rows ?? (Array.isArray(mainTbl.cells) ? new Set(mainTbl.cells.map((c: any) => c.row_index ?? c.row_id ?? 0)).size : 0);
-          const cols = mainTbl.cols ?? mainTbl.columns ?? (Array.isArray(mainTbl.cells) ? new Set(mainTbl.cells.map((c: any) => c.col_index ?? c.col_id ?? 0)).size : 0);
+          const rows = tableRows(mainTbl);
+          const cols = tableCols(mainTbl);
           return `${rows} Rows x ${cols} Columns`;
         })(),
         missing_fields: normalizedDetail.quality_gate?.missing_fields || (normalizedDetail.metadata?.quality_gate?.missing_fields || []),
@@ -1625,8 +1708,8 @@ export const apiClient = {
             candidates.push({
               table_id: key,
               source_engine: c.source || key,
-              rows: c.rows || 0,
-              cols: c.columns || 0,
+              rows: tableRows(c),
+              cols: tableCols(c),
               x_coverage: c.x_coverage || 0,
               y_coverage: c.y_coverage || 0,
               cell_count: c.cells || 0,
@@ -1636,7 +1719,7 @@ export const apiClient = {
               selected: decision.selected === key,
               rejection_reason: c.blocked_by?.join(', ') || null,
               representability_score: c.score || c.confidence || 0,
-              preview_cells: c.preview_cells || [],
+              preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
             });
           }
@@ -1645,8 +1728,8 @@ export const apiClient = {
             candidates.push({
               table_id: c.table_id || `cand_${index}`,
               source_engine: c.source_engine || c.source || 'backend_candidate',
-              rows: c.rows || 0,
-              cols: c.columns || c.cols || 0,
+              rows: tableRows(c),
+              cols: tableCols(c),
               x_coverage: c.x_coverage || 0,
               y_coverage: c.y_coverage || 0,
               cell_count: c.cell_count || c.cells || 0,
@@ -1656,7 +1739,7 @@ export const apiClient = {
               selected: c.selected ?? (index === 0),
               rejection_reason: c.rejection_reason || c.blocked_by?.join(', ') || null,
               representability_score: c.score || c.confidence || 0.90,
-              preview_cells: c.preview_cells || [],
+              preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
             });
           });
@@ -1665,8 +1748,8 @@ export const apiClient = {
             candidates.push({
               table_id: c.table_id || `region_${index}`,
               source_engine: c.source_engine || c.source || 'routing_table_region',
-              rows: c.rows || 0,
-              cols: c.columns || c.cols || 0,
+              rows: tableRows(c),
+              cols: tableCols(c),
               x_coverage: c.x_coverage || 0,
               y_coverage: c.y_coverage || 0,
               cell_count: c.cell_count || c.cells || 0,
@@ -1676,7 +1759,7 @@ export const apiClient = {
               selected: c.selected ?? (index === 0),
               rejection_reason: c.rejection_reason || null,
               representability_score: c.score || c.confidence || 0.90,
-              preview_cells: c.preview_cells || [],
+              preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
             });
           });
@@ -1700,8 +1783,8 @@ export const apiClient = {
             candidates.push({
               table_id: tableId,
               source_engine: table.source_engine || 'backend_structured_table',
-              rows: table.rows || 0,
-              cols: table.cols || table.columns || 0,
+              rows: tableRows(table),
+              cols: tableCols(table),
               x_coverage: table.x_coverage || 100,
               y_coverage: table.y_coverage || 100,
               cell_count: table.cell_count || table.cells?.length || 0,
@@ -1711,11 +1794,7 @@ export const apiClient = {
               selected: mainTableId ? (tableId === mainTableId) : (index === 0),
               rejection_reason: undefined,
               representability_score: table.representability_score || 1.0,
-              preview_cells: (table.cells || []).slice(0, 10).map((cell: any) => ({
-                row_id: cell.row_index ?? cell.row_id ?? 0,
-                col_id: cell.col_index ?? cell.col_id ?? 0,
-                text: cell.text || ''
-              })),
+              preview_cells: toDensePreviewGrid(table.preview_cells || table.cells),
               bbox: normalizeBBox(table)
             });
           });
@@ -1724,8 +1803,8 @@ export const apiClient = {
           candidates.push({
             table_id: table.table_id || 'table_1',
             source_engine: table.source_engine || 'backend_structured_table',
-            rows: table.rows || 0,
-            cols: table.cols || table.columns || 0,
+            rows: tableRows(table),
+            cols: tableCols(table),
             x_coverage: table.x_coverage || 100,
             y_coverage: table.y_coverage || 100,
             cell_count: table.cell_count || table.cells?.length || 0,
@@ -1735,11 +1814,7 @@ export const apiClient = {
             selected: true,
             rejection_reason: undefined,
             representability_score: table.representability_score || 1.0,
-            preview_cells: (table.cells || []).slice(0, 10).map((cell: any) => ({
-              row_id: cell.row_index ?? cell.row_id ?? 0,
-              col_id: cell.col_index ?? cell.col_id ?? 0,
-              text: cell.text || ''
-            })),
+            preview_cells: toDensePreviewGrid(table.preview_cells || table.cells),
             bbox: normalizeBBox(table)
           });
         }
@@ -1822,7 +1897,10 @@ export const apiClient = {
           return Object.entries(rawSemantics).map(([key, val]: [string, any]) => {
             const colId = parseInt(key, 10) || 0;
             const type = typeof val === 'string' ? val : (val.label || val.type || 'unknown');
-            const conf = typeof val === 'object' ? (val.confidence ?? val.score ?? 1.0) : 1.0;
+            let conf = typeof val === 'object' ? (val.confidence ?? val.score ?? 1.0) : 1.0;
+            if (type === 'unknown') {
+              conf = 0.0;
+            }
             return {
               col_id: colId,
               predicted_type: type,

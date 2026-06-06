@@ -33,6 +33,45 @@ from services.table_classifier import TableClassifier, route_tables
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_ppstructure import PPStructure_TSREngine
+from services.layout_pipeline.wide_table_detector import detect_wide_table, WideTableEvidence
+from services.layout_pipeline.header_anchor import detect_header_row
+from services.layout_pipeline.footer_kv_extractor import extract_footer_kv
+from services.layout_pipeline.graph_fallback import build_graph_fallback_table_region
+
+
+def _enforce_ordering_invariants(table_regions):
+    """
+    Enforce universal physical ordering: columns sorted by min_x ascending
+    (leftmost = col_0), rows sorted by min_y ascending (topmost = row_0).
+    Cell references are remapped to match the new IDs.
+    """
+    for tr in table_regions:
+        # Sort columns left-to-right by physical min_x
+        tr.columns.sort(key=lambda c: c.geometry.min_x if c.geometry else 0)
+        col_id_remap = {}
+        for i, col in enumerate(tr.columns):
+            old_id = col.col_id
+            new_id = f"col_{i}"
+            col_id_remap[old_id] = new_id
+            col.col_id = new_id
+
+        # Sort rows top-to-bottom by physical min_y
+        tr.rows.sort(key=lambda r: r.geometry.min_y if r.geometry else 0)
+        row_id_remap = {}
+        for i, row in enumerate(tr.rows):
+            old_id = row.row_id
+            new_id = f"row_{i}"
+            row_id_remap[old_id] = new_id
+            row.row_id = new_id
+
+        # Update cell references to match remapped IDs
+        for cell in tr.cells:
+            cell.col_id = col_id_remap.get(cell.col_id, cell.col_id)
+            cell.row_id = row_id_remap.get(cell.row_id, cell.row_id)
+
+    logger.info(
+        f"[ORDERING] Enforced ordering invariants on {len(table_regions)} table(s)"
+    )
 
 
 
@@ -325,6 +364,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     # Step 1: Compute geometry
     ocr_blocks = process_blocks(blocks)
 
+    # Pre-reconstruction wide table block splitting
+    from services.layout_pipeline.wide_table_detector import detect_wide_table, split_fused_blocks
+    raw_wide_table_evidence = detect_wide_table(ocr_blocks, [])
+    if raw_wide_table_evidence.is_wide:
+        logger.info("[WIDE TABLE] Pre-reconstruction wide table detected. Splitting fused blocks...")
+        ocr_blocks = split_fused_blocks(ocr_blocks)
+
     # --- Diagnostic: Raw OCR & Coordinate Ordering Dumps ---
     import os
     import json
@@ -563,16 +609,27 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
 
     tsr_metadata["topology_source"] = topology_source
 
+    # Step 3.5: Wide-Table Evidence Detection (topology-gated)
+    wide_table_evidence = detect_wide_table(ocr_blocks, table_regions)
+    tsr_metadata["wide_table_mode"] = wide_table_evidence.is_wide
+    tsr_metadata["wide_table_confidence"] = wide_table_evidence.confidence
+    tsr_metadata["wide_table_signals"] = wide_table_evidence.signals
+    tsr_metadata["wide_table_estimated_column_count"] = wide_table_evidence.estimated_column_count
+
     # Step 4: PRE-ASSIGNMENT Geometry Stabilization (geometry-only, no text dependency)
     stabilizer = ColumnStabilizer()
-    repair_metrics_total = {"phantom_column_count": 0, "repaired_columns": 0, "semantic_column_drift": 0}
+    repair_metrics_total = {"phantom_column_count": 0, "repaired_columns": 0, "semantic_column_drift": 0, "numeric_merge_blocked_count": 0}
     for tr in table_regions:
-        rep = stabilizer.stabilize_region(tr)
+        rep = stabilizer.stabilize_region(tr, wide_table_evidence=wide_table_evidence)
         for k, v in rep.items():
-            repair_metrics_total[k] += v
+            repair_metrics_total[k] = repair_metrics_total.get(k, 0) + v
 
     # Step 5: Cell Mapping (IoA) — runs AFTER geometry stabilization
     map_tokens_to_cells(ocr_blocks, table_regions, debug=(debug and not benchmark_mode))
+
+    # Step 5.0.1: Enforce Universal Ordering Invariants
+    # Columns sorted by min_x (leftmost = col_0), rows by min_y (topmost = row_0).
+    _enforce_ordering_invariants(table_regions)
 
     # Step 5.1: Token Coverage Validation (diagnostic only)
     from services.layout_pipeline.token_validator import TokenMappingValidator
@@ -816,6 +873,36 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             quality_penalty
         )
         
+        # Check for required semantic columns checklist and populate on tr
+        required_list = ['product', 'quantity', 'rate', 'amount', 'batch', 'expiry']
+        present_fields = []
+        missing_fields = []
+        for rf in required_list:
+            if rf == 'product':
+                is_present = 'product' in final_vals or 'drug_name' in final_vals
+            elif rf == 'quantity':
+                is_present = any(q in final_vals for q in ('quantity', 'qty', 'free_quantity'))
+            else:
+                is_present = rf in final_vals
+                
+            if is_present:
+                present_fields.append(rf)
+            else:
+                missing_fields.append(rf)
+                
+        tr.required_fields_present = present_fields
+        tr.required_fields_missing = missing_fields
+        
+        # Calculate representability_score
+        rep_score = len(present_fields) / len(required_list)
+        if wide_table_evidence.is_wide and len(tr.columns) < 10:
+            rep_score *= 0.5
+        num_unknown = sum(1 for v in final_semantics.values() if v == 'unknown')
+        if len(tr.columns) > 0 and (num_unknown / len(tr.columns)) > 0.5:
+            rep_score *= 0.6
+            
+        tr.representability_score = round(max(0.0, min(1.0, rep_score)), 3)
+
         metrics = {
             "row_count": row_count,
             "column_stability": round(avg_row_stability, 4),
@@ -865,12 +952,21 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     }
     
     if graph_rows and graph_cols:
-        graph_candidate = build_graph_fallback_table_region(
-            graph_rows=graph_rows,
-            graph_cols=graph_cols,
-            graph_confidence=document_graph.get("graph_confidence", 0.5)
-        )
-        graph_score, graph_metrics = evaluate_candidate_table(graph_candidate, is_graph=True)
+        try:
+            graph_candidate = build_graph_fallback_table_region(
+                graph_rows=graph_rows,
+                graph_cols=graph_cols,
+                graph_confidence=document_graph.get("graph_confidence", 0.5)
+            )
+        except Exception as e:
+            logger.warning(
+                f"[GRAPH FALLBACK ERROR] Failed to build graph fallback table region: {str(e)}",
+                exc_info=True
+            )
+            graph_candidate = None
+
+        if graph_candidate:
+            graph_score, graph_metrics = evaluate_candidate_table(graph_candidate, is_graph=True)
 
     # Deterministic Blocking Rules
     graph_selection_blocked_reason = None
@@ -1577,6 +1673,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "graph_table_region": document_graph.get("graph_table_region", {}),
         "graph_confidence": document_graph.get("graph_confidence", 0.0),
         "metrics": {
+            "semantic_column_results": semantic_results,
             "raw_token_count": raw_token_count,
             "token_coverage": token_coverage_report.to_dict() if token_coverage_report else {},
             "token_coverage_debug": token_coverage_report.to_dict() if token_coverage_report else {},
@@ -1625,6 +1722,13 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "invoice_source_tax_rows_count": invoice_source_role_counts["tax_rows_count"],
             },
             "topology_repairs": repair_metrics_total,
+            "wide_table_diagnostics": {
+                "wide_table_mode": wide_table_evidence.is_wide,
+                "wide_table_confidence": wide_table_evidence.confidence,
+                "wide_table_signals": wide_table_evidence.signals,
+                "estimated_column_count": wide_table_evidence.estimated_column_count,
+                "numeric_merge_blocked_count": repair_metrics_total.get("numeric_merge_blocked_count", 0),
+            },
             **product_phase_shift_metrics,
             "row_validation": row_validation_results,
             "financial_reconciliation": reconciliation_results,

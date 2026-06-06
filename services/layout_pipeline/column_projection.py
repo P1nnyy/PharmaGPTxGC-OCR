@@ -265,9 +265,15 @@ def _consolidate_and_filter_columns(columns: List[Tuple[int, int]], blocks: List
         
         effective_gap_limit = merge_gap_limit
         if is_dense:
-            # Preserve narrow gaps when neighboring spans both contain compact numeric/date-like text
+            # In dense (wide-table) mode, if BOTH adjacent spans are
+            # numeric/date-like, they are separate real columns (qty, rate,
+            # MRP, disc, GST, amount).  Block the merge entirely.
             if _is_numeric_or_date_span(curr_col, blocks) and _is_numeric_or_date_span(nxt_col, blocks):
-                effective_gap_limit = 4.0
+                # Hard block — never merge two adjacent numeric columns
+                # in a wide table regardless of gap size.
+                consolidated.append(curr_col)
+                curr_col = nxt_col
+                continue
             else:
                 effective_gap_limit = 6.0
         
@@ -278,6 +284,7 @@ def _consolidate_and_filter_columns(columns: List[Tuple[int, int]], blocks: List
             continue
             
         # Specific Condition: Check if both contain sparse numeric structures and are relatively close
+        # GATED: only fires in non-dense mode to avoid destroying wide-table columns.
         if not is_dense and gap < 40.0:
              if _is_primarily_numeric(curr_col, blocks) and _is_primarily_numeric(nxt_col, blocks):
                   curr_col = (min(curr_col[0], nxt_col[0]), max(curr_col[1], nxt_col[1]))

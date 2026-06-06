@@ -67,6 +67,35 @@ def evaluate_invoice_quality(canonical_invoice: CanonicalInvoice, raw_result: Di
     if missing_footer_fields:
         reasons.append("footer_fields_missing:" + ",".join(missing_footer_fields))
 
+    # ── Wide-table quality checks ──────────────────────────────────
+    metrics_obj = raw_result.get("metrics") if isinstance(raw_result.get("metrics"), dict) else {}
+    wide_diag = metrics_obj.get("wide_table_diagnostics") or raw_result.get("wide_table_diagnostics") or {}
+    if isinstance(wide_diag, dict) and wide_diag.get("wide_table_mode"):
+        # Check 1: Wide table collapsed below minimum column count
+        estimated_cols = wide_diag.get("estimated_column_count", 0)
+        # Use the canonical table column count from metrics if available
+        actual_col_count = metrics_obj.get("column_count") or 0
+        if isinstance(actual_col_count, int) and actual_col_count < 10 and estimated_cols >= 10:
+            reasons.append("wide_table_collapsed")
+
+    # Check 2: Excessive UNKNOWN semantic columns
+    semantic_results = metrics_obj.get("semantic_column_results") or {}
+    if isinstance(semantic_results, dict):
+        total_cols = 0
+        unknown_cols = 0
+        for table_data in semantic_results.values():
+            if not isinstance(table_data, dict):
+                continue
+            for col_id, col_data in table_data.items():
+                if col_id.startswith("_"):
+                    continue
+                if isinstance(col_data, dict):
+                    total_cols += 1
+                    if col_data.get("type") == "unknown":
+                        unknown_cols += 1
+        if total_cols >= 4 and unknown_cols > total_cols * 0.5:
+            reasons.append(f"excessive_unknown_columns:{unknown_cols}/{total_cols}")
+
     hard_fail_reasons = {"pipeline_error", "no_ocr_blocks", "no_item_rows"}
     if any(reason in hard_fail_reasons or reason.startswith("fast_fail:") for reason in reasons):
         status = "failed"
