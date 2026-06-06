@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient } from '../api/client';
+import { apiClient, getDetailsData, isSelectedTableUnavailable } from '../api/client';
 import type { SelectedTable, SemanticColumn, TableCell, RunSummary } from '../api/types';
 import { AlertTriangle, CheckCircle } from 'lucide-react';
 
@@ -66,6 +66,7 @@ export const SelectedTablePage: React.FC = () => {
   const [selectedTable, setSelectedTable] = useState<SelectedTable | null>(null);
   const [semanticCols, setSemanticCols] = useState<SemanticColumn[]>([]);
   const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
+  const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
 
   // Load table data
   useEffect(() => {
@@ -73,12 +74,27 @@ export const SelectedTablePage: React.FC = () => {
       const activeId = runId || currentRunId;
       if (!activeId) return;
 
-      try {
-        const runData = await apiClient.getRun(activeId);
-        setActiveRun(runData);
+      // Clear stale state before loading new table details
+      setActiveRun(null);
+      setSelectedTable(null);
+      setSemanticCols([]);
+      setSelectedCellId(null);
+      setUnavailableReason(null);
 
-        const table = await apiClient.getSelectedTable(activeId);
-        setSelectedTable(table);
+      try {
+	        const runData = await apiClient.getRun(activeId);
+	        setActiveRun(runData);
+	        const detail = getDetailsData(activeId);
+	        const unavailable = isSelectedTableUnavailable(detail) || runData.selected_table_available === false;
+	        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData.no_valid_table_candidate_reason || 'no_valid_table_candidate';
+	        setUnavailableReason(
+	          unavailable
+	            ? (reason === 'no_valid_candidate' ? 'no_valid_table_candidate' : reason)
+	            : null
+	        );
+
+	        const table = await apiClient.getSelectedTable(activeId);
+	        setSelectedTable(table);
 
         const mappings = await apiClient.getSemanticMapping(activeId);
         setSemanticCols(mappings);
@@ -118,10 +134,15 @@ export const SelectedTablePage: React.FC = () => {
         <p className="text-gray-400 text-sm">Review the primary resolved table structure, examine cells transformations, and audit column data types alignment.</p>
       </div>
 
-      {!selectedTable || !activeRun ? (
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
-          Backend response did not contain structured table data.
-        </div>
+	      {activeRun?.selected_table_available === false || !!unavailableReason ? (
+	        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center space-y-2">
+	          <div className="text-rose-300 text-sm font-semibold">No valid table candidate selected</div>
+	          <div className="text-gray-500 text-xs font-mono">Reason: {unavailableReason || 'no_valid_table_candidate'}</div>
+	        </div>
+	      ) : !selectedTable || !activeRun ? (
+	        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
+	          Backend response did not contain structured table data.
+	        </div>
       ) : (() => {
         // Defensive grid extraction
         const { grid, firstRow, columnCount, hasHeaderRow, bodyRows } = getTableViewRows(selectedTable);

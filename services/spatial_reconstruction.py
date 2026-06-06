@@ -30,11 +30,12 @@ from services.layout_pipeline.reconstruction_metrics import (
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.financial_reconciler import FinancialReconciler, reconcile_invoice_financials
 from services.table_classifier import TableClassifier, route_tables
+from services.table_candidate_sanity import select_valid_table_candidate
 
 from services.tsr.heuristic_tsr import HeuristicTSREngine
 from services.tsr.future_ppstructure import PPStructure_TSREngine
 from services.layout_pipeline.wide_table_detector import detect_wide_table, WideTableEvidence
-from services.layout_pipeline.header_anchor import detect_header_row
+from services.layout_pipeline.header_anchor import detect_header_row, expand_table_columns_from_header
 from services.layout_pipeline.footer_kv_extractor import extract_footer_kv
 from services.layout_pipeline.graph_fallback import build_graph_fallback_table_region
 
@@ -78,6 +79,34 @@ def _enforce_ordering_invariants(table_regions):
 
 def _dominance_score_confidence(score: float) -> float:
     return max(0.0, min(0.99, (float(score) + 200.0) / 700.0))
+
+
+def _image_bounds(image: Any, blocks: List[Dict[str, Any]]) -> tuple[float | None, float | None]:
+    if image is not None and getattr(image, "size", None):
+        try:
+            return float(image.size[0]), float(image.size[1])
+        except Exception:
+            pass
+    xs = []
+    ys = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        geom = block.get("normalized_geometry") or block.get("geometry")
+        if isinstance(geom, dict):
+            for key in ("min_x", "max_x"):
+                if geom.get(key) is not None:
+                    xs.append(float(geom[key]))
+            for key in ("min_y", "max_y"):
+                if geom.get(key) is not None:
+                    ys.append(float(geom[key]))
+        polygon = block.get("polygon") if isinstance(block, dict) else None
+        if isinstance(polygon, list):
+            for point in polygon:
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    xs.append(float(point[0]))
+                    ys.append(float(point[1]))
+    return (max(xs) if xs else None, max(ys) if ys else None)
 
 
 def filter_graph_rows(raw_graph_rows: list, tsr_metadata: dict) -> list:
@@ -615,6 +644,36 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
     tsr_metadata["wide_table_confidence"] = wide_table_evidence.confidence
     tsr_metadata["wide_table_signals"] = wide_table_evidence.signals
     tsr_metadata["wide_table_estimated_column_count"] = wide_table_evidence.estimated_column_count
+    if wide_table_evidence.is_wide:
+        before_split_count = len(ocr_blocks)
+        ocr_blocks = split_fused_blocks(ocr_blocks)
+        tsr_metadata["wide_table_split_blocks_before_mapping"] = {
+            "before": before_split_count,
+            "after": len(ocr_blocks),
+            "created": max(0, len(ocr_blocks) - before_split_count),
+        }
+
+    # Step 3.6: Header-derived expansion for collapsed wide-table topology.
+    header_expansion_diagnostics = {}
+    if wide_table_evidence.is_wide:
+        for tr in table_regions:
+            if len(tr.columns) >= 10:
+                continue
+            header_expansion_diagnostics[tr.table_id] = expand_table_columns_from_header(
+                tr,
+                ocr_blocks,
+                min_columns=10,
+            )
+        if header_expansion_diagnostics:
+            tsr_metadata["wide_table_header_expansion"] = header_expansion_diagnostics
+            failed = [
+                table_id
+                for table_id, diag in header_expansion_diagnostics.items()
+                if not diag.get("expanded")
+            ]
+            if failed:
+                tsr_metadata["wide_table_column_expansion_failed"] = True
+                tsr_metadata["wide_table_column_expansion_failure_tables"] = failed
 
     # Step 4: PRE-ASSIGNMENT Geometry Stabilization (geometry-only, no text dependency)
     stabilizer = ColumnStabilizer()
@@ -968,8 +1027,114 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         if graph_candidate:
             graph_score, graph_metrics = evaluate_candidate_table(graph_candidate, is_graph=True)
 
-    # Deterministic Blocking Rules
     graph_selection_blocked_reason = None
+    processed_width, processed_height = _image_bounds(image, ocr_blocks)
+    candidate_inputs = [
+        ("heuristic_anchor", heuristic_candidate, heuristic_score, heuristic_metrics),
+    ]
+    if graph_candidate is not None:
+        candidate_inputs.append(("document_graph_candidate", graph_candidate, graph_score, graph_metrics))
+    seen_candidate_ids = {
+        getattr(candidate, "table_id", None)
+        for _, candidate, _, _ in candidate_inputs
+        if candidate is not None
+    }
+    routing_scores_by_id = {
+        str(item.get("table_id")): item
+        for item in table_routing_diagnostics.get("main_table_candidate_scores", [])
+        if isinstance(item, dict) and item.get("table_id")
+    }
+    for candidate in table_regions:
+        table_id = getattr(candidate, "table_id", None)
+        if table_id in seen_candidate_ids:
+            continue
+        routing_score = routing_scores_by_id.get(str(table_id), {})
+        candidate_inputs.append(
+            (
+                "routed_table_candidate",
+                candidate,
+                routing_score.get("score"),
+                {
+                    "item_rows_count": (routing_score.get("role_counts") or {}).get("item_rows_count"),
+                    "semantic_columns": getattr(candidate, "semantic_column_cache", None),
+                },
+            )
+        )
+
+    table_sanity_selection = select_valid_table_candidate(
+        candidate_inputs,
+        processed_width=processed_width,
+        processed_height=processed_height,
+        ocr_block_count=len(ocr_blocks),
+    )
+    tsr_metadata["table_sanity"] = table_sanity_selection
+    tsr_metadata["selected_table_available"] = table_sanity_selection["selected_table_available"]
+    tsr_metadata["selected_main_table_id"] = table_sanity_selection["selected_candidate_id"]
+    tsr_metadata["rejected_table_candidates"] = table_sanity_selection["rejected_candidates"]
+
+    if not table_sanity_selection["selected_table_available"]:
+        logger.warning("[TABLE SANITY] No valid table candidate survived structural checks.")
+        selected_topology_source = "none"
+        selected_candidate_reason = "no_valid_candidate"
+        tsr_candidate_decision = build_tsr_candidate_decision_summary(
+            heuristic_candidate=heuristic_candidate,
+            heuristic_metrics=heuristic_metrics,
+            heuristic_score=heuristic_score,
+            graph_candidate=graph_candidate,
+            graph_metrics=graph_metrics,
+            graph_score=graph_score,
+            graph_selection_blocked_reason=graph_selection_blocked_reason,
+            selected_topology_source=selected_topology_source,
+            selected_candidate_reason=selected_candidate_reason,
+            tsr_status_metric=tsr_status_metric,
+            tsr_metadata=tsr_metadata,
+        )
+        tsr_candidate_decision["selected_table_available"] = False
+        tsr_candidate_decision["rejected_candidates"] = table_sanity_selection["rejected_candidates"]
+        topology_debug = _build_topology_debug(ocr_blocks, table_regions, [], {}, document_graph=document_graph)
+        return attach_invoice_diagnostics({
+            "reconstructed_rows": [],
+            "detected_table_rows": [],
+            "columns_extracted": False,
+            "structured_tables": [tr.model_dump(mode='json') for tr in table_regions],
+            "semantic_markdown": "",
+            "fast_fail": True,
+            "fast_fail_reason": "no_valid_table_candidate",
+            "topology_source": topology_source,
+            "selected_topology_source": selected_topology_source,
+            "selected_table_available": False,
+            "selected_table_id": None,
+            "graph_candidate_rows": document_graph.get("graph_candidate_rows", []),
+            "graph_candidate_columns": document_graph.get("graph_candidate_columns", []),
+            "graph_table_region": document_graph.get("graph_table_region", {}),
+            "graph_confidence": document_graph.get("graph_confidence", 0.0),
+            "metrics": {
+                "raw_token_count": len(ocr_blocks),
+                "table_count": len(table_regions),
+                "topology_debug": topology_debug,
+                "selected_table_available": False,
+                "no_valid_table_candidate": True,
+                "table_sanity": table_sanity_selection,
+                "candidate_decision": tsr_candidate_decision,
+                "tsr_candidate_decision": tsr_candidate_decision,
+                **table_routing_diagnostics,
+                **tsr_metadata,
+                "tsr_status": tsr_status_metric,
+            }
+        }, invoice_id="unknown")
+
+    if table_sanity_selection["selected_candidate_id"] != getattr(table_bundle.main_table, "table_id", None):
+        selected_id = table_sanity_selection["selected_candidate_id"]
+        replacement = graph_candidate if getattr(graph_candidate, "table_id", None) == selected_id else None
+        if replacement is None:
+            replacement = next((tr for tr in table_regions if tr.table_id == selected_id), None)
+        if replacement is not None:
+            table_bundle.main_table = replacement
+            selected_topology_source = table_sanity_selection["selected_source"] or "heuristic_anchor"
+            selected_candidate_reason = table_sanity_selection["selected_reason"]
+            logger.warning("[TABLE SANITY] Replaced selected main table with valid candidate %s", selected_id)
+
+    # Deterministic Blocking Rules
     heuristic_collapsed_or_unusable = (
         not heuristic_candidate
         or len(heuristic_candidate.rows) < 3
@@ -1007,8 +1172,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 graph_selection_blocked_reason = "graph_missing_critical_semantics"
 
     # Topology Decision Logic
-    selected_topology_source = "heuristic_anchor"
-    selected_candidate_reason = "default_heuristic"
+    selected_topology_source = table_sanity_selection.get("selected_source") or "heuristic_anchor"
+    selected_candidate_reason = table_sanity_selection.get("selected_reason") or "default_heuristic"
 
     logger.info(
         f"[TOPOLOGY RANKING] Heuristic Score: {heuristic_score:.2f} ({heuristic_metrics}) | "
@@ -1629,6 +1794,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "tsr_engine": tsr_metadata.get("tsr_engine") or "unknown",
         "topology_source": topology_source,
         "selected_topology_source": selected_topology_source,
+        "selected_table_available": bool(tsr_metadata.get("selected_table_available", True)),
+        "selected_table_id": tsr_metadata.get("selected_main_table_id"),
         "invoice_confidence": confidence_hierarchy.get("invoice_confidence", 0.0),
         "total_tokens": raw_token_count,
         "reconstructed_line_count": recon_line_count,
@@ -1667,6 +1834,8 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         "fast_fail": False,
         "topology_source": topology_source,
         "selected_topology_source": selected_topology_source,
+        "selected_table_available": bool(tsr_metadata.get("selected_table_available", True)),
+        "selected_table_id": tsr_metadata.get("selected_main_table_id"),
         "invoice_confidence": confidence_hierarchy["invoice_confidence"],
         "graph_candidate_rows": document_graph.get("graph_candidate_rows", []),
         "graph_candidate_columns": document_graph.get("graph_candidate_columns", []),
@@ -1681,6 +1850,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             "numeric_merge_suspicions": int(numeric_merge_suspicions),
             "avg_tokens_per_line": float(round(avg_tok, 2)),
             "table_count": len(table_regions),
+            "selected_table_available": bool(tsr_metadata.get("selected_table_available", True)),
+            "selected_main_table_id": tsr_metadata.get("selected_main_table_id"),
+            "table_sanity": tsr_metadata.get("table_sanity", {}),
             "row_count": total_rows,
             "col_count": total_cols,
             "orphan_token_count": orphan_tokens,
@@ -1728,6 +1900,10 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
                 "wide_table_signals": wide_table_evidence.signals,
                 "estimated_column_count": wide_table_evidence.estimated_column_count,
                 "numeric_merge_blocked_count": repair_metrics_total.get("numeric_merge_blocked_count", 0),
+                "header_expansion": header_expansion_diagnostics,
+                "column_expansion_failed": bool(tsr_metadata.get("wide_table_column_expansion_failed")),
+                "column_expansion_failure_tables": tsr_metadata.get("wide_table_column_expansion_failure_tables", []),
+                "split_blocks_before_mapping": tsr_metadata.get("wide_table_split_blocks_before_mapping", {}),
             },
             **product_phase_shift_metrics,
             "row_validation": row_validation_results,

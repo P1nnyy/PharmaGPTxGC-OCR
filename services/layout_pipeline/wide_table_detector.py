@@ -97,7 +97,12 @@ def detect_wide_table(
 
     # ── Signal 1: Header-row label density ────────────────────────
     header_score, header_label_count = _score_header_labels(ocr_blocks)
+    header_expanded_column_count = _expanded_header_column_count(ocr_blocks)
+    if header_expanded_column_count >= WIDE_TABLE_MIN_COLUMNS:
+        header_label_count = max(header_label_count, header_expanded_column_count)
+        header_score = 1.0
     signals["header_label_count"] = header_label_count
+    signals["header_expanded_column_count"] = header_expanded_column_count
     signals["header_score"] = round(header_score, 3)
 
     # ── Signal 2: Vertical whitespace gap count (column separators)
@@ -135,9 +140,24 @@ def detect_wide_table(
     )
     composite = round(max(0.0, min(1.0, composite)), 3)
 
-    estimated_cols = max(tsr_col_count, gap_count + 1, header_label_count)
+    strong_pharma_header = (
+        header_label_count >= 7
+        and diversity_score >= 0.60
+        and max(tsr_col_count, header_expanded_column_count) >= 3
+    )
+
+    estimated_cols = max(tsr_col_count, gap_count + 1, header_label_count, header_expanded_column_count)
+    if strong_pharma_header:
+        estimated_cols = max(estimated_cols, WIDE_TABLE_MIN_COLUMNS)
+
     # A wide table requires both composite confidence >= threshold and at least 8 estimated columns.
-    is_wide = (composite >= WIDE_TABLE_CONFIDENCE_THRESHOLD) and (estimated_cols >= 8)
+    strong_expanded_header = header_expanded_column_count >= WIDE_TABLE_MIN_COLUMNS and composite >= 0.45
+    is_wide = (
+        ((composite >= WIDE_TABLE_CONFIDENCE_THRESHOLD) and (estimated_cols >= 8))
+        or strong_expanded_header
+        or (strong_pharma_header and composite >= 0.42)
+    )
+    signals["strong_pharma_header"] = strong_pharma_header
 
     evidence = WideTableEvidence(
         is_wide=is_wide,
@@ -185,6 +205,38 @@ def _score_header_labels(blocks: List[OCRBlock]) -> Tuple[float, int]:
     # 6+ distinct labels in any single row → strong evidence (score 1.0)
     score = min(1.0, max_label_count / 6.0)
     return score, max_label_count
+
+
+def _expanded_header_column_count(blocks: List[OCRBlock]) -> int:
+    """
+    Estimate header-derived columns after splitting grouped header clusters.
+
+    This catches wide layouts where OCR/TSR grouped labels into mega-cells like
+    ``HSN CODE PACK CMPNY BATCH NO``. It is still generic: it relies only on
+    label geometry and known pharma header vocabulary, not vendor identity.
+    """
+    valid = [b for b in blocks if b.normalized_geometry]
+    if not valid:
+        return 0
+
+    rows = _cluster_blocks_into_rows(valid)
+    if not rows:
+        return 0
+
+    xs = [coord for b in valid for coord in (b.normalized_geometry.min_x, b.normalized_geometry.max_x)]
+    table_min_x = min(xs) if xs else None
+    table_max_x = max(xs) if xs else None
+
+    try:
+        from services.layout_pipeline.header_anchor import derive_header_column_bands
+    except Exception:
+        return 0
+
+    max_count = 0
+    for row in rows:
+        bands = derive_header_column_bands(row, table_min_x=table_min_x, table_max_x=table_max_x)
+        max_count = max(max_count, len(bands))
+    return max_count
 
 
 def _count_column_gaps(blocks: List[OCRBlock]) -> int:
@@ -372,6 +424,9 @@ def should_split_block(text: str) -> bool:
         return True
     # 2. Product + HSN (e.g. "CNDERO MET 30049099")
     if has_hsn and has_alpha_len3:
+        return True
+    # 2b. HSN + pack/free quantity (e.g. "30049099 10 S")
+    if has_hsn and has_integer:
         return True
     # 3. Product + Batch (e.g. "LUPIN UB02123")
     if has_batch and has_alpha_len3:

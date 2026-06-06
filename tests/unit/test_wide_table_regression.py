@@ -14,6 +14,7 @@ from models.layout_models import (
     OCRBlock, GeometryBox, TableRegion, ColumnRegion, RowRegion, TableCell, RegionType,
 )
 from services.layout_pipeline.wide_table_detector import detect_wide_table
+from services.layout_pipeline.header_anchor import derive_header_column_bands
 from services.topology.column_stabilizer import ColumnStabilizer
 from services.spatial_reconstruction import _enforce_ordering_invariants
 
@@ -278,6 +279,32 @@ class TestWideTableRegression:
         stabilizer = ColumnStabilizer()
         metrics = stabilizer.stabilize_region(table, wide_table_evidence=evidence)
         assert metrics["numeric_merge_blocked_count"] == 0
+
+    def test_grouped_header_clusters_expand_to_individual_wide_columns(self):
+        """Grouped pharma headers must not remain three mega-columns."""
+        header_blocks = [
+            _block("HSN CODE PACK CMPNY BATCH NO", 100, 350, 10, 22),
+            _block("QTY DISC RATE EXP NEW MRP", 360, 560, 10, 22),
+            _block("OLD GSTW AMOUNT MRP", 570, 720, 10, 22),
+        ]
+
+        bands = derive_header_column_bands(header_blocks, table_min_x=40, table_max_x=760)
+        labels = [band.label for band in bands]
+
+        assert len(bands) >= 10
+        assert labels[0] == "ITEM"
+        assert "HSN_CODE" in labels
+        assert "PACK" in labels
+        assert "CMPNY" in labels
+        assert "BATCH_NO" in labels
+        assert "QTY" in labels
+        assert "DISC" in labels
+        assert "RATE" in labels
+        assert "EXP" in labels
+        assert "NEW_MRP" in labels
+        assert "OLD_MRP" in labels
+        assert "GST" in labels
+        assert "AMOUNT" in labels
 
     def test_narrow_invoice_ordering(self):
         """Narrow invoice ordering should also work correctly."""

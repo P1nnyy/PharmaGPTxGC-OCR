@@ -8,9 +8,15 @@ export interface RunSummary {
   representability_score: number;
   selected_table_id: string;
   selected_table_shape: string; // e.g. "16 Rows x 8 Columns"
+  selected_table_available?: boolean;
+  selected_candidate_id?: string | null;
+  no_valid_table_candidate_reason?: string;
   missing_fields: string[];
   row_math_status: 'pass' | 'fail' | 'unmeasurable';
   is_demo?: boolean;
+  backend_invoice_id?: string;
+  diagnostics_run_id?: string;
+  storage_warning?: string;
 }
 
 export interface OCRBlock {
@@ -120,4 +126,6 @@ export interface Artifact {
   path: string;
   size: string; // e.g. "145 KB"
   created_at: string;
+  content_url?: string;
+  download_url?: string;
 }

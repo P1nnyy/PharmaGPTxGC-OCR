@@ -23,6 +23,7 @@ export const RunsPage: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState<'idle' | 'uploading' | 'processing' | 'success' | 'failed'>('idle');
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadWarning, setUploadWarning] = useState<string | null>(null);
 
   // Selected Row for Right Drawer Summary
   const [selectedRunId, setSelectedRunId] = useState<string | null>(currentRunId);
@@ -35,6 +36,7 @@ export const RunsPage: React.FC = () => {
       setSelectedFile(e.target.files[0]);
       setUploadProgress('idle');
       setUploadError(null);
+      setUploadWarning(null);
     }
   };
 
@@ -43,12 +45,14 @@ export const RunsPage: React.FC = () => {
     if (!selectedFile) return;
     setUploadProgress('uploading');
     setUploadError(null);
+    setUploadWarning(null);
     try {
       // Simulate file upload phase
       await new Promise(resolve => setTimeout(resolve, 800));
       setUploadProgress('processing');
       // Execute upload client call
       const newRun = await uploadInvoiceFile(selectedFile);
+      setUploadWarning(newRun.storage_warning || null);
       setUploadProgress('success');
       // Redirect to debugger on success
       setTimeout(() => {
@@ -123,9 +127,14 @@ export const RunsPage: React.FC = () => {
                   )}
 
                   {uploadProgress === 'success' && (
-                    <div className="flex items-center space-x-2 text-xs text-emerald-400 font-mono bg-emerald-950/20 p-3 rounded border border-emerald-900">
-                      <CheckCircle2 size={14} />
-                      <span>Pipeline Completed! Redirecting...</span>
+                    <div className="flex flex-col gap-1 text-xs text-emerald-400 font-mono bg-emerald-950/20 p-3 rounded border border-emerald-900">
+                      <div className="flex items-center space-x-2">
+                        <CheckCircle2 size={14} />
+                        <span>Pipeline Completed! Redirecting...</span>
+                      </div>
+                      {uploadWarning && (
+                        <span className="text-[10px] text-amber-300">{uploadWarning}</span>
+                      )}
                     </div>
                   )}
 
@@ -252,7 +261,11 @@ export const RunsPage: React.FC = () => {
                               {run.status === 'safe_for_erp' ? 'SAFE' : run.status === 'needs_review' ? 'REVIEW' : 'FAILED'}
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-right text-gray-300">{(run.confidence * 100).toFixed(1)}%</td>
+                          <td className="py-3 px-4 text-right text-gray-300">
+                            {run.selected_table_available === false || run.status === 'failed' || run.confidence === null || run.confidence === undefined
+                              ? '0.0%'
+                              : `${(run.confidence * 100).toFixed(1)}%`}
+                          </td>
                           <td className="py-3 px-4 text-right text-gray-300">{(run.token_coverage * 100).toFixed(1)}%</td>
                           <td className="py-3 px-4 text-right text-gray-300">{(run.representability_score * 100).toFixed(1)}%</td>
                           <td className="py-3 px-4 text-center">
@@ -298,7 +311,11 @@ export const RunsPage: React.FC = () => {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="bg-[#0d1117] p-2.5 rounded border border-[#30363d] text-center">
                     <span className="text-[10px] text-gray-500 block">OCR CONFIDENCE</span>
-                    <strong className="text-sm font-mono text-white">{(selectedRun.confidence * 100).toFixed(1)}%</strong>
+                    <strong className="text-sm font-mono text-white">
+                      {selectedRun.selected_table_available === false || selectedRun.status === 'failed' || selectedRun.confidence === null || selectedRun.confidence === undefined
+                        ? '0.0%'
+                        : `${(selectedRun.confidence * 100).toFixed(1)}%`}
+                    </strong>
                   </div>
                   <div className="bg-[#0d1117] p-2.5 rounded border border-[#30363d] text-center">
                     <span className="text-[10px] text-gray-500 block">TSR REPRESENTABILITY</span>

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import { apiClient } from '../api/client';
-import type { Artifact, RunSummary } from '../api/types';
+import type { Artifact } from '../api/types';
 import {
   FileCode,
   Download,
@@ -19,10 +19,10 @@ export const ArtifactsPage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
   const { currentRunId } = useRun();
 
-  const [activeRun, setActiveRun] = useState<RunSummary | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [copiedStates, setCopiedStates] = useState<Record<string, 'idle' | 'path' | 'content'>>({});
   const [toastText, setToastText] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToastText(msg);
@@ -41,13 +41,12 @@ export const ArtifactsPage: React.FC = () => {
       if (!activeId) return;
 
       try {
-        const runData = await apiClient.getRun(activeId);
-        setActiveRun(runData);
-
+        setLoadError(null);
         const data = await apiClient.getArtifacts(activeId);
         setArtifacts(data);
       } catch (err) {
         console.error('Failed to load artifacts:', err);
+        setLoadError(err instanceof Error ? err.message : 'Failed to load backend diagnostics.');
       }
     };
     loadArtifacts();
@@ -66,76 +65,66 @@ export const ArtifactsPage: React.FC = () => {
     }
   };
 
-  // Copy mock JSON content helper
+  // Copy backend JSON content helper
   const handleCopyJSON = async (artifact: Artifact) => {
     try {
-      const mockData = {
-        artifact: artifact.name,
-        run_id: runId || currentRunId,
-        schema: 'http://pharmagpt.ocr/schemas/diagnostics.json',
-        generated_at: new Date().toISOString(),
-        node_status: 'resolved',
-        data: {
-          filename: activeRun?.filename,
-          attributes: ['subtotal', 'discount', 'gst_rate'],
-          checks: ['row_math', 'geometry_alignment']
-        }
-      };
-      await navigator.clipboard.writeText(JSON.stringify(mockData, null, 2));
+      const activeId = runId || currentRunId;
+      if (!activeId) return;
+      const content = await apiClient.getArtifactContent(activeId, artifact.name);
+      await navigator.clipboard.writeText(content);
       setCopiedStates(prev => ({ ...prev, [artifact.name]: 'content' }));
       setTimeout(() => {
         setCopiedStates(prev => ({ ...prev, [artifact.name]: 'idle' }));
       }, 2000);
+      showToast('Artifact content copied.');
     } catch (err) {
       console.error('Failed to copy JSON:', err);
+      showToast(err instanceof Error ? err.message : 'Failed to copy artifact content.');
     }
   };
 
   // Download handler
-  const handleDownload = (artifact: Artifact) => {
-    if (!currentRunId) return;
-    apiClient.downloadArtifact(currentRunId, artifact.name);
+  const handleDownload = async (artifact: Artifact) => {
+    const activeId = runId || currentRunId;
+    if (!activeId) return;
+    try {
+      await apiClient.downloadArtifact(activeId, artifact.name);
+    } catch (err) {
+      console.error('Failed to download artifact:', err);
+      showToast(err instanceof Error ? err.message : 'Failed to download artifact.');
+    }
   };
 
   // Global download bundle handler
-  const handleDownloadBundle = () => {
-    if (!currentRunId) return;
-    apiClient.downloadArtifactBundle(currentRunId);
+  const handleDownloadBundle = async () => {
+    const activeId = runId || currentRunId;
+    if (!activeId) return;
+    try {
+      await apiClient.downloadArtifactBundle(activeId);
+    } catch (err) {
+      console.error('Failed to download diagnostics bundle:', err);
+      showToast(err instanceof Error ? err.message : 'Diagnostics bundle is not available.');
+    }
   };
 
   // Preview handler
   const handleOpenPreview = async (artifact: Artifact) => {
     setPreviewArtifact(artifact);
     setPreviewLoading(true);
-    
-    // Simulate reading mock file contents
-    await new Promise(resolve => setTimeout(resolve, 600));
-    
-    let content = '';
-    if (artifact.type === 'json') {
-      content = JSON.stringify({
-        block_id: "blk_001",
-        engine: "SuryaOCR_Inference",
-        confidence: 0.998,
-        bbox: [60, 60, 350, 95],
-        normalized_bbox: [0.075, 0.06, 0.4375, 0.095],
-        text: "GENOME PHARMACEUTICALS",
-        spatial_cell_assignment: {
-          table_id: "ITEMS_001",
-          row_index: 0,
-          column_index: 1,
-          semantic_label: "product_name"
-        }
-      }, null, 2);
-    } else if (artifact.type === 'csv') {
-      content = `row_id,product_name,batch_no,expiry_date,quantity,rate,discount,amount\n1,Amoxicillin 500mg Cap (100),BN-99212,12/2028,12,42.00,8.0%,504.00\n2,Ciprofloxacin 250mg Tab (20),BN-????,05/2027,5,125.50,8.0%,627.50`;
-    } else if (artifact.type === 'markdown') {
-      content = `| Row | Product Name | Batch No | Expiry | Qty | Rate | Disc | Amount |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 01 | Amoxicillin Cap | BN-99212 | 12/2028 | 12 | 42.00 | 8% | 504.00 |\n| 02 | Ciprofloxacin Tab | BN-???? | 05/2027 | 5 | 125.50 | 8% | 627.50 |`;
-    } else {
-      content = `Binary stream preview for file: ${artifact.name}\nSize: ${artifact.size}\nPath: ${artifact.path}`;
+    const activeId = runId || currentRunId;
+    if (!activeId) {
+      setPreviewContent('No active run selected.');
+      setPreviewLoading(false);
+      return;
     }
-    
-    setPreviewContent(content);
+
+    try {
+      const content = await apiClient.getArtifactContent(activeId, artifact.name);
+      setPreviewContent(content);
+    } catch (err) {
+      console.error('Failed to preview artifact:', err);
+      setPreviewContent(err instanceof Error ? err.message : 'Failed to read backend artifact.');
+    }
     setPreviewLoading(false);
   };
 
@@ -156,7 +145,7 @@ export const ArtifactsPage: React.FC = () => {
 
         <button
           onClick={handleDownloadBundle}
-          disabled={!currentRunId}
+          disabled={!(runId || currentRunId) || !artifacts.some(artifact => artifact.name === 'full_diagnostics_bundle.zip')}
           className="bg-[#2ea44f] hover:bg-[#2c974b] text-white font-medium px-4 py-2 rounded text-xs transition-colors flex items-center space-x-2 shrink-0 cursor-pointer disabled:opacity-40"
         >
           <FolderArchive size={16} />
@@ -165,6 +154,16 @@ export const ArtifactsPage: React.FC = () => {
       </div>
 
       {/* Artifacts Cards Grid */}
+      {loadError && (
+        <div className="bg-red-950/30 border border-red-900 text-red-300 rounded-lg p-4 text-sm">
+          {loadError}
+        </div>
+      )}
+      {!loadError && artifacts.length === 0 && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center text-gray-400 text-sm">
+          No backend diagnostics available for this run.
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {artifacts.map(art => {
           const isCopiedPath = copiedStates[art.name] === 'path';
@@ -289,7 +288,7 @@ export const ArtifactsPage: React.FC = () => {
                 <span>Copy Content</span>
               </button>
               <button
-                onClick={() => handleDownload(previewArtifact)}
+                onClick={() => void handleDownload(previewArtifact)}
                 className="bg-[#2ea44f] hover:bg-[#2c974b] text-white px-3 py-1.5 rounded cursor-pointer flex items-center space-x-1.5"
               >
                 <Download size={14} />

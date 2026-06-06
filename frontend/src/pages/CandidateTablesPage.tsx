@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient } from '../api/client';
+import { apiClient, getDetailsData, isSelectedTableUnavailable } from '../api/client';
 import type { CandidateTable, RunSummary } from '../api/types';
 import { CheckCircle, Info } from 'lucide-react';
 
@@ -17,6 +17,7 @@ export const CandidateTablesPage: React.FC = () => {
   const [candidates, setCandidates] = useState<CandidateTable[]>([]);
   const [compareCandidates, setCompareCandidates] = useState<CandidateTable[]>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [selectedUnavailableReason, setSelectedUnavailableReason] = useState<string | null>(null);
   const [showRawJson, setShowRawJson] = useState(false);
 
   // Fetch run and candidate tables
@@ -25,16 +26,34 @@ export const CandidateTablesPage: React.FC = () => {
       const activeId = runId || currentRunId;
       if (!activeId) return;
 
-      try {
-        const runData = await apiClient.getRun(activeId);
-        setActiveRun(runData);
+      // Clear stale state before loading new candidate data
+      setActiveRun(null);
+      setCompareRun(null);
+      setCandidates([]);
+      setCompareCandidates([]);
+      setSelectedCandidateId(null);
+      setSelectedUnavailableReason(null);
 
-        const data = await apiClient.getCandidateTables(activeId);
-        setCandidates(data);
-        if (data.length > 0) {
-          const selected = data.find(c => c.selected);
-          setSelectedCandidateId(selected ? selected.table_id : data[0].table_id);
-        }
+      try {
+	        const runData = await apiClient.getRun(activeId);
+	        setActiveRun(runData);
+	        const detail = getDetailsData(activeId);
+	        const unavailable = isSelectedTableUnavailable(detail) || runData.selected_table_available === false;
+	        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData.no_valid_table_candidate_reason || 'no_valid_table_candidate';
+	        setSelectedUnavailableReason(
+	          unavailable
+	            ? (reason === 'no_valid_candidate' ? 'no_valid_table_candidate' : reason)
+	            : null
+	        );
+
+	        const data = await apiClient.getCandidateTables(activeId);
+	        setCandidates(data);
+	        if (data.length > 0) {
+	          const selected = data.find(c => c.selected);
+	          setSelectedCandidateId(selected ? selected.table_id : data[0].table_id);
+	        } else {
+	          setSelectedCandidateId(null);
+	        }
 
         if (compareRunId) {
           const compData = await apiClient.getRun(compareRunId);
@@ -54,6 +73,7 @@ export const CandidateTablesPage: React.FC = () => {
   }, [runId, currentRunId, compareRunId]);
 
   const activeCandidate = candidates.find(c => c.table_id === selectedCandidateId) || null;
+  const isSelectedTableAvailable = activeRun?.selected_table_available !== false && activeRun?.selected_candidate_id !== null && !selectedUnavailableReason;
 
   // Compute structure score (average score of candidates)
   const getStructureScore = (cands: CandidateTable[]) => {
@@ -114,7 +134,7 @@ export const CandidateTablesPage: React.FC = () => {
       </div>
 
       {/* TSR ENGINE DIFF METRICS */}
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-4">
+	      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-4">
         
         {/* Structure Score */}
         <div className="space-y-1">
@@ -147,8 +167,8 @@ export const CandidateTablesPage: React.FC = () => {
           <strong className="text-2xl font-bold font-mono text-[#00f0ff]">
             {activeRun ? getGridShape(activeRun.selected_table_shape) : '4x8'}
           </strong>
-          <span className="text-[10px] text-gray-500 block font-sans">After alignment heuristics</span>
-        </div>
+	          <span className="text-[10px] text-gray-500 block font-sans">After alignment heuristics</span>
+	        </div>
 
         {/* Latency */}
         <div className="space-y-1">
@@ -160,11 +180,22 @@ export const CandidateTablesPage: React.FC = () => {
                 +22ms
               </span>
             )}
-          </div>
+	      </div>
+
           <span className="text-[10px] text-gray-500 block font-sans">TSR spatial segmentation phase</span>
         </div>
 
       </div>
+
+      {!isSelectedTableAvailable && (
+        <div className="bg-[#1f1915] border border-amber-900/50 rounded-lg p-4 text-xs font-mono text-amber-300 flex items-start space-x-2 shrink-0">
+          <Info size={16} className="text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="font-bold">Candidates are available for debugging, but none passed table sanity.</div>
+            <div className="text-[10px] text-gray-500">Reason: {selectedUnavailableReason || 'no_valid_table_candidate'}</div>
+          </div>
+        </div>
+      )}
 
       {/* Main Work Split */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -187,13 +218,13 @@ export const CandidateTablesPage: React.FC = () => {
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-mono text-xs font-bold text-white">{cand.table_id}</span>
                     <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold font-mono ${
-                      cand.selected
+                      cand.selected && isSelectedTableAvailable
                         ? 'bg-emerald-950 text-emerald-400'
                         : cand.rejection_reason?.includes('overlap')
                           ? 'bg-orange-950/45 text-orange-400'
                           : 'bg-rose-950/45 text-rose-400'
                     }`}>
-                      {cand.selected ? 'SELECTED' : cand.rejection_reason?.includes('overlap') ? 'OVERLAP' : 'REJECTED'}
+                      {cand.selected && isSelectedTableAvailable ? 'SELECTED' : cand.rejection_reason?.includes('overlap') ? 'OVERLAP' : 'REJECTED'}
                     </span>
                   </div>
 
@@ -207,9 +238,9 @@ export const CandidateTablesPage: React.FC = () => {
                     <div className="truncate">Score: {cand.score.toFixed(3)}</div>
                   </div>
 
-                  {cand.rejection_reason && (
-                    <div className="text-[10px] text-rose-400 leading-normal line-clamp-2 italic">
-                      "{cand.rejection_reason}"
+                  {(cand.rejection_reason || !isSelectedTableAvailable) && (
+                    <div className="text-[10px] text-rose-400 leading-normal line-clamp-2 italic mt-1.5 border-t border-[#30363d]/50 pt-1.5">
+                      <span className="font-semibold">Rejection:</span> {cand.rejection_reason || 'Rejected by table sanity checks'}
                     </div>
                   )}
                 </div>
@@ -259,7 +290,7 @@ export const CandidateTablesPage: React.FC = () => {
                       >
                         <td className="py-2.5 px-4 font-bold text-white flex items-center space-x-1.5">
                           <span>{cand.table_id}</span>
-                          {cand.selected && <CheckCircle size={12} className="text-emerald-400" />}
+                          {cand.selected && isSelectedTableAvailable && <CheckCircle size={12} className="text-emerald-400" />}
                         </td>
                         <td className="py-2.5 px-4 text-gray-300">{cand.source_engine}</td>
                         <td className="py-2.5 px-4 text-center text-gray-300">{cand.rows}x{cand.cols}</td>
@@ -269,9 +300,9 @@ export const CandidateTablesPage: React.FC = () => {
                         <td className="py-2.5 px-4 text-right text-white font-semibold">{cand.score.toFixed(3)}</td>
                         <td className="py-2.5 px-4 text-center">
                           <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                            cand.selected ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'
+                            cand.selected && isSelectedTableAvailable ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'
                           }`}>
-                            {cand.selected ? 'PRIMARY' : 'REJECTED'}
+                            {cand.selected && isSelectedTableAvailable ? 'PRIMARY' : 'REJECTED'}
                           </span>
                         </td>
                       </tr>
@@ -290,10 +321,10 @@ export const CandidateTablesPage: React.FC = () => {
                   <span className="text-gray-500 uppercase">Preview Grid:</span>
                   <strong className="text-white">{activeCandidate.table_id}</strong>
                 </div>
-                {activeCandidate.rejection_reason && (
-                  <div className="text-[10px] text-rose-400 flex items-center space-x-1 font-mono">
+                {(activeCandidate.rejection_reason || !isSelectedTableAvailable) && (
+                  <div className="text-[10px] text-rose-400 flex items-center space-x-1.5 font-mono">
                     <Info size={12} />
-                    <span>Rejection Reason: {activeCandidate.rejection_reason}</span>
+                    <span>Rejection Reason: {activeCandidate.rejection_reason || 'Rejected by table sanity checks'}</span>
                   </div>
                 )}
               </div>

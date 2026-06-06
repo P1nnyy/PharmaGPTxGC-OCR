@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { apiClient, getDetailsData, getInvoiceImageUrl, getProcessedInvoiceImageUrl, ENABLE_MOCK_DATA } from '../api/client';
+import { apiClient, getDetailsData, getInvoiceImageUrl, getProcessedInvoiceImageUrl, ENABLE_MOCK_DATA, isSelectedTableUnavailable } from '../api/client';
 import type { OCRBlock, CandidateTable, SelectedTable, RunSummary } from '../api/types';
 import { normalizeBBox, mapBBoxToDisplaySpace, getRenderedImageMetrics } from '../utils/overlayGeometry';
 import type { BBox } from '../utils/overlayGeometry';
@@ -101,6 +101,14 @@ export const DebuggerPage: React.FC = () => {
     const fetchRunData = async () => {
       const activeId = runId || currentRunId;
       if (!activeId) return;
+
+      // Clear stale state before loading new run details
+      setActiveRun(null);
+      setOcrBlocks([]);
+      setCandidateTables([]);
+      setSelectedTable(null);
+      setRunDetail(null);
+      setSelectedObject({ type: 'none', data: null });
 
       try {
         const runData = await apiClient.getRun(activeId);
@@ -310,7 +318,10 @@ export const DebuggerPage: React.FC = () => {
   }).length;
   const candidateTablesMissing = candidateTablesTotal - candidateTablesDrawable;
 
-  const selectedTableGeometryPresent = !!(selectedTable && (selectedTable.bbox || isDemoRun));
+  const selectedTableUnavailable = isSelectedTableUnavailable(runDetail) || activeRun?.selected_table_available === false;
+  const rawNoValidReason = runDetail?.fast_fail_reason || runDetail?.metadata?.fast_fail_reason || runDetail?.metrics?.table_sanity?.selected_reason || activeRun?.no_valid_table_candidate_reason || 'no_valid_table_candidate';
+  const noValidReason = rawNoValidReason === 'no_valid_candidate' ? 'no_valid_table_candidate' : rawNoValidReason;
+  const selectedTableGeometryPresent = !selectedTableUnavailable && !!(selectedTable && (selectedTable.bbox || isDemoRun));
 
   const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
@@ -355,14 +366,22 @@ export const DebuggerPage: React.FC = () => {
   };
 
   // Export handlers
-  const handleExportJSON = () => {
+  const handleExportJSON = async () => {
     if (!currentRunId) return;
-    apiClient.downloadArtifact(currentRunId, 'full_diagnostics.json');
+    try {
+      await apiClient.downloadArtifact(currentRunId, 'full_response.json');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to download diagnostics JSON.', 'error');
+    }
   };
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
     if (!currentRunId) return;
-    apiClient.downloadArtifact(currentRunId, 'selected_table.csv');
+    try {
+      await apiClient.downloadArtifact(currentRunId, 'selected_table_grid.csv');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to download selected table CSV.', 'error');
+    }
   };
 
   const handleFlagAnomalySubmit = () => {
@@ -522,6 +541,19 @@ export const DebuggerPage: React.FC = () => {
 
       </div>
 
+      {/* Prominent UNAVAILABLE Table Warning */}
+      {(activeRun?.selected_table_available === false || selectedTableUnavailable) && (
+        <div className="bg-rose-950/20 border border-rose-900/60 rounded-lg p-3 px-4 flex items-center justify-between gap-3 shrink-0 text-xs font-mono text-rose-300">
+          <div className="flex items-center space-x-2">
+            <AlertTriangle size={15} className="text-rose-500" />
+            <span className="font-bold uppercase">Selected Table: UNAVAILABLE</span>
+          </div>
+          <div>
+            Reason: <span className="font-bold text-rose-400">no_valid_table_candidate</span>
+          </div>
+        </div>
+      )}
+
       {/* Main split work area */}
       <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
         
@@ -648,7 +680,7 @@ export const DebuggerPage: React.FC = () => {
                         })
                       ) : (
                         realColBoundariesX.map((colX, idx) => {
-                          const tableBBox = selectedTable?.bbox || (runDetail?.structured_tables?.[0] ? normalizeBBox(runDetail.structured_tables[0]) : null);
+                          const tableBBox = selectedTableUnavailable ? null : (selectedTable?.bbox || (runDetail?.structured_tables?.[0] ? normalizeBBox(runDetail.structured_tables[0]) : null));
                           const yMin = tableBBox ? tableBBox[1] : 0;
                           const yMax = tableBBox ? tableBBox[3] : sourceSize.height;
                           
@@ -675,7 +707,7 @@ export const DebuggerPage: React.FC = () => {
                           opacity="0.8"
                         />
                       );
-                    } else if (selectedTable?.bbox) {
+	                    } else if (!selectedTableUnavailable && selectedTable?.bbox) {
                       const [xMin, yMin, xMax, yMax] = mapBBoxToDisplaySpace(selectedTable.bbox, sourceSize, metrics);
                       return (
                         <rect
@@ -887,7 +919,8 @@ export const DebuggerPage: React.FC = () => {
                   <div className="text-gray-400 font-bold uppercase tracking-wider text-[8px] mb-1">Overlay Status</div>
                   <div>OCR Blocks: {ocrBlocksTotal} total / {ocrBlocksDrawable} drawable / {ocrBlocksMissing} missing</div>
                   <div>Candidate Tables: {candidateTablesTotal} total / {candidateTablesDrawable} drawable / {candidateTablesMissing} missing</div>
-                  <div>Selected Table: <span className={selectedTableGeometryPresent ? 'text-emerald-400' : 'text-rose-400'}>{selectedTableGeometryPresent ? 'PRESENT' : 'MISSING'}</span></div>
+	                  <div>Selected Table: <span className={selectedTableGeometryPresent ? 'text-emerald-400' : 'text-rose-400'}>{selectedTableGeometryPresent ? 'PRESENT' : (selectedTableUnavailable ? 'UNAVAILABLE' : 'MISSING')}</span></div>
+	                  {selectedTableUnavailable && <div>Reason: <span className="text-rose-300">{noValidReason}</span></div>}
                 </div>
 
                 {/* 5. Missing Geometry Warn HUD */}
@@ -989,8 +1022,11 @@ export const DebuggerPage: React.FC = () => {
                   {selectedObject.type === 'ocr_block' && (
                     <div className="space-y-3 font-mono text-xs">
                       <div className="border-b border-[#30363d] pb-2">
-                        <span className="text-[10px] text-gray-500 uppercase font-bold block">Object: OCR Block</span>
+                        <span className="text-[10px] text-gray-500 uppercase font-bold block">Selected Object: OCR Block</span>
                         <h4 className="text-white text-sm font-bold">{selectedObject.data.block_id}</h4>
+                        <div className="mt-1.5 px-2 py-1 rounded bg-[#0d1117] border border-[#30363d] text-[10px] text-gray-400 font-sans">
+                          <span className="font-semibold text-amber-400">Note:</span> Viewing individual OCR bounding box text. This does not indicate or guarantee selected table availability.
+                        </div>
                       </div>
 
                       <div>
@@ -1172,70 +1208,85 @@ export const DebuggerPage: React.FC = () => {
 
       </div>
 
-      {/* Bottom selected table preview */}
-      {selectedTable && (
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden shrink-0">
-          <div className="bg-[#0d1117] px-4 py-2 border-b border-[#30363d] flex items-center justify-between text-xs font-mono">
-            <div className="flex items-center space-x-2">
-              <span className="text-gray-500 uppercase">Extracted Table:</span>
-              <strong className="text-white">{selectedTable.table_id}</strong>
-              <span className="text-gray-600">({selectedTable.rows} Rows x {selectedTable.cols} Columns)</span>
-            </div>
-            <div className="flex items-center space-x-4 text-[10px] text-gray-500">
-              <div className="flex items-center space-x-1">
-                <span className="w-2 h-2 rounded bg-emerald-500" />
-                <span>Good</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <span className="w-2 h-2 rounded bg-amber-500" />
-                <span>Low Conf</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <span className="w-2 h-2 rounded bg-rose-500" />
-                <span>Anomaly/Error</span>
-              </div>
-            </div>
+      {/* Bottom selected table preview or Empty state card */}
+      {activeRun?.selected_table_available === false || selectedTableUnavailable ? (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 shrink-0 flex flex-col items-center justify-center text-center space-y-2">
+          <div className="text-rose-400 font-mono text-sm font-bold tracking-wide flex items-center space-x-1.5 uppercase">
+            <AlertTriangle size={16} className="text-rose-500" />
+            <span>Selected Table: UNAVAILABLE</span>
           </div>
-
-          <div className="overflow-x-auto max-h-32 custom-scrollbar">
-            <table className="w-full text-left text-xs font-mono">
-              <tbody className="divide-y divide-[#30363d]">
-                {selectedTable.cells.map((rowCells, rIdx) => {
-                  const isHeader = rIdx === 0;
-                  return (
-                    <tr key={rIdx} className={isHeader ? 'bg-[#0d1117]' : 'hover:bg-[#1f242c]'}>
-                      <td className="p-1 px-3 border-r border-[#30363d] text-gray-500 text-[10px] text-center w-8 select-none">
-                        {isHeader ? '#' : rIdx.toString().padStart(2, '0')}
-                      </td>
-                      {rowCells.map(cell => {
-                        const isSelected = selectedObject.type === 'table_cell' && selectedObject.data.cell_id === cell.cell_id;
-                        
-                        let cellBg = '';
-                        if (!isHeader) {
-                          if (cell.status === 'error') cellBg = 'bg-rose-950/20 text-rose-400 font-semibold border-rose-900/60';
-                          else if (cell.status === 'warning') cellBg = 'bg-amber-950/20 text-amber-400 border-amber-900/60';
-                          else if (cell.status === 'good') cellBg = 'bg-emerald-950/10 text-emerald-400 border-emerald-900/20';
-                        }
-                        
-                        return (
-                          <td
-                            key={cell.cell_id}
-                            onClick={() => setSelectedObject({ type: 'table_cell', data: cell })}
-                            className={`p-1 px-3 border-r border-[#30363d] cursor-pointer text-xs truncate max-w-[150px] transition-all select-none border-b border-[#30363d] ${cellBg} ${
-                              isHeader ? 'text-gray-400 font-bold text-[10px] uppercase py-1.5' : 'text-gray-200'
-                            } ${isSelected ? 'ring-1 ring-[#58a6ff] bg-[#1f242c]' : ''}`}
-                          >
-                            {cell.text}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <p className="text-xs text-gray-300 font-sans font-medium">
+            No valid table candidate selected. Candidate tables were rejected by sanity checks.
+          </p>
+          <div className="text-[10px] text-gray-500 font-mono">
+            Reason: <span className="text-rose-400 font-semibold">{noValidReason || 'no_valid_table_candidate'}</span>
           </div>
         </div>
+      ) : (
+        selectedTable && (
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden shrink-0">
+            <div className="bg-[#0d1117] px-4 py-2 border-b border-[#30363d] flex items-center justify-between text-xs font-mono">
+              <div className="flex items-center space-x-2">
+                <span className="text-gray-500 uppercase">Extracted Table:</span>
+                <strong className="text-white">{selectedTable.table_id}</strong>
+                <span className="text-gray-600">({selectedTable.rows} Rows x {selectedTable.cols} Columns)</span>
+              </div>
+              <div className="flex items-center space-x-4 text-[10px] text-gray-500">
+                <div className="flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded bg-emerald-500" />
+                  <span>Good</span>
+                </div>
+                <div className="flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded bg-amber-500" />
+                  <span>Low Conf</span>
+                </div>
+                <div className="flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded bg-rose-500" />
+                  <span>Anomaly/Error</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto max-h-32 custom-scrollbar">
+              <table className="w-full text-left text-xs font-mono">
+                <tbody className="divide-y divide-[#30363d]">
+                  {selectedTable.cells.map((rowCells, rIdx) => {
+                    const isHeader = rIdx === 0;
+                    return (
+                      <tr key={rIdx} className={isHeader ? 'bg-[#0d1117]' : 'hover:bg-[#1f242c]'}>
+                        <td className="p-1 px-3 border-r border-[#30363d] text-gray-500 text-[10px] text-center w-8 select-none">
+                          {isHeader ? '#' : rIdx.toString().padStart(2, '0')}
+                        </td>
+                        {rowCells.map(cell => {
+                          const isSelected = selectedObject.type === 'table_cell' && selectedObject.data.cell_id === cell.cell_id;
+                          
+                          let cellBg = '';
+                          if (!isHeader) {
+                            if (cell.status === 'error') cellBg = 'bg-rose-950/20 text-rose-400 font-semibold border-rose-900/60';
+                            else if (cell.status === 'warning') cellBg = 'bg-amber-950/20 text-amber-400 border-amber-900/60';
+                            else if (cell.status === 'good') cellBg = 'bg-emerald-950/10 text-emerald-400 border-emerald-900/20';
+                          }
+                          
+                          return (
+                            <td
+                              key={cell.cell_id}
+                              onClick={() => setSelectedObject({ type: 'table_cell', data: cell })}
+                              className={`p-1 px-3 border-r border-[#30363d] cursor-pointer text-xs truncate max-w-[150px] transition-all select-none border-b border-[#30363d] ${cellBg} ${
+                                isHeader ? 'text-gray-400 font-bold text-[10px] uppercase py-1.5' : 'text-gray-200'
+                              } ${isSelected ? 'ring-1 ring-[#58a6ff] bg-[#1f242c]' : ''}`}
+                            >
+                              {cell.text}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
       )}
 
       {/* Force OCR Confirmation Modal */}

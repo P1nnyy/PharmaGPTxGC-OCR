@@ -27,6 +27,17 @@ def evaluate_invoice_quality(canonical_invoice: CanonicalInvoice, raw_result: Di
         reasons.append("no_ocr_blocks")
     if raw_result.get("fast_fail"):
         reasons.append(f"fast_fail:{raw_result.get('fast_fail_reason') or 'unknown'}")
+    metrics_obj = raw_result.get("metrics") if isinstance(raw_result.get("metrics"), dict) else {}
+    if raw_result.get("fast_fail_reason") == "no_valid_table_candidate" or metrics_obj.get("no_valid_table_candidate"):
+        reasons.append("no_valid_table_candidate")
+    if metrics_obj.get("selected_table_available") is False or raw_result.get("selected_table_available") is False:
+        reasons.append("no_valid_table_candidate")
+    table_sanity = metrics_obj.get("table_sanity") if isinstance(metrics_obj.get("table_sanity"), dict) else {}
+    selected_id = table_sanity.get("selected_candidate_id")
+    if selected_id:
+        for candidate in table_sanity.get("per_candidate", []):
+            if isinstance(candidate, dict) and candidate.get("table_id") == selected_id and "coordinate_space_violation" in (candidate.get("rejection_reasons") or []):
+                reasons.append("coordinate_space_violation")
     if item_row_count == 0:
         reasons.append("no_item_rows")
 
@@ -74,9 +85,11 @@ def evaluate_invoice_quality(canonical_invoice: CanonicalInvoice, raw_result: Di
         # Check 1: Wide table collapsed below minimum column count
         estimated_cols = wide_diag.get("estimated_column_count", 0)
         # Use the canonical table column count from metrics if available
-        actual_col_count = metrics_obj.get("column_count") or 0
+        actual_col_count = metrics_obj.get("column_count") or metrics_obj.get("col_count") or 0
         if isinstance(actual_col_count, int) and actual_col_count < 10 and estimated_cols >= 10:
             reasons.append("wide_table_collapsed")
+        if wide_diag.get("column_expansion_failed"):
+            reasons.append("wide_table_column_expansion_failed")
 
     # Check 2: Excessive UNKNOWN semantic columns
     semantic_results = metrics_obj.get("semantic_column_results") or {}
@@ -96,7 +109,8 @@ def evaluate_invoice_quality(canonical_invoice: CanonicalInvoice, raw_result: Di
         if total_cols >= 4 and unknown_cols > total_cols * 0.5:
             reasons.append(f"excessive_unknown_columns:{unknown_cols}/{total_cols}")
 
-    hard_fail_reasons = {"pipeline_error", "no_ocr_blocks", "no_item_rows"}
+    reasons = list(dict.fromkeys(reasons))
+    hard_fail_reasons = {"pipeline_error", "no_ocr_blocks", "no_item_rows", "no_valid_table_candidate", "coordinate_space_violation"}
     if any(reason in hard_fail_reasons or reason.startswith("fast_fail:") for reason in reasons):
         status = "failed"
     elif reasons:

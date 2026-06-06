@@ -73,6 +73,32 @@ function sanitizeForLocalStorage(value: any): any {
   return value;
 }
 
+function buildTrimmedRunDetail(detail: any, warning: string): any {
+  const metadata = detail?.metadata || {};
+  const diagnostics = metadata.diagnostics || detail?.diagnostics;
+  const artifacts = metadata.artifacts || diagnostics?.artifacts || detail?.artifacts || [];
+  return sanitizeForLocalStorage({
+    invoice_id: detail?.invoice_id,
+    backend_invoice_id: detail?.backend_invoice_id || detail?.invoice_id,
+    cached: detail?.cached,
+    text: detail?.text ? String(detail.text).slice(0, 5000) : '',
+    diagnostics_run_id: metadata.diagnostics_run_id || diagnostics?.diagnostics_run_id || diagnostics?.run_id,
+    storage_warning: warning,
+    metadata: {
+      diagnostics_run_id: metadata.diagnostics_run_id || diagnostics?.diagnostics_run_id || diagnostics?.run_id,
+      diagnostics,
+      artifacts,
+      processed_image: metadata.processed_image,
+      quality_gate: metadata.quality_gate,
+      coordinate_space_violation: metadata.coordinate_space_violation,
+    },
+    diagnostics,
+    artifacts,
+    quality_gate: detail?.quality_gate || metadata.quality_gate,
+    processed_image: detail?.processed_image || metadata.processed_image,
+  });
+}
+
 // Retrieves the cached image URL if present, otherwise returns mock SVG representation
 export const getInvoiceImageUrl = (runId: string, filename: string): string => {
   const cached = sessionStorage.getItem(`ocr_workbench_image_${runId}`);
@@ -354,6 +380,76 @@ export const getDetailsData = (runId: string): any | null => {
   return null;
 };
 
+export function isSelectedTableUnavailable(detail: any): boolean {
+  if (!detail || typeof detail !== 'object') return false;
+  const metadata = detail.metadata || {};
+  const metrics = detail.metrics || metadata.metrics || {};
+  const candidateTables = detail.candidate_tables || metadata.candidate_tables;
+  return (
+    detail.selected_table_available === false ||
+    metadata.selected_table_available === false ||
+    metrics.selected_table_available === false ||
+    detail.fast_fail_reason === 'no_valid_table_candidate' ||
+    metadata.fast_fail_reason === 'no_valid_table_candidate' ||
+    metrics.no_valid_table_candidate === true ||
+    candidateTables?.selected_table_available === false ||
+    (
+      candidateTables &&
+      Object.prototype.hasOwnProperty.call(candidateTables, 'selected_candidate_id') &&
+      candidateTables.selected_candidate_id === null
+    )
+  );
+}
+
+function noValidTableReason(detail: any): string | undefined {
+  if (!isSelectedTableUnavailable(detail)) return undefined;
+  const metadata = detail?.metadata || {};
+  const metrics = detail?.metrics || metadata.metrics || {};
+  const reason = (
+    detail?.fast_fail_reason ||
+    metadata.fast_fail_reason ||
+    metrics.table_sanity?.selected_reason ||
+    detail?.candidate_tables?.table_sanity?.selected_reason ||
+    metadata.candidate_tables?.table_sanity?.selected_reason ||
+    'no_valid_table_candidate'
+  );
+  return reason === 'no_valid_candidate' ? 'no_valid_table_candidate' : reason;
+}
+
+function normalizeInvoiceConfidence(detail: any, fallback?: number): number {
+  if (isSelectedTableUnavailable(detail)) return 0;
+  const qg = detail?.quality_gate || detail?.metadata?.quality_gate;
+  const qgStatus = String(qg?.status || qg?.status_effective || '').toLowerCase();
+  if (qgStatus === 'failed' && (qg?.confidence === null || qg?.confidence === undefined)) {
+    return 0;
+  }
+  const candidates = [
+    qg?.confidence,
+    detail?.invoice_confidence,
+    detail?.metadata?.invoice_confidence,
+    fallback,
+  ];
+  for (const value of candidates) {
+    const num = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(num)) return Math.max(0, Math.min(1, num));
+  }
+  return 0;
+}
+
+function normalizeRunForDetail(run: RunSummary, detail: any): RunSummary {
+  if (!isSelectedTableUnavailable(detail)) return run;
+  return {
+    ...run,
+    status: 'failed',
+    confidence: 0,
+    selected_table_id: '—',
+    selected_table_shape: 'Unavailable',
+    selected_table_available: false,
+    no_valid_table_candidate_reason: noValidTableReason(detail) || 'no_valid_table_candidate',
+    row_math_status: 'unmeasurable',
+  };
+}
+
 /**
  * Extracts a numeric index from a row/col identifier.
  * Handles: finite number, numeric string "14", prefixed string "row_14" / "col_0".
@@ -567,6 +663,10 @@ const FOOTER_PHRASES = /\b(bank\s*detail|account|ifsc|neft|rtgs|branch|upi|terms
  * Returns the table object from structured_tables, or null if none found.
  */
 export function selectMainTable(detail: any): any {
+  if (isSelectedTableUnavailable(detail)) {
+    return null;
+  }
+
   const tables: any[] = detail?.structured_tables;
   if (!Array.isArray(tables) || tables.length === 0) {
     // Fall through to other shapes
@@ -758,6 +858,16 @@ export function normalizeBackendDiagnostics(backendData: any): any {
     res.metadata.processed_image = processed_image;
   }
 
+  const candidate_tables =
+    backendData.candidate_tables ||
+    backendData.metadata?.candidate_tables ||
+    backendData.metrics?.candidate_tables ||
+    backendData.metadata?.metrics?.candidate_tables;
+  if (candidate_tables) {
+    res.candidate_tables = candidate_tables;
+    res.metadata.candidate_tables = candidate_tables;
+  }
+
   // Resolve Quality Gate
   const quality_gate = 
     backendData.quality_gate || 
@@ -767,6 +877,32 @@ export function normalizeBackendDiagnostics(backendData: any): any {
   if (quality_gate) {
     res.quality_gate = quality_gate;
     res.metadata.quality_gate = quality_gate;
+  }
+
+  if (isSelectedTableUnavailable(res)) {
+    const reason = noValidTableReason(res) || 'no_valid_table_candidate';
+    res.selected_table_available = false;
+    res.selected_candidate_id = null;
+    res.selected_table = null;
+    res.main_table = null;
+    res.fast_fail_reason = reason;
+    res.metadata.selected_table_available = false;
+    res.metadata.selected_candidate_id = null;
+    res.metadata.fast_fail_reason = reason;
+    res.metadata.safe_for_erp = false;
+    res.metadata.status_effective = res.metadata.status_effective || 'failed';
+    const qg = res.quality_gate || res.metadata.quality_gate || {};
+    const reasons = Array.isArray(qg.reasons) ? [...qg.reasons] : [];
+    if (!reasons.includes('no_valid_table_candidate')) reasons.push('no_valid_table_candidate');
+    res.quality_gate = {
+      ...qg,
+      status: qg.status || 'failed',
+      status_effective: qg.status_effective || 'failed',
+      safe_for_erp: false,
+      confidence: qg.confidence ?? null,
+      reasons,
+    };
+    res.metadata.quality_gate = res.quality_gate;
   }
 
   // Dev mode logging
@@ -811,6 +947,18 @@ const getStoredRuns = (): RunSummary[] => {
           clearWorkbenchRunStorage();
           runs = [];
         }
+      }
+      let changed = false;
+      runs = runs.map(run => {
+        const detail = getDetailsData(run.run_id);
+        if (detail && isSelectedTableUnavailable(detail)) {
+          changed = true;
+          return normalizeRunForDetail(run, detail);
+        }
+        return run;
+      });
+      if (changed) {
+        saveStoredRuns(runs);
       }
       return runs;
     } catch {
@@ -1410,74 +1558,8 @@ const getMockQualityGate = (runId: string): QualityGate => {
   };
 };
 
-// Mock Artifact outputs for file list
-const getMockArtifacts = (runId: string, filename: string): Artifact[] => {
-  return [
-    {
-      name: `${filename}`,
-      type: 'image',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/test_images/${filename}`,
-      size: '1.4 MB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'ocr_blocks_raw.json',
-      type: 'json',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/ocr_blocks_raw.json`,
-      size: '124 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'candidate_tables.json',
-      type: 'json',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/candidate_tables.json`,
-      size: '42 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'selected_table_grid.csv',
-      type: 'csv',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/selected_table_grid.csv`,
-      size: '4 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'selected_table_grid.md',
-      type: 'markdown',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/selected_table_grid.md`,
-      size: '6 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'semantic_mapping.json',
-      type: 'json',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/semantic_mapping.json`,
-      size: '18 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'row_math_audit.json',
-      type: 'json',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/row_math_audit.json`,
-      size: '8 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'quality_gate_checks.json',
-      type: 'json',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/quality_gate_checks.json`,
-      size: '11 KB',
-      created_at: getTimestamp(1)
-    },
-    {
-      name: 'full_diagnostics_bundle.zip',
-      type: 'zip',
-      path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/full_diagnostics_bundle.zip`,
-      size: '1.6 MB',
-      created_at: getTimestamp(1)
-    }
-  ];
-};
+// Demo runs do not fabricate backend-owned diagnostics.
+const getMockArtifacts = (_runId: string, _filename: string): Artifact[] => [];
 
 // API Client object implementing all required methods
 export const apiClient = {
@@ -1499,6 +1581,7 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('file', file);
 
+    let backendData: any;
     try {
       // reconstruct & extract must be query params (FastAPI reads them as
       // Query(...) not Form(...)). Without these, backend skips TSR/extraction.
@@ -1512,72 +1595,12 @@ export const apiClient = {
         throw new Error(err.detail || 'Upload failed');
       }
 
-      const backendData = await response.json();
-      const normalizedDetail = normalizeBackendDiagnostics(backendData);
-      
-      // Successfully uploaded. Add a new run to our store.
-      const runs = getStoredRuns();
-      const newRunId = `RUN_${Date.now()}`;
-      
-      const isSafe = normalizedDetail.quality_gate?.safe_for_erp ?? (normalizedDetail.metadata?.quality_gate?.safe_for_erp ?? false);
-      const conf = normalizedDetail.quality_gate?.confidence ?? (normalizedDetail.invoice_confidence ?? 0.880);
-      const tokCov = normalizedDetail.metadata?.token_coverage ?? 0.920;
-      const repScore = normalizedDetail.metadata?.reconstruction_score ?? 0.850;
-      
-      const newRun: RunSummary = {
-        run_id: newRunId,
-        filename: file.name,
-        timestamp: new Date().toISOString(),
-        status: isSafe ? 'safe_for_erp' : 'needs_review',
-        confidence: conf,
-        token_coverage: tokCov,
-        representability_score: repScore,
-        // Use backend-ranked main table instead of structured_tables[0]
-        selected_table_id: (() => {
-          const mainTbl = selectMainTable(normalizedDetail);
-          return mainTbl?.table_id || 'ITEMS_001';
-        })(),
-        selected_table_shape: (() => {
-          const mainTbl = selectMainTable(normalizedDetail);
-          if (!mainTbl) return '0 Rows x 0 Columns';
-          const rows = tableRows(mainTbl);
-          const cols = tableCols(mainTbl);
-          return `${rows} Rows x ${cols} Columns`;
-        })(),
-        missing_fields: normalizedDetail.quality_gate?.missing_fields || (normalizedDetail.metadata?.quality_gate?.missing_fields || []),
-        row_math_status: normalizedDetail.quality_gate?.row_math_status || (normalizedDetail.metadata?.quality_gate?.row_math_status || 'pass'),
-        is_demo: false
-      };
-
-      // Cache the uploaded image file locally
-      await cacheImageLocal(newRunId, file);
-      const processedImageDataUrl = normalizedDetail.metadata?.processed_image?.processed_image_data_url;
-      cacheProcessedImageLocal(newRunId, processedImageDataUrl);
-      if (normalizedDetail.metadata?.processed_image) {
-        delete normalizedDetail.metadata.processed_image.processed_image_data_url;
-      }
-      if (normalizedDetail.processed_image) {
-        delete normalizedDetail.processed_image.processed_image_data_url;
-      }
-
-      // Store the normalized diagnostics details
-      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(normalizedDetail));
-
-      // Also store raw backend response for debugging
-      localStorage.setItem(
-        `ocr_workbench_raw_backend_${newRunId}`,
-        JSON.stringify(sanitizeForLocalStorage(backendData))
-      );
-
-      runs.unshift(newRun);
-      saveStoredRuns(runs);
-
-      return newRun;
+      backendData = await response.json();
     } catch (error) {
-      console.warn('Backend call failed, simulating client upload:', error);
+      console.warn('Backend upload failed:', error);
       
       if (!ENABLE_MOCK_DATA) {
-        return null;
+        throw new Error(error instanceof Error ? error.message : 'Backend upload failed.');
       }
       
       // Mock success upload if backend is offline and ENABLE_MOCK_DATA=true
@@ -1607,6 +1630,107 @@ export const apiClient = {
       
       return newRun;
     }
+
+    const normalizedDetail = normalizeBackendDiagnostics(backendData);
+    const backendInvoiceId = backendData?.invoice_id || normalizedDetail?.invoice_id;
+    const diagnostics =
+      normalizedDetail.metadata?.diagnostics ||
+      normalizedDetail.diagnostics ||
+      {};
+    const diagnosticsRunId =
+      normalizedDetail.metadata?.diagnostics_run_id ||
+      diagnostics.diagnostics_run_id ||
+      diagnostics.run_id ||
+      backendInvoiceId;
+    normalizedDetail.backend_invoice_id = backendInvoiceId;
+    normalizedDetail.diagnostics_run_id = diagnosticsRunId;
+    normalizedDetail.metadata.backend_invoice_id = backendInvoiceId;
+    normalizedDetail.metadata.diagnostics_run_id = diagnosticsRunId;
+
+    // Successfully uploaded. Add a new run to our store.
+    const runs = getStoredRuns();
+    const newRunId = `RUN_${Date.now()}`;
+    
+    const tableUnavailable = isSelectedTableUnavailable(normalizedDetail);
+    const isSafe = tableUnavailable ? false : (normalizedDetail.quality_gate?.safe_for_erp ?? (normalizedDetail.metadata?.quality_gate?.safe_for_erp ?? false));
+    const qgStatus = String(normalizedDetail.quality_gate?.status || normalizedDetail.quality_gate?.status_effective || normalizedDetail.metadata?.quality_gate?.status || '').toLowerCase();
+    const conf = normalizeInvoiceConfidence(normalizedDetail);
+    const tokCov = normalizedDetail.metadata?.token_coverage ?? 0.920;
+    const repScore = normalizedDetail.metadata?.reconstruction_score ?? 0.850;
+    
+    const newRun: RunSummary = {
+      run_id: newRunId,
+      filename: file.name,
+      timestamp: new Date().toISOString(),
+      status: isSafe ? 'safe_for_erp' : (tableUnavailable || qgStatus === 'failed' ? 'failed' : 'needs_review'),
+      confidence: conf,
+      token_coverage: tokCov,
+      representability_score: repScore,
+      // Use backend-ranked main table instead of structured_tables[0]
+      selected_table_id: (() => {
+        if (tableUnavailable) return '—';
+        const mainTbl = selectMainTable(normalizedDetail);
+        return mainTbl?.table_id || '—';
+      })(),
+      selected_table_shape: (() => {
+        if (tableUnavailable) return 'Unavailable';
+        const mainTbl = selectMainTable(normalizedDetail);
+        if (!mainTbl) return '0 Rows x 0 Columns';
+        const rows = tableRows(mainTbl);
+        const cols = tableCols(mainTbl);
+        return `${rows} Rows x ${cols} Columns`;
+      })(),
+      missing_fields: normalizedDetail.quality_gate?.missing_fields || (normalizedDetail.metadata?.quality_gate?.missing_fields || []),
+      row_math_status: normalizedDetail.quality_gate?.row_math_status || (normalizedDetail.metadata?.quality_gate?.row_math_status || 'pass'),
+      is_demo: false,
+      backend_invoice_id: backendInvoiceId,
+      diagnostics_run_id: diagnosticsRunId,
+      selected_table_available: !tableUnavailable,
+      no_valid_table_candidate_reason: tableUnavailable ? (noValidTableReason(normalizedDetail) || 'no_valid_table_candidate') : undefined
+    };
+
+    // Cache the uploaded image file locally
+    await cacheImageLocal(newRunId, file);
+    const processedImageDataUrl = normalizedDetail.metadata?.processed_image?.processed_image_data_url;
+    cacheProcessedImageLocal(newRunId, processedImageDataUrl);
+    if (normalizedDetail.metadata?.processed_image) {
+      delete normalizedDetail.metadata.processed_image.processed_image_data_url;
+    }
+    if (normalizedDetail.processed_image) {
+      delete normalizedDetail.processed_image.processed_image_data_url;
+    }
+
+    let storageWarning: string | null = null;
+    try {
+      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(normalizedDetail));
+    } catch (error) {
+      storageWarning = `Run completed, but local debug payload was trimmed: ${error instanceof Error ? error.message : String(error)}`;
+      normalizedDetail.storage_warning = storageWarning;
+      normalizedDetail.metadata.storage_warning = storageWarning;
+      const trimmed = buildTrimmedRunDetail(normalizedDetail, storageWarning);
+      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(trimmed));
+    }
+
+    try {
+      localStorage.setItem(
+        `ocr_workbench_raw_backend_${newRunId}`,
+        JSON.stringify(sanitizeForLocalStorage(backendData))
+      );
+    } catch (error) {
+      storageWarning = storageWarning || `Run completed, but raw backend payload was not stored: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    if (storageWarning) {
+      newRun.storage_warning = storageWarning;
+    }
+    runs.unshift(newRun);
+    try {
+      saveStoredRuns(runs);
+    } catch (error) {
+      throw new Error(`Backend returned success, but run registration failed in browser storage: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return newRun;
   },
 
   // Simulates OCR processing execution
@@ -1657,6 +1781,16 @@ export const apiClient = {
       clearWorkbenchRunStorage();
       throw new Error('Run not found');
     }
+    const detail = getDetailsData(runId);
+    if (detail && isSelectedTableUnavailable(detail)) {
+      const normalized = normalizeRunForDetail(run, detail);
+      const idx = runs.findIndex(r => r.run_id === runId);
+      if (idx >= 0) {
+        runs[idx] = normalized;
+        saveStoredRuns(runs);
+      }
+      return normalized;
+    }
     return run;
   },
 
@@ -1693,32 +1827,80 @@ export const apiClient = {
 
       const candidates: CandidateTable[] = [];
       const decision = 
+        detail.candidate_tables ||
+        detail.metadata?.candidate_tables ||
         detail.tsr_candidate_decision || 
         detail.metrics?.tsr_candidate_decision || 
-        detail.candidate_tables || 
         detail.table_candidates || 
         detail.routing_diagnostics || 
         (detail.routing_diagnostics?.candidates ? { candidates: detail.routing_diagnostics.candidates, selected: detail.routing_diagnostics.selected } : null);
+      const tableUnavailable = isSelectedTableUnavailable(detail);
+      const selectedCandidateId =
+        tableUnavailable
+          ? null
+          : (decision?.selected_candidate_id ?? detail.selected_candidate_id ?? detail.metadata?.selected_candidate_id ?? null);
+      const sanityById: Record<string, any> = {};
+      const sanityCandidates =
+        decision?.table_sanity?.per_candidate ||
+        detail.metrics?.table_sanity?.per_candidate ||
+        detail.metadata?.metrics?.table_sanity?.per_candidate ||
+        detail.table_sanity?.per_candidate ||
+        detail.metadata?.table_sanity?.per_candidate;
+      if (Array.isArray(sanityCandidates)) {
+        for (const item of sanityCandidates) {
+          if (item?.table_id) sanityById[String(item.table_id)] = item;
+        }
+      }
+      const rejectionFor = (id: string, c: any): string | undefined => {
+        const sanity = sanityById[id];
+        const reasons = sanity?.rejection_reasons || c.rejection_reason || c.blocked_by;
+        if (Array.isArray(reasons)) return reasons.join(', ');
+        return reasons || (tableUnavailable ? noValidTableReason(detail) || 'no_valid_table_candidate' : undefined);
+      };
 
       if (decision) {
-        if (decision.candidates && typeof decision.candidates === 'object') {
-          for (const [key, cand] of Object.entries(decision.candidates)) {
-            const c = cand as any;
-            if (!c.available && key !== 'ppstructure') continue;
+        if (Array.isArray(decision.candidates)) {
+          decision.candidates.forEach((c: any, index: number) => {
+            const tableId = c.table_id || `cand_${index}`;
+            const sanity = sanityById[tableId] || {};
             candidates.push({
-              table_id: key,
-              source_engine: c.source || key,
+              table_id: tableId,
+              source_engine: c.source_engine || c.source || sanity.source || 'backend_candidate',
               rows: tableRows(c),
               cols: tableCols(c),
               x_coverage: c.x_coverage || 0,
               y_coverage: c.y_coverage || 0,
-              cell_count: c.cells || 0,
-              non_empty_cells: c.non_empty_cells || c.cells || 0,
-              score: c.score || c.confidence || 0,
-              labels: c.labels || [key],
-              selected: decision.selected === key,
-              rejection_reason: c.blocked_by?.join(', ') || null,
-              representability_score: c.score || c.confidence || 0,
+              cell_count: c.cell_count || c.cells || sanity.cell_count || 0,
+              non_empty_cells: c.non_empty_cells || c.cells || sanity.cell_count || 0,
+              score: c.score || c.confidence || sanity.table_sanity_score || 0,
+              labels: c.labels || [tableId],
+              selected: !tableUnavailable && (selectedCandidateId ? tableId === selectedCandidateId : Boolean(c.selected)),
+              rejection_reason: rejectionFor(tableId, c),
+              representability_score: c.representability_score || c.score || c.confidence || sanity.table_sanity_score || 0,
+              preview_cells: toDensePreviewGrid(c.preview_cells),
+              bbox: normalizeBBox(c)
+            });
+          });
+        } else if (decision.candidates && typeof decision.candidates === 'object') {
+          for (const [key, cand] of Object.entries(decision.candidates)) {
+            const c = cand as any;
+            if (!c.available && key !== 'ppstructure') continue;
+            const tableId = c.table_id || key;
+            const sanity = sanityById[tableId] || {};
+            candidates.push({
+              table_id: tableId,
+              source_engine: c.source || sanity.source || key,
+              rows: tableRows(c),
+              cols: tableCols(c),
+              x_coverage: c.x_coverage || 0,
+              y_coverage: c.y_coverage || 0,
+              cell_count: c.cells || sanity.cell_count || 0,
+              non_empty_cells: c.non_empty_cells || c.cells || sanity.cell_count || 0,
+              score: c.score || c.confidence || sanity.table_sanity_score || 0,
+              labels: c.labels || [tableId],
+              selected: !tableUnavailable && (selectedCandidateId ? tableId === selectedCandidateId : decision.selected === key),
+              rejection_reason: rejectionFor(tableId, c),
+              representability_score: c.score || c.confidence || sanity.table_sanity_score || 0,
               preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
             });
@@ -1736,8 +1918,8 @@ export const apiClient = {
               non_empty_cells: c.non_empty_cells || c.cells || 0,
               score: c.score || c.confidence || 0.90,
               labels: c.labels || [c.table_id || `cand_${index}`],
-              selected: c.selected ?? (index === 0),
-              rejection_reason: c.rejection_reason || c.blocked_by?.join(', ') || null,
+              selected: !tableUnavailable && (selectedCandidateId ? (c.table_id || `cand_${index}`) === selectedCandidateId : Boolean(c.selected)),
+              rejection_reason: rejectionFor(c.table_id || `cand_${index}`, c),
               representability_score: c.score || c.confidence || 0.90,
               preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
@@ -1756,8 +1938,8 @@ export const apiClient = {
               non_empty_cells: c.non_empty_cells || c.cells || 0,
               score: c.score || c.confidence || 0.90,
               labels: c.labels || [c.table_id || `region_${index}`],
-              selected: c.selected ?? (index === 0),
-              rejection_reason: c.rejection_reason || null,
+              selected: !tableUnavailable && (selectedCandidateId ? (c.table_id || `region_${index}`) === selectedCandidateId : Boolean(c.selected)),
+              rejection_reason: rejectionFor(c.table_id || `region_${index}`, c),
               representability_score: c.score || c.confidence || 0.90,
               preview_cells: toDensePreviewGrid(c.preview_cells),
               bbox: normalizeBBox(c)
@@ -1791,8 +1973,8 @@ export const apiClient = {
               non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
               score: table.score || table.confidence || 1.0,
               labels: [tableId],
-              selected: mainTableId ? (tableId === mainTableId) : (index === 0),
-              rejection_reason: undefined,
+              selected: !tableUnavailable && (mainTableId ? (tableId === mainTableId) : false),
+              rejection_reason: rejectionFor(tableId, table),
               representability_score: table.representability_score || 1.0,
               preview_cells: toDensePreviewGrid(table.preview_cells || table.cells),
               bbox: normalizeBBox(table)
@@ -1811,8 +1993,8 @@ export const apiClient = {
             non_empty_cells: table.non_empty_cells || table.cells?.length || 0,
             score: table.score || table.confidence || 1.0,
             labels: [table.table_id || 'table_1'],
-            selected: true,
-            rejection_reason: undefined,
+            selected: !tableUnavailable,
+            rejection_reason: rejectionFor(table.table_id || 'table_1', table),
             representability_score: table.representability_score || 1.0,
             preview_cells: toDensePreviewGrid(table.preview_cells || table.cells),
             bbox: normalizeBBox(table)
@@ -1835,6 +2017,9 @@ export const apiClient = {
       const run = getStoredRuns().find(r => r.run_id === runId);
       if (run?.is_demo && ENABLE_MOCK_DATA) {
         return getMockSelectedTable(runId);
+      }
+      if (isSelectedTableUnavailable(detail)) {
+        return null;
       }
 
       // Use backend-ranked main table selection instead of structured_tables[0]
@@ -2003,10 +2188,12 @@ export const apiClient = {
         detail.metadata?.canonical_invoice?.quality_gate;
 
       if (qg) {
+        const tableUnavailable = isSelectedTableUnavailable(detail);
+        const status = String(qg.status || qg.status_effective || '').toLowerCase();
         return {
-          safe_for_erp: qg.safe_for_erp ?? false,
-          status_effective: (qg.safe_for_erp ? 'safe_for_erp' : (qg.status_effective || 'needs_review')) as 'safe_for_erp' | 'needs_review' | 'failed',
-          confidence: qg.confidence ?? detail.invoice_confidence ?? run?.confidence ?? 1.0,
+          safe_for_erp: tableUnavailable ? false : (qg.safe_for_erp ?? false),
+          status_effective: (tableUnavailable || status === 'failed' ? 'failed' : (qg.safe_for_erp ? 'safe_for_erp' : (qg.status_effective || qg.status || 'needs_review'))) as 'safe_for_erp' | 'needs_review' | 'failed',
+          confidence: normalizeInvoiceConfidence(detail, run?.confidence),
           reasons: qg.reasons || [],
           missing_fields: qg.missing_fields || [],
           footer_status: qg.footer_status || '',
@@ -2042,48 +2229,32 @@ export const apiClient = {
   async getArtifacts(runId: string): Promise<Artifact[]> {
     const detail = getDetailsData(runId);
     if (detail) {
-      const run = await this.getRun(runId);
-      const processedImage = detail.metadata?.processed_image || detail.processed_image;
-      const artifacts: Artifact[] = [
-        {
-          name: `${run.filename}`,
-          type: 'image',
-          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/test_images/${run.filename}`,
-          size: '1.4 MB',
-          created_at: run.timestamp
-        },
-        {
-          name: 'ocr_blocks_raw.json',
-          type: 'json',
-          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/ocr_blocks_raw.json`,
-          size: '124 KB',
-          created_at: run.timestamp
-        },
-        {
-          name: 'candidate_tables.json',
-          type: 'json',
-          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/candidate_tables.json`,
-          size: '42 KB',
-          created_at: run.timestamp
-        },
-        {
-          name: 'selected_table_grid.csv',
-          type: 'csv',
-          path: `/Users/pranavgupta/PharmaGPTxGC-OCR/local_runs/diagnostics_${runId}/selected_table_grid.csv`,
-          size: '4 KB',
-          created_at: run.timestamp
-        }
-      ];
-      if (processedImage?.processed_image_path) {
-        artifacts.splice(1, 0, {
-          name: 'ocr_corrected_image.png',
-          type: 'image',
-          path: processedImage.processed_image_path,
-          size: 'Generated',
-          created_at: run.timestamp
-        });
+      const artifacts =
+        detail.metadata?.artifacts ||
+        detail.metadata?.diagnostics?.artifacts ||
+        detail.artifacts ||
+        detail.diagnostics?.artifacts;
+      if (Array.isArray(artifacts)) {
+        return artifacts;
       }
-      return artifacts;
+
+      const diagnosticsRunId =
+        detail.metadata?.diagnostics_run_id ||
+        detail.metadata?.diagnostics?.run_id ||
+        detail.diagnostics_run_id ||
+        detail.diagnostics?.run_id;
+      if (diagnosticsRunId) {
+        try {
+          const response = await fetch(`/diagnostics/${encodeURIComponent(diagnosticsRunId)}/artifacts`);
+          if (response.ok) {
+            const data = await response.json();
+            return Array.isArray(data.artifacts) ? data.artifacts : [];
+          }
+        } catch (error) {
+          console.error('Failed to fetch backend diagnostics artifacts:', error);
+        }
+      }
+      return [];
     }
     const run = getStoredRuns().find(r => r.run_id === runId);
     if (run?.is_demo && ENABLE_MOCK_DATA) {
@@ -2114,25 +2285,36 @@ export const apiClient = {
     }
   },
 
+  async getArtifactContent(runId: string, artifactName: string): Promise<string> {
+    const artifacts = await this.getArtifacts(runId);
+    const artifact = artifacts.find(item => item.name === artifactName);
+    if (!artifact?.content_url) {
+      throw new Error(`No backend artifact URL available for ${artifactName}`);
+    }
+
+    const response = await fetch(artifact.content_url);
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `Failed to read artifact ${artifactName}`);
+    }
+    return await response.text();
+  },
+
   // Downloads specific output artifact
   async downloadArtifact(runId: string, artifactName: string) {
-    console.log(`Downloading ${artifactName} for run ${runId}`);
-    
-    let content = '';
-    let mimeType = 'text/plain';
-    
-    if (artifactName.endsWith('.csv')) {
-      content = 'Row,Product,Batch,Expiry,Qty,Rate,Disc,Amount\n1,AmoxicillinCap,BN-99212,12/2028,12,42.00,8%,504.00';
-      mimeType = 'text/csv';
-    } else if (artifactName.endsWith('.json')) {
-      const data = { run_id: runId, timestamp: new Date().toISOString() };
-      content = JSON.stringify(data, null, 2);
-      mimeType = 'application/json';
-    } else {
-      content = `Debug trace output for ${artifactName}`;
+    const artifacts = await this.getArtifacts(runId);
+    const artifact = artifacts.find(item => item.name === artifactName);
+    if (!artifact?.download_url && !artifact?.content_url) {
+      throw new Error(`No backend artifact URL available for ${artifactName}`);
     }
-    
-    const blob = new Blob([content], { type: mimeType });
+
+    const response = await fetch(artifact.download_url || artifact.content_url!);
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `Failed to download artifact ${artifactName}`);
+    }
+
+    const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -2145,19 +2327,7 @@ export const apiClient = {
 
   // Downloads the full diagnostics zip bundle
   async downloadArtifactBundle(runId: string) {
-    const run = await this.getRun(runId);
-    const bundleName = `${run.filename.split('.')[0]}_diagnostics_${runId}.zip`;
-    console.log(`Downloading bundle: ${bundleName}`);
-    
-    const blob = new Blob([`Zip bundle content placeholder for ${runId}`], { type: 'application/zip' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = bundleName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    await this.downloadArtifact(runId, 'full_diagnostics_bundle.zip');
   },
 
   // Generates debug summary logs text and copies to user clipboard

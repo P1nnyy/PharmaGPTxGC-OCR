@@ -46,7 +46,9 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
   const handleDownloadArtifacts = () => {
     if (!currentRunId) return;
-    apiClient.downloadArtifactBundle(currentRunId);
+    apiClient.downloadArtifactBundle(currentRunId).catch(err => {
+      console.error('Failed to download diagnostics bundle:', err);
+    });
   };
 
   const menuItems = [
@@ -248,7 +250,11 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
               <div className="flex items-center space-x-1">
                 <span className="text-gray-400">Confidence:</span>
                 <span className="font-mono text-white font-semibold">
-                  {currentRun ? `${(currentRun.confidence * 100).toFixed(1)}%` : '--'}
+                  {currentRun ? (
+                    currentRun.selected_table_available === false || currentRun.status === 'failed' || currentRun.confidence === null || currentRun.confidence === undefined
+                      ? '0.0%'
+                      : `${(currentRun.confidence * 100).toFixed(1)}%`
+                  ) : '--'}
                 </span>
               </div>
 

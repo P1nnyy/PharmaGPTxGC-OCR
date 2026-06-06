@@ -22,6 +22,7 @@ from services.layout_pipeline.row_classification import classify_rows
 from services.layout_pipeline.column_projection import get_last_projection_debug, project_column_boundaries
 from services.layout_pipeline.multiline_merging import merge_multiline_rows
 from services.layout_pipeline.wide_table_detector import detect_wide_table, split_fused_block
+from services.layout_pipeline.header_anchor import derive_header_column_bands
 
 
 def rotate_blocks(blocks: List[OCRBlock], angle: int) -> List[OCRBlock]:
@@ -177,50 +178,32 @@ class HeuristicTSREngine(BaseTSREngine):
             
             # 3.5. Header Anchor Override (if wide table mode is active and columns collapsed)
             if raw_wide_table_evidence.is_wide and len(col_bounds) < 10:
-                header_row = None
-                for r in region_rows:
+                header_blocks = []
+                for r in region_rows[:3]:
                     if r.classification == "Column Header":
-                        header_row = r
-                        break
-                if not header_row and region_rows:
-                    # Fallback header match pattern
-                    header_label_pat = re.compile(
-                        r"\b(PRODUCT|ITEM|DESCRIPTION|PARTICULARS|MEDICINE|DRUG|NAME|HSN|SAC|BATCH|B\.?\s*NO|LOT|QTY|QUANTITY|BILLED|FREE|SCHEME|SCH|RATE|PTR|PRICE|DISC|DISCOUNT|TD|CD|EXP|EXPIRY|MRP|GST|CGST|SGST|IGST|TAX|AMOUNT|AMT|VALUE|NET|PACK|COMPANY|MFR|MANUFACTURER|SR\.?\s*NO|S\.?\s*NO|SHO|SL|NO)\b",
-                        re.I
+                        header_blocks.extend(r.blocks)
+                if not header_blocks and region_rows:
+                    header_blocks.extend(region_rows[0].blocks)
+
+                region_xs = [
+                    coord
+                    for b in region_blocks
+                    if b.normalized_geometry
+                    for coord in (b.normalized_geometry.min_x, b.normalized_geometry.max_x)
+                ]
+                table_min_x = min(region_xs) if region_xs else None
+                table_max_x = max(region_xs) if region_xs else None
+                header_bands = derive_header_column_bands(
+                    header_blocks,
+                    table_min_x=table_min_x,
+                    table_max_x=table_max_x,
+                )
+                if len(header_bands) >= 10:
+                    col_bounds = [(band.min_x, band.max_x) for band in header_bands]
+                    logger.info(
+                        f"[HEURISTIC TSR] Overrode collapsed columns with "
+                        f"{len(col_bounds)} header-derived partition bands."
                     )
-                    first_r = region_rows[0]
-                    header_hits = sum(1 for b in first_r.blocks if header_label_pat.search(b.text))
-                    if header_hits >= 3:
-                        header_row = first_r
-                
-                if header_row:
-                    header_blocks = sorted(header_row.blocks, key=lambda b: b.normalized_geometry.min_x if b.normalized_geometry else 0)
-                    anchor_spans = []
-                    for b in header_blocks:
-                        geom = b.normalized_geometry
-                        if geom:
-                            anchor_spans.append((geom.min_x, geom.max_x))
-                    
-                    anchor_spans.sort(key=lambda s: s[0])
-                    if len(anchor_spans) >= 8:
-                        derived_bounds = []
-                        for i in range(len(anchor_spans)):
-                            # Left limit
-                            if i == 0:
-                                b_left = 0.0
-                            else:
-                                b_left = (anchor_spans[i-1][1] + anchor_spans[i][0]) / 2.0
-                            
-                            # Right limit
-                            if i == len(anchor_spans) - 1:
-                                b_right = float('inf')
-                            else:
-                                b_right = (anchor_spans[i][1] + anchor_spans[i+1][0]) / 2.0
-                            
-                            derived_bounds.append((b_left, b_right))
-                        
-                        col_bounds = derived_bounds
-                        logger.info(f"[HEURISTIC TSR] Overrode collapsed columns with {len(col_bounds)} header partition bands.")
 
             table_id = f"heuristic_region_{region_idx}"
             column_projection_debug[table_id] = {
