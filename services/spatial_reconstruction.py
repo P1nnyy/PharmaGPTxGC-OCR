@@ -1,3 +1,7 @@
+# NOTE: This module is part of the legacy extraction path.
+# It should remain available as fallback during Azure Document Intelligence migration.
+# Do not delete until Azure shadow comparison proves replacement quality.
+
 from typing import List, Dict, Any
 from core.logger import logger
 from core.config import settings
@@ -365,7 +369,7 @@ def filter_graph_rows(raw_graph_rows: list, tsr_metadata: dict) -> list:
     return graph_rows
 
 
-def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False) -> Dict[str, Any]:
+def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, reconstruct_mode: str = "ppstructure", image: Any = None, benchmark_mode: bool = False, allow_salvage: bool = False) -> Dict[str, Any]:
     """
     Entry point for document-layout reasoning engine.
     Orchestrates OCR geometry preservation, TSR grid detection, and Cell Mapping.
@@ -806,6 +810,9 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
             tr, _ = merge_multiline_table_rows(tr, ocr_blocks)
             tr = update_row_stability_scores(tr, ocr_blocks)
             
+        # Classify row roles first to ensure column semantics classification can identify item rows
+        role_metrics = classify_row_roles(tr)
+
         # 1. Row Count & 2. Column stability (average row stability)
         avg_row_stability = sum(getattr(r, "stability", 1.0) for r in tr.rows) / row_count
         
@@ -879,7 +886,6 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         row_math_failure_rate = (row_math_fail_count / total_row_math) if total_row_math > 0 else 0.0
 
         # Row Role Metrics
-        role_metrics = classify_row_roles(tr)
         item_rows = role_metrics.get("item_rows_count", 0)
         non_item_rows = (
             role_metrics.get("footer_rows_count", 0) +
@@ -1066,6 +1072,7 @@ def reconstruct_layout(blocks: List[Dict[str, Any]], debug: bool = False, recons
         processed_width=processed_width,
         processed_height=processed_height,
         ocr_block_count=len(ocr_blocks),
+        allow_salvage=allow_salvage,
     )
     tsr_metadata["table_sanity"] = table_sanity_selection
     tsr_metadata["selected_table_available"] = table_sanity_selection["selected_table_available"]

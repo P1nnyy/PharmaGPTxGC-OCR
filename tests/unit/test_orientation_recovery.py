@@ -291,3 +291,265 @@ def test_run_orientation_recovery_retains_failure_when_all_fail(mock_reconstruct
     assert recovered_metadata["orientation_recovery_attempted"] is True
     assert recovered_metadata["whether_recovery_improved_the_result"] is False
     assert recovered_metadata["selected_table_available"] is False
+
+
+def test_should_attempt_orientation_recovery_sets_skip_metadata():
+    metadata = {
+        "selected_table_available": True,
+        "fast_fail_reason": None,
+        "item_rows_clean": [{"name": "medicine"}],
+        "orientation_ambiguous": False,
+        "metrics": {
+            "selected_table_available": True,
+            "table_sanity": {
+                "per_candidate": [
+                    {
+                        "table_id": "table_1",
+                        "valid": True,
+                        "table_sanity_score": 85.0,
+                        "rejection_reasons": [],
+                        "item_rows": 5,
+                        "all_unknown_columns": False,
+                    }
+                ]
+            },
+            "selected_main_table_id": "table_1",
+        },
+        "quality_gate": {
+            "reasons": []
+        }
+    }
+    with patch("services.orientation_recovery.validate_coordinate_space") as mock_val:
+        mock_val.return_value = {"has_violation": False}
+        assert should_attempt_orientation_recovery(metadata) is False
+        assert metadata["orientation_recovery_attempted"] is False
+        assert metadata["orientation_recovery_skip_reason"] == "primary_table_usable"
+        assert metadata["metrics"]["table_sanity"]["selected_reason"] == "primary_table_preserved"
+
+
+@patch("services.orientation_recovery.ocr_engine.process_image")
+@patch("services.orientation_recovery.spatial_reconstruction.reconstruct_layout")
+def test_run_orientation_recovery_selects_salvageable_abka(mock_reconstruct, mock_process):
+    # Setup behavior where:
+    # angle 0 (primary) has item_rows=0 and hard failures.
+    original_ocr = {"text": "failed", "blocks": [], "metadata": {"rotation_angle": 0}}
+    original_metadata = {
+        "selected_table_available": False,
+        "fast_fail_reason": "no_valid_table_candidate",
+        "processed_image": {"rotation_angle": 0},
+        "metrics": {
+            "table_sanity": {
+                "per_candidate": [
+                    {
+                        "table_id": "table_0",
+                        "valid": False,
+                        "table_sanity_score": -178.0,
+                        "rejection_reasons": ["zero_item_rows_all_unknown_columns", "coordinate_space_violation"],
+                        "item_rows": 0,
+                        "all_unknown_columns": True,
+                    }
+                ]
+            }
+        }
+    }
+    
+    mock_process.return_value = {"text": "dummy", "blocks": [{"text": "xyz"}], "metadata": {"processed_image": {}}}
+    
+    # We probe angles: 90, 180, 270. Let's make 270 salvageable.
+    call_idx = 0
+    def mock_reconstruct_side_effect(blocks, **kwargs):
+        nonlocal call_idx
+        call_idx += 1
+        if call_idx in (3, 4):
+            return {
+                "selected_table_available": True,
+                "selected_table_id": "table_270",
+                "metrics": {
+                    "table_sanity": {
+                        "per_candidate": [
+                            {
+                                "table_id": "table_270",
+                                "valid": True,
+                                "table_sanity_score": 63.0,
+                                "row_count": 10,
+                                "column_count": 7,
+                                "item_rows": 9,
+                                "pharma_header_hits": 5,
+                                "all_unknown_columns": False,
+                                "cell_bbox_out_of_bounds_count": 1,
+                                "rejection_reasons": [],
+                                "geometry_repaired": True,
+                                "salvageable": True,
+                                "repairable_rejections": ["cell_bbox_out_of_bounds"],
+                            }
+                        ]
+                    },
+                    "final_column_semantics": {
+                        "table_270": {
+                            "col_1": "qty",
+                            "col_2": "rate",
+                        }
+                    }
+                }
+            }
+        else:
+            return {
+                "selected_table_available": False,
+                "metrics": {
+                    "table_sanity": {
+                        "per_candidate": [
+                            {
+                                "table_id": "table_alt",
+                                "valid": False,
+                                "table_sanity_score": -140.0,
+                                "rejection_reasons": ["zero_item_rows"],
+                                "item_rows": 0,
+                            }
+                        ]
+                    }
+                }
+            }
+            
+    mock_reconstruct.side_effect = mock_reconstruct_side_effect
+    
+    img = Image.new("RGB", (100, 100))
+    recovered_ocr, recovered_metadata = run_orientation_recovery(
+        original_image=img,
+        normal_payload={"ocr_result": original_ocr, "metadata": original_metadata},
+        reconstruct_mode="table_transformer",
+        benchmark_mode=False,
+    )
+    
+    assert recovered_metadata["chosen_angle"] == 270
+    assert recovered_metadata["chosen_reason"] == "selected_salvageable_orientation"
+    assert recovered_metadata["geometry_repaired"] is True
+    assert recovered_metadata["repairable_rejections"] == ["cell_bbox_out_of_bounds"]
+    assert recovered_metadata["per_angle_salvageable"]["270"] is True
+
+
+@patch("services.orientation_recovery.ocr_engine.process_image")
+@patch("services.orientation_recovery.spatial_reconstruction.reconstruct_layout")
+def test_run_orientation_recovery_rejects_salvageable_with_hard_failures(mock_reconstruct, mock_process):
+    original_ocr = {"text": "failed", "blocks": [], "metadata": {"rotation_angle": 0}}
+    original_metadata = {
+        "selected_table_available": False,
+        "fast_fail_reason": "no_valid_table_candidate",
+        "processed_image": {"rotation_angle": 0},
+        "metrics": {
+            "table_sanity": {
+                "per_candidate": [
+                    {
+                        "table_id": "table_0",
+                        "valid": False,
+                        "table_sanity_score": -178.0,
+                        "rejection_reasons": ["zero_item_rows"],
+                        "item_rows": 0,
+                    }
+                ]
+            }
+        }
+    }
+    
+    mock_process.return_value = {"text": "dummy", "blocks": [{"text": "xyz"}], "metadata": {"processed_image": {}}}
+    
+    def mock_reconstruct_side_effect(blocks, **kwargs):
+        return {
+            "selected_table_available": False,
+            "metrics": {
+                "table_sanity": {
+                    "per_candidate": [
+                        {
+                            "table_id": "table_alt",
+                            "valid": False,
+                            "table_sanity_score": 63.0,
+                            "row_count": 10,
+                            "column_count": 7,
+                            "item_rows": 9,
+                            "pharma_header_hits": 5,
+                            "all_unknown_columns": False,
+                            "cell_bbox_out_of_bounds_count": 5,
+                            "rejection_reasons": ["coordinate_space_violation"],
+                            "geometry_repaired": False,
+                            "salvageable": False,
+                        }
+                    ]
+                }
+            }
+        }
+            
+    mock_reconstruct.side_effect = mock_reconstruct_side_effect
+    
+    img = Image.new("RGB", (100, 100))
+    recovered_ocr, recovered_metadata = run_orientation_recovery(
+        original_image=img,
+        normal_payload={"ocr_result": original_ocr, "metadata": original_metadata},
+        reconstruct_mode="table_transformer",
+        benchmark_mode=False,
+    )
+    
+    assert recovered_metadata["chosen_angle"] == 0
+    assert recovered_metadata["geometry_repaired"] is False
+
+
+@patch("services.orientation_recovery.ocr_engine.process_image")
+@patch("services.orientation_recovery.spatial_reconstruction.reconstruct_layout")
+def test_run_orientation_recovery_rejects_alternate_with_zero_item_rows(mock_reconstruct, mock_process):
+    original_ocr = {"text": "failed", "blocks": [], "metadata": {"rotation_angle": 0}}
+    original_metadata = {
+        "selected_table_available": False,
+        "fast_fail_reason": "no_valid_table_candidate",
+        "processed_image": {"rotation_angle": 0},
+        "metrics": {
+            "table_sanity": {
+                "per_candidate": [
+                    {
+                        "table_id": "table_0",
+                        "valid": False,
+                        "table_sanity_score": -178.0,
+                        "rejection_reasons": ["zero_item_rows"],
+                        "item_rows": 0,
+                    }
+                ]
+            }
+        }
+    }
+    
+    mock_process.return_value = {"text": "dummy", "blocks": [{"text": "xyz"}], "metadata": {"processed_image": {}}}
+    
+    def mock_reconstruct_side_effect(blocks, **kwargs):
+        return {
+            "selected_table_available": False,
+            "metrics": {
+                "table_sanity": {
+                    "per_candidate": [
+                        {
+                            "table_id": "table_alt",
+                            "valid": False,
+                            "table_sanity_score": 63.0,
+                            "row_count": 10,
+                            "column_count": 7,
+                            "item_rows": 0,
+                            "pharma_header_hits": 0,
+                            "all_unknown_columns": True,
+                            "rejection_reasons": ["zero_item_rows_all_unknown_columns"],
+                            "geometry_repaired": False,
+                            "salvageable": False,
+                        }
+                    ]
+                }
+            }
+        }
+            
+    mock_reconstruct.side_effect = mock_reconstruct_side_effect
+    
+    img = Image.new("RGB", (100, 100))
+    recovered_ocr, recovered_metadata = run_orientation_recovery(
+        original_image=img,
+        normal_payload={"ocr_result": original_ocr, "metadata": original_metadata},
+        reconstruct_mode="table_transformer",
+        benchmark_mode=False,
+    )
+    
+    assert recovered_metadata["chosen_angle"] == 0
+
+

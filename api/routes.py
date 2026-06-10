@@ -184,214 +184,39 @@ async def upload_invoice(
         if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(status_code=413, detail=f"File too large. Maximum upload size is {settings.MAX_UPLOAD_SIZE_BYTES} bytes.")
             
-        # pre-validate the image using the lightweight ImageValidator
-        from services.validators.image_validator import ImageValidator
-        val_report = ImageValidator.validate_image(file_bytes)
-        if not val_report["is_valid"]:
-            logger.warning(f"[IMAGE VALIDATION FAILURE] File: {file.filename}, error: {val_report.get('error_message')}")
-            raise HTTPException(
-                status_code=400,
-                detail=val_report.get("error_message", "Uploaded file is not a valid invoice image.")
-            )
+        # Write the uploaded file bytes to a temporary location inside the workspace
+        import uuid
+        temp_dir = Path("datasets/debug")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file_path = temp_dir / f"temp_upload_{uuid.uuid4().hex}.png"
+        
+        with open(temp_file_path, "wb") as f:
+            f.write(file_bytes)
             
-        # Compute MD5 hash on bytes for exact file equivalence check
-        invoice_id = cache_service.compute_md5(file_bytes)
-        processed_image_path = str(Path("datasets/debug") / f"{invoice_id}_ocr_corrected.png")
-        
-        logger.info(f"Received file: {file.filename}, computed invoice_id: {invoice_id}")
-        
-        # Skip checking the cache if bypass_cache is explicitly requested (forces fresh OCR invocation)
-        cached_result = None if bypass_cache else cache_service.get_cached_result(invoice_id)
-        if cached_result:
-            logger.info("OCR cache hit: reusing OCR blocks only")
-            blocks = cached_result.get("blocks", [])
-            cached_metadata = cached_result.get("metadata") if isinstance(cached_result.get("metadata"), dict) else {}
-            metadata = {
-                **cached_metadata,
-                "blocks": blocks,
-                "image_validation": val_report
-            }
-            if reconstruct or extract:
-                logger.info("Cached reconstruction response disabled")
-                logger.info("Running fresh reconstruction with current code")
-                image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-                reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
-                logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
-                metadata.update(reconstruction_data)
-                metadata = _apply_no_valid_table_response_defaults(
-                    metadata,
-                    invoice_id=invoice_id,
-                    filename=file.filename,
-                )
-
-            # Check triggers for orientation recovery
-            from services.orientation_recovery import should_attempt_orientation_recovery, run_orientation_recovery
-            if should_attempt_orientation_recovery(metadata):
-                logger.info("Triggering orientation recovery flow (cache hit)...")
-                image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-                ocr_result = {
-                    "text": cached_result.get("text", ""),
-                    "blocks": blocks,
-                    "metadata": cached_metadata
-                }
-                recovered_ocr, recovered_metadata = run_orientation_recovery(
-                    original_image=image,
-                    normal_payload={"ocr_result": ocr_result, "metadata": metadata},
-                    reconstruct_mode=reconstruct_mode,
-                    benchmark_mode=benchmark_mode,
-                    processed_image_path=processed_image_path,
-                )
-                ocr_result = recovered_ocr
-                metadata = recovered_metadata
-                blocks = ocr_result.get("blocks", [])
-                cached_metadata = ocr_result.get("metadata") if isinstance(ocr_result.get("metadata"), dict) else {}
-                # Cache the recovered OCR result
-                cache_service.save_result(invoice_id, ocr_result)
-                
-                if not (reconstruct or extract):
-                    # Strip reconstruction keys from metadata to keep parity with non-reconstruct path
-                    reconstruct_keys = [
-                        "reconstructed_rows", "detected_table_rows", "structured_tables",
-                        "columns_extracted", "semantic_markdown", "fast_fail", "fast_fail_reason",
-                        "selected_table_available", "selected_table_id", "safe_for_erp",
-                        "status_effective", "item_rows_clean", "scheme_rows", "credit_note_rows",
-                        "invoice_totals", "llm_extraction", "quality_gate", "canonical_invoice"
-                    ]
-                    for key in reconstruct_keys:
-                        metadata.pop(key, None)
-                
-            if extract and _should_run_llm_extraction(metadata):
-                extractor = LLMExtractor()
-                extraction_json = extractor.extract(metadata["semantic_markdown"])
-                metadata["llm_extraction"] = extraction_json
-            elif extract and _is_no_valid_table_candidate(metadata):
-                metadata["llm_extraction"] = _safe_llm_extraction_defaults()
-            metadata = normalize_orientation_metadata(metadata)
-            metadata = _apply_no_valid_table_response_defaults(
-                metadata,
-                invoice_id=invoice_id,
+        try:
+            from extraction.router import get_extraction_engine
+            engine = get_extraction_engine()
+            response_payload = engine.extract(
+                str(temp_file_path),
+                reconstruct=reconstruct,
+                reconstruct_mode=reconstruct_mode,
+                extract=extract,
+                benchmark_mode=benchmark_mode,
+                bypass_cache=bypass_cache,
                 filename=file.filename,
             )
-                
-            response_payload = {
-                "invoice_id": invoice_id,
-                "cached": True,
-                "text": ocr_result.get("text", "") if 'ocr_result' in locals() else cached_result.get("text", ""),
-                "metadata": metadata,
-            }
-            diagnostics = write_upload_diagnostics(
-                diagnostics_run_id=invoice_id,
-                response_payload=response_payload,
-                ocr_blocks=blocks,
-                ocr_metadata=cached_metadata,
-            )
-            response_payload["metadata"]["diagnostics"] = diagnostics
-            response_payload["metadata"]["diagnostics_run_id"] = diagnostics["diagnostics_run_id"]
-            response_payload["metadata"]["artifacts"] = diagnostics["artifacts"]
-
             return OCRResponse(
-                invoice_id=invoice_id,
-                cached=True,
+                invoice_id=response_payload["invoice_id"],
+                cached=response_payload["cached"],
                 text=response_payload["text"],
                 metadata=response_payload["metadata"]
             )
-            
-        # Convert raw file bytes into PIL Image representation
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-        # Run primary deep learning model OCR extraction suite (Surya OCR / PaddleOCR)
-        ocr_result = ocr_engine.process_image(
-            image,
-            processed_image_path=processed_image_path,
-            include_processed_image_data_url=True,
-        )
-        
-        # Commit raw primitives to file cache
-        cache_service.save_result(invoice_id, ocr_result)
-        
-        blocks = ocr_result.get("blocks", [])
-        ocr_metadata = ocr_result.get("metadata") if isinstance(ocr_result.get("metadata"), dict) else {}
-        metadata = {
-            **ocr_metadata,
-            "blocks": blocks,
-            "image_validation": val_report
-        }
-        if reconstruct or extract:
-            logger.info("Cached reconstruction response disabled")
-            logger.info("Running fresh reconstruction with current code")
-            reconstruction_data = spatial_reconstruction.reconstruct_layout(blocks, debug=(not benchmark_mode), reconstruct_mode=reconstruct_mode, image=image, benchmark_mode=benchmark_mode)
-            logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
-            metadata.update(reconstruction_data)
-            metadata = _apply_no_valid_table_response_defaults(
-                metadata,
-                invoice_id=invoice_id,
-                filename=file.filename,
-            )
-
-        # Check triggers for orientation recovery
-        from services.orientation_recovery import should_attempt_orientation_recovery, run_orientation_recovery
-        if should_attempt_orientation_recovery(metadata):
-            logger.info("Triggering orientation recovery flow (cache miss)...")
-            recovered_ocr, recovered_metadata = run_orientation_recovery(
-                original_image=image,
-                normal_payload={"ocr_result": ocr_result, "metadata": metadata},
-                reconstruct_mode=reconstruct_mode,
-                benchmark_mode=benchmark_mode,
-                processed_image_path=processed_image_path,
-            )
-            ocr_result = recovered_ocr
-            metadata = recovered_metadata
-            blocks = ocr_result.get("blocks", [])
-            ocr_metadata = ocr_result.get("metadata") if isinstance(ocr_result.get("metadata"), dict) else {}
-            # Cache the recovered OCR result
-            cache_service.save_result(invoice_id, ocr_result)
-            
-            if not (reconstruct or extract):
-                # Strip reconstruction keys from metadata to keep parity with non-reconstruct path
-                reconstruct_keys = [
-                    "reconstructed_rows", "detected_table_rows", "structured_tables",
-                    "columns_extracted", "semantic_markdown", "fast_fail", "fast_fail_reason",
-                    "selected_table_available", "selected_table_id", "safe_for_erp",
-                    "status_effective", "item_rows_clean", "scheme_rows", "credit_note_rows",
-                    "invoice_totals", "llm_extraction", "quality_gate", "canonical_invoice"
-                ]
-                for key in reconstruct_keys:
-                    metadata.pop(key, None)
-            
-        if extract and _should_run_llm_extraction(metadata):
-            extractor = LLMExtractor()
-            extraction_json = extractor.extract(metadata["semantic_markdown"])
-            metadata["llm_extraction"] = extraction_json
-        elif extract and _is_no_valid_table_candidate(metadata):
-            metadata["llm_extraction"] = _safe_llm_extraction_defaults()
-        metadata = normalize_orientation_metadata(metadata)
-        metadata = _apply_no_valid_table_response_defaults(
-            metadata,
-            invoice_id=invoice_id,
-            filename=file.filename,
-        )
-        
-        response_payload = {
-            "invoice_id": invoice_id,
-            "cached": False,
-            "text": ocr_result.get("text", ""),
-            "metadata": metadata,
-        }
-        diagnostics = write_upload_diagnostics(
-            diagnostics_run_id=invoice_id,
-            response_payload=response_payload,
-            ocr_blocks=blocks,
-            ocr_metadata=ocr_metadata,
-        )
-        response_payload["metadata"]["diagnostics"] = diagnostics
-        response_payload["metadata"]["diagnostics_run_id"] = diagnostics["diagnostics_run_id"]
-        response_payload["metadata"]["artifacts"] = diagnostics["artifacts"]
-
-        return OCRResponse(
-            invoice_id=invoice_id,
-            cached=False,
-            text=response_payload["text"],
-            metadata=response_payload["metadata"]
-        )
+        finally:
+            if temp_file_path.exists():
+                try:
+                    temp_file_path.unlink()
+                except Exception as exc:
+                    logger.warning(f"Failed to delete temp file {temp_file_path}: {exc}")
         
     except Exception as e:
         if isinstance(e, HTTPException):

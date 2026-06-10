@@ -163,12 +163,15 @@ def normalize_orientation_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
         "original_angle",
         "chosen_angle",
         "chosen_reason",
+        "geometry_repaired",
+        "repairable_rejections",
         "per_angle_scores",
         "per_angle_selected_table_available",
         "per_angle_item_rows",
         "per_angle_column_count",
         "per_angle_header_hits",
         "per_angle_rejection_reasons",
+        "per_angle_salvageable",
         "whether_recovery_improved_the_result",
     ):
         if key in metadata:
@@ -201,12 +204,15 @@ def _build_orientation_recovery(metadata: Dict[str, Any]) -> Dict[str, Any]:
         "original_angle",
         "chosen_angle",
         "chosen_reason",
+        "geometry_repaired",
+        "repairable_rejections",
         "per_angle_scores",
         "per_angle_selected_table_available",
         "per_angle_item_rows",
         "per_angle_column_count",
         "per_angle_header_hits",
         "per_angle_rejection_reasons",
+        "per_angle_salvageable",
         "whether_recovery_improved_the_result",
     ):
         if key in metadata:

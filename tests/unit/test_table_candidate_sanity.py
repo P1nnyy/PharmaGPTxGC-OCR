@@ -133,3 +133,98 @@ def test_abka_like_valid_13_column_candidate_is_not_rejected():
     assert result["valid"] is True
     assert result["column_count"] == 13
     assert result["rejection_reasons"] == []
+
+
+def test_abka_regression_primary_preserved():
+    # Setup candidate that represents ABKA's 3x13 table with 2 item rows, 13 columns
+    # We want to verify that evaluate_table_candidate_sanity preserves selected_table_available=True
+    table = _table(table_id="abka_wide", rows=3, cols=13, bbox=(10, 10, 1400, 400), item_rows=2)
+    # Convert to dict so we can add arbitrary fields like selected_table_grid
+    table_dict = table.model_dump()
+    table_dict["selected_table_grid"] = [
+        ["Product", "HSN", "Batch", "Qty", "Rate", "Exp", "MRP", "GST", "Amount", "C1", "C2", "C3", "C4"],
+        ["CNDERO MET", "300490", "B1", "2", "100.00", "12/26", "110.00", "12", "200.00", "", "", "", ""],
+        ["GLIPTAGREAT-M 500", "300490", "B2", "1", "150.00", "12/26", "160.00", "12", "150.00", "", "", "", ""]
+    ]
+    
+    result = evaluate_table_candidate_sanity(
+        table_dict,
+        processed_width=1500,
+        processed_height=1000,
+        candidate_score=80.0,
+        candidate_metrics={"missing_req_cols": []}
+    )
+    
+    # Assert candidate is valid
+    assert result["valid"] is True
+    assert result["column_count"] == 13
+    assert result["row_count"] == 3
+    assert result["item_rows"] == 2
+    assert not result["rejection_reasons"]
+
+
+def test_deepak_no_regression_partial_semantics():
+    # Deepak has multiple rows but might have some missing column semantics.
+    # It must not be converted to no_valid_table_candidate because of missing semantics.
+    table = _table(
+        table_id="deepak_partial", 
+        rows=5, 
+        cols=6, 
+        bbox=(20, 20, 800, 600), 
+        item_rows=3,
+        required_present=["product", "quantity"],
+        required_missing=["rate", "amount"]
+    )
+    # Evaluate table sanity
+    result = evaluate_table_candidate_sanity(
+        table,
+        processed_width=1000,
+        processed_height=1000,
+        candidate_score=45.0,
+        candidate_metrics={"missing_req_cols": ["rate", "amount"]}
+    )
+    
+    # Must be valid despite some missing req columns (as long as it doesn't have all unknown cols & item_rows=0)
+    assert result["valid"] is True
+    assert result["item_rows"] == 3
+    assert "zero_item_rows_all_unknown_columns" not in result["rejection_reasons"]
+
+
+def test_mahajan_guardrail_truly_invalid():
+    # Mahajan candidate is genuinely invalid:
+    # out-of-bounds bbox, item_rows=0, catastrophic score, all unknown columns
+    table = _table(
+        table_id="mahajan_invalid",
+        rows=2,
+        cols=3,
+        bbox=(50, -500, 800, 1200), # out-of-bounds (negative y)
+        item_rows=0,
+        required_present=[],
+        required_missing=["product", "quantity", "rate", "amount"]
+    )
+    
+    # Also evaluate with catastrophic score and all unknown columns
+    result = evaluate_table_candidate_sanity(
+        table,
+        processed_width=1000,
+        processed_height=1000,
+        candidate_score=-60.0, # catastrophic score
+        candidate_metrics={
+            "missing_req_cols": ["product", "quantity", "rate", "amount"],
+            "item_row_ratio": 0.0,
+            "final_column_semantics": {
+                "mahajan_invalid": {
+                    "col_0": "unknown",
+                    "col_1": "unknown",
+                    "col_2": "unknown",
+                }
+            }
+        }
+    )
+    
+    assert result["valid"] is False
+    # Check that it gets rejected for correct reasons
+    rejection_reasons = result["rejection_reasons"]
+    assert "coordinate_space_violation" in rejection_reasons or "table_bbox_out_of_bounds" in rejection_reasons
+    assert "catastrophic_tsr_score" in rejection_reasons
+    assert "zero_item_rows_all_unknown_columns" in rejection_reasons

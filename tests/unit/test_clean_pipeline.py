@@ -20,16 +20,16 @@ def test_reconstruct_layout_runs_clean_pipeline_with_no_mutations():
         {"id": "b_h_amount", "text": "Amount", "polygon": [[400, 10], [460, 10], [460, 20], [400, 20]], "confidence": 0.95},
 
         # Row 1 (Medicine product A)
-        {"id": "b_r1_prod", "text": "PARACETAMOL 650", "polygon": [[10, 30], [100, 30], [100, 40], [10, 40]], "confidence": 0.95},
-        {"id": "b_r1_qty", "text": "2", "polygon": [[200, 30], [240, 30], [240, 40], [200, 40]], "confidence": 0.95},
-        {"id": "b_r1_rate", "text": "15.00", "polygon": [[300, 30], [350, 30], [350, 40], [300, 40]], "confidence": 0.95},
-        {"id": "b_r1_amount", "text": "30.00", "polygon": [[400, 30], [460, 30], [460, 40], [400, 40]], "confidence": 0.95},
+        {"id": "b_r1_prod", "text": "PARACETAMOL 650 MG", "polygon": [[10, 22], [100, 22], [100, 32], [10, 32]], "confidence": 0.95},
+        {"id": "b_r1_qty", "text": "2", "polygon": [[200, 22], [240, 22], [240, 32], [200, 32]], "confidence": 0.95},
+        {"id": "b_r1_rate", "text": "15.00", "polygon": [[300, 22], [350, 22], [350, 32], [300, 32]], "confidence": 0.95},
+        {"id": "b_r1_amount", "text": "30.00", "polygon": [[400, 22], [460, 22], [460, 32], [400, 32]], "confidence": 0.95},
 
         # Footer Subtotal and Grand Total
-        {"id": "b_f_sub", "text": "SUBTOTAL", "polygon": [[10, 60], [80, 60], [80, 70], [10, 70]], "confidence": 0.95},
-        {"id": "b_f_sub_val", "text": "30.00", "polygon": [[400, 60], [460, 60], [460, 70], [400, 70]], "confidence": 0.95},
-        {"id": "b_f_gt", "text": "GRAND TOTAL", "polygon": [[10, 80], [100, 80], [100, 90], [10, 90]], "confidence": 0.95},
-        {"id": "b_f_gt_val", "text": "30.00", "polygon": [[400, 80], [460, 80], [460, 90], [400, 90]], "confidence": 0.95},
+        {"id": "b_f_sub", "text": "SUBTOTAL", "polygon": [[10, 34], [80, 34], [80, 44], [10, 44]], "confidence": 0.95},
+        {"id": "b_f_sub_val", "text": "30.00", "polygon": [[400, 34], [460, 34], [460, 44], [400, 44]], "confidence": 0.95},
+        {"id": "b_f_gt", "text": "GRAND TOTAL", "polygon": [[10, 46], [100, 46], [100, 56], [10, 56]], "confidence": 0.95},
+        {"id": "b_f_gt_val", "text": "30.00", "polygon": [[400, 46], [460, 46], [460, 56], [400, 56]], "confidence": 0.95},
     ]
 
     # 3. Call reconstruct_layout

@@ -1,3 +1,7 @@
+# NOTE: This module is part of the legacy extraction path.
+# It should remain available as fallback during Azure Document Intelligence migration.
+# Do not delete until Azure shadow comparison proves replacement quality.
+
 import re
 import math
 from typing import Dict, Any, Tuple, List
@@ -7,84 +11,168 @@ from services.validators.rotation_detector import rotate_image_clockwise
 from services import ocr_engine, spatial_reconstruction
 from services.diagnostics_writer import validate_coordinate_space
 
+def is_primary_table_usable(metadata: Dict[str, Any]) -> bool:
+    """
+    Checks if the primary reconstruction has a usable selected table.
+    Ensures that we do not trigger orientation recovery if we already have a high-quality table.
+    """
+    metrics = metadata.get("metrics") if isinstance(metadata.get("metrics"), dict) else {}
+    
+    # 1. Check if selected table is available in either top-level or metrics section
+    selected_available = metadata.get("selected_table_available")
+    if selected_available is None:
+        selected_available = metrics.get("selected_table_available")
+    if not selected_available:
+        return False
+        
+    # 2. Check selected table ID existence
+    selected_id = metadata.get("selected_table_id") or metrics.get("selected_main_table_id")
+    if not selected_id:
+        return False
+        
+    # 3. Check for non-empty selected grid or reconstructed rows
+    reconstructed_rows = metadata.get("reconstructed_rows") or metrics.get("reconstructed_rows")
+    selected_grid = metadata.get("selected_table_grid") or metrics.get("selected_table_grid")
+    
+    # Check reconstructed_rows length if it's a list
+    if isinstance(reconstructed_rows, list) and len(reconstructed_rows) == 0:
+        if not selected_grid:
+            return False
+            
+    # Check selected_grid empty checks
+    if selected_grid is not None:
+        if isinstance(selected_grid, list) and len(selected_grid) == 0:
+            return False
+        if isinstance(selected_grid, str) and not selected_grid.strip():
+            return False
+
+    # 4. Check for coordinate space violation or bounds violations
+    coord_report = validate_coordinate_space(metadata)
+    if coord_report.get("has_violation"):
+        return False
+
+    # 5. Check candidate-specific sanity metrics from table_sanity
+    table_sanity = metrics.get("table_sanity") or metadata.get("table_sanity") or {}
+    per_candidate = table_sanity.get("per_candidate") or []
+    for cand in per_candidate:
+        if str(cand.get("table_id")) == str(selected_id):
+            rejection_reasons = cand.get("rejection_reasons") or []
+            
+            # If the selected candidate is explicitly marked invalid for geometry or catastrophic score
+            if any(r in rejection_reasons for r in ("coordinate_space_violation", "table_bbox_out_of_bounds", "cell_bbox_out_of_bounds", "catastrophic_tsr_score")):
+                return False
+                
+            # If the selected candidate has item_rows == 0 and all columns unknown
+            item_rows = cand.get("item_rows")
+            all_unknown = cand.get("all_unknown_columns")
+            if item_rows == 0 and all_unknown is True:
+                return False
+                
+            # Check for catastrophic sanity score
+            ts_score = cand.get("table_sanity_score")
+            if ts_score is not None and ts_score <= -50.0:
+                return False
+
+    return True
+
 def should_attempt_orientation_recovery(metadata: Dict[str, Any], quality_gate: Dict[str, Any] | None = None) -> bool:
     """
     Check if the metadata or quality gate metrics indicate that orientation recovery should be triggered.
     Prevents infinite recursion by checking orientation_recovery_attempted.
+    Uses is_primary_table_usable to keep usable primary reconstructions.
     """
+    # Prevent infinite loop recursion
     if metadata.get("orientation_recovery_attempted") or metadata.get("processed_image", {}).get("orientation_recovery_attempted"):
         return False
         
     metrics = metadata.get("metrics") if isinstance(metadata.get("metrics"), dict) else {}
     qg = quality_gate or metadata.get("quality_gate") or {}
     
-    # 1. metadata.orientation_ambiguous == true
-    if metadata.get("orientation_ambiguous") is True:
-        logger.info("[ORIENTATION RECOVERY TRIGGER] orientation_ambiguous is True")
-        return True
+    # Check if primary table is already usable. If so, skip recovery!
+    if is_primary_table_usable(metadata):
+        logger.info("[ORIENTATION RECOVERY SKIP] Skipping recovery because primary table is usable.")
+        metadata["orientation_recovery_attempted"] = False
+        metadata["orientation_recovery_skip_reason"] = "primary_table_usable"
         
-    # 2. selected_table_available == false
-    if metadata.get("selected_table_available") is False or metrics.get("selected_table_available") is False:
-        logger.info("[ORIENTATION RECOVERY TRIGGER] selected_table_available is False")
-        return True
+        # Ensure selected_reason is primary_table_preserved in sanity dicts
+        for target in (metadata, metrics):
+            table_sanity = target.get("table_sanity")
+            if isinstance(table_sanity, dict):
+                table_sanity["selected_reason"] = "primary_table_preserved"
+        return False
+
+    # We do NOT trigger from orientation_ambiguous == True alone.
+    # We only trigger when there is a hard failure signal.
+    has_hard_failure = False
+    
+    # 1. selected_candidate_id missing or selected_table_available is False
+    selected_id = metadata.get("selected_table_id") or metrics.get("selected_main_table_id")
+    selected_available = metadata.get("selected_table_available")
+    if selected_available is None:
+        selected_available = metrics.get("selected_table_available")
         
-    # 3. fast_fail_reason == no_valid_table_candidate
-    if metadata.get("fast_fail_reason") == "no_valid_table_candidate" or metrics.get("no_valid_table_candidate") is True:
-        logger.info("[ORIENTATION RECOVERY TRIGGER] fast_fail_reason is no_valid_table_candidate")
-        return True
+    if not selected_id or selected_available is False:
+        logger.info("[ORIENTATION RECOVERY TRIGGER] selected_table_available is False or selected_id is missing")
+        has_hard_failure = True
         
-    # 4. quality gate has no_valid_table_candidate
+    # 2. fast_fail_reason == no_valid_table_candidate or quality gate lists it
     qg_reasons = qg.get("reasons") or []
-    if "no_valid_table_candidate" in qg_reasons:
-        logger.info("[ORIENTATION RECOVERY TRIGGER] quality gate reasons contains no_valid_table_candidate")
-        return True
-        
-    # 5. selected/candidate table has coordinate_space_violation or table/cell bbox out of bounds
+    if metadata.get("fast_fail_reason") == "no_valid_table_candidate" or metrics.get("no_valid_table_candidate") is True or "no_valid_table_candidate" in qg_reasons:
+        logger.info("[ORIENTATION RECOVERY TRIGGER] no_valid_table_candidate detected")
+        has_hard_failure = True
+
+    # 3. Selected table grid or reconstructed rows are empty
+    reconstructed_rows = metadata.get("reconstructed_rows") or metrics.get("reconstructed_rows")
+    selected_grid = metadata.get("selected_table_grid") or metrics.get("selected_table_grid")
+    grid_is_empty = False
+    if isinstance(reconstructed_rows, list) and len(reconstructed_rows) == 0:
+        if not selected_grid:
+            grid_is_empty = True
+    if selected_grid is not None:
+        if isinstance(selected_grid, list) and len(selected_grid) == 0:
+            grid_is_empty = True
+        elif isinstance(selected_grid, str) and not selected_grid.strip():
+            grid_is_empty = True
+    if grid_is_empty:
+        logger.info("[ORIENTATION RECOVERY TRIGGER] selected table grid/reconstructed rows is empty")
+        has_hard_failure = True
+
+    # 4. Coordinate space violation detected
     coord_report = validate_coordinate_space(metadata)
     if coord_report.get("has_violation"):
-        logger.info("[ORIENTATION RECOVERY TRIGGER] coordinate space violation detected in validation")
-        return True
-        
+        logger.info("[ORIENTATION RECOVERY TRIGGER] coordinate space violation detected")
+        has_hard_failure = True
+
+    # 5. Geometry out-of-bounds reasons or catastrophic score in candidates
     table_sanity = metrics.get("table_sanity") or metadata.get("table_sanity") or {}
     per_candidate = table_sanity.get("per_candidate") or []
     for cand in per_candidate:
         reasons = cand.get("rejection_reasons") or []
         if any(r in reasons for r in ("coordinate_space_violation", "table_bbox_out_of_bounds", "cell_bbox_out_of_bounds")):
-            logger.info("[ORIENTATION RECOVERY TRIGGER] candidate table %s has geometry violation: %s", cand.get("table_id"), reasons)
-            return True
+            logger.info("[ORIENTATION RECOVERY TRIGGER] candidate table %s has geometry violation", cand.get("table_id"))
+            has_hard_failure = True
             
-    # 6. item_rows == 0
-    item_rows_clean = metadata.get("item_rows_clean")
-    if isinstance(item_rows_clean, list) and len(item_rows_clean) == 0:
-        logger.info("[ORIENTATION RECOVERY TRIGGER] item_rows_clean is empty")
-        return True
-        
-    selected_id = metadata.get("selected_table_id") or metrics.get("selected_main_table_id")
-    for cand in per_candidate:
-        if str(cand.get("table_id")) == str(selected_id):
-            if cand.get("item_rows") == 0:
-                logger.info("[ORIENTATION RECOVERY TRIGGER] selected table candidate %s has 0 item rows", selected_id)
-                return True
-            if cand.get("all_unknown_columns") is True:
-                logger.info("[ORIENTATION RECOVERY TRIGGER] selected table candidate %s has all unknown columns", selected_id)
-                return True
-                
-    # 7. catastrophic TSR score
-    for cand in per_candidate:
-        reasons = cand.get("rejection_reasons") or []
         if "catastrophic_tsr_score" in reasons:
             logger.info("[ORIENTATION RECOVERY TRIGGER] candidate table %s has catastrophic_tsr_score", cand.get("table_id"))
-            return True
+            has_hard_failure = True
+            
         c_score = cand.get("candidate_score")
         if c_score is not None and c_score <= -50.0:
             logger.info("[ORIENTATION RECOVERY TRIGGER] candidate table %s has candidate_score <= -50.0", cand.get("table_id"))
-            return True
+            has_hard_failure = True
+            
         ts_score = cand.get("table_sanity_score")
         if ts_score is not None and ts_score <= -50.0:
             logger.info("[ORIENTATION RECOVERY TRIGGER] candidate table %s has table_sanity_score <= -50.0", cand.get("table_id"))
-            return True
+            has_hard_failure = True
 
-    return False
+        # If selected candidate has item_rows == 0 and all unknown columns
+        if str(cand.get("table_id")) == str(selected_id):
+            if cand.get("item_rows") == 0 and cand.get("all_unknown_columns") is True:
+                logger.info("[ORIENTATION RECOVERY TRIGGER] selected candidate has item_rows=0 and all_unknown_columns")
+                has_hard_failure = True
+
+    return has_hard_failure
 
 def score_orientation_candidate(angle: int, metadata: Dict[str, Any], ocr_result: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -117,6 +205,9 @@ def score_orientation_candidate(angle: int, metadata: Dict[str, Any], ocr_result
     all_unknown_columns = True
     cell_bbox_out_of_bounds_count = 0
     rejection_reasons = []
+    geometry_repaired = False
+    salvageable = False
+    repairable_rejections = []
     
     if selected_candidate:
         valid = bool(selected_candidate.get("valid", False))
@@ -127,6 +218,10 @@ def score_orientation_candidate(angle: int, metadata: Dict[str, Any], ocr_result
         all_unknown_columns = bool(selected_candidate.get("all_unknown_columns", True))
         cell_bbox_out_of_bounds_count = int(selected_candidate.get("cell_bbox_out_of_bounds_count", 0))
         rejection_reasons = list(selected_candidate.get("rejection_reasons") or [])
+        
+        geometry_repaired = bool(selected_candidate.get("geometry_repaired", False))
+        salvageable = bool(selected_candidate.get("salvageable", False))
+        repairable_rejections = list(selected_candidate.get("repairable_rejections") or [])
         
         # Add baseline TSR sanity score
         score += float(selected_candidate.get("table_sanity_score", 0.0))
@@ -236,6 +331,9 @@ def score_orientation_candidate(angle: int, metadata: Dict[str, Any], ocr_result
         "pharma_header_hits": pharma_header_hits,
         "all_unknown_columns": all_unknown_columns,
         "rejection_reasons": rejection_reasons,
+        "geometry_repaired": geometry_repaired,
+        "salvageable": salvageable,
+        "repairable_rejections": repairable_rejections,
     }
 
 def run_orientation_recovery(
@@ -322,7 +420,10 @@ def run_orientation_recovery(
             valid_alternates.sort(key=lambda x: x["score_details"]["score"], reverse=True)
             chosen_candidate = valid_alternates[0]
             improvement_achieved = True
-            chosen_reason = f"alternate_angle_{chosen_candidate['angle']}_is_valid_and_beats_invalid_primary"
+            if chosen_candidate["score_details"]["geometry_repaired"]:
+                chosen_reason = "selected_salvageable_orientation"
+            else:
+                chosen_reason = f"alternate_angle_{chosen_candidate['angle']}_is_valid_and_beats_invalid_primary"
         else:
             chosen_reason = "retained_original_angle_due_to_no_valid_alternative"
     else:
@@ -332,7 +433,10 @@ def run_orientation_recovery(
             if best_alternate["score_details"]["score"] > primary_score_details["score"] + 15.0:
                 chosen_candidate = best_alternate
                 improvement_achieved = True
-                chosen_reason = f"alternate_angle_{chosen_candidate['angle']}_significantly_beats_valid_primary"
+                if chosen_candidate["score_details"]["geometry_repaired"]:
+                    chosen_reason = "selected_salvageable_orientation"
+                else:
+                    chosen_reason = f"alternate_angle_{chosen_candidate['angle']}_significantly_beats_valid_primary"
             else:
                 chosen_reason = "retained_original_angle_due_to_insufficient_alternate_margin"
         else:
@@ -383,25 +487,52 @@ def run_orientation_recovery(
             final_metadata["processed_image"]["rotation_method"] = "orientation_recovery"
             
         final_ocr_result = final_ocr
+        
+        # Distinguish selected reason
+        metrics = final_metadata.get("metrics") or {}
+        table_sanity = metrics.get("table_sanity") or final_metadata.get("table_sanity") or {}
+        if isinstance(table_sanity, dict):
+            table_sanity["selected_reason"] = "recovered_orientation_selected"
+            if "table_sanity" in final_metadata:
+                final_metadata["table_sanity"] = table_sanity
+            if "table_sanity" in metrics:
+                metrics["table_sanity"] = table_sanity
     else:
         chosen_angle = primary_angle
         logger.info("[ORIENTATION RECOVERY] No better orientation found. Retaining original angle: %s", primary_angle)
         final_metadata = normal_payload["metadata"]
         final_ocr_result = normal_payload["ocr_result"]
         
+        # Distinguish selected reason when primary retained
+        metrics = final_metadata.get("metrics") or {}
+        table_sanity = metrics.get("table_sanity") or final_metadata.get("table_sanity") or {}
+        if isinstance(table_sanity, dict):
+            if final_metadata.get("selected_table_available", metrics.get("selected_table_available")):
+                table_sanity["selected_reason"] = "primary_table_preserved"
+            else:
+                table_sanity["selected_reason"] = "no_valid_candidate"
+            if "table_sanity" in final_metadata:
+                final_metadata["table_sanity"] = table_sanity
+            if "table_sanity" in metrics:
+                metrics["table_sanity"] = table_sanity
+        
     # Append orientation recovery diagnostics
+    chosen_score_details = chosen_candidate["score_details"] if chosen_candidate else primary_score_details
     recovery_diagnostics = {
         "orientation_recovery_attempted": True,
         "orientation_recovery_reason": "primary_failed_sanity_or_ambiguous",
         "original_angle": primary_angle,
         "chosen_angle": chosen_angle,
         "chosen_reason": chosen_reason,
+        "geometry_repaired": bool(chosen_score_details.get("geometry_repaired", False)),
+        "repairable_rejections": list(chosen_score_details.get("repairable_rejections") or []),
         "per_angle_scores": {str(c["angle"]): c["score_details"]["score"] for c in all_candidates},
         "per_angle_selected_table_available": {str(c["angle"]): c["score_details"]["selected_table_available"] for c in all_candidates},
         "per_angle_item_rows": {str(c["angle"]): c["score_details"]["item_rows"] for c in all_candidates},
         "per_angle_column_count": {str(c["angle"]): c["score_details"]["column_count"] for c in all_candidates},
         "per_angle_header_hits": {str(c["angle"]): c["score_details"]["pharma_header_hits"] for c in all_candidates},
         "per_angle_rejection_reasons": {str(c["angle"]): c["score_details"]["rejection_reasons"] for c in all_candidates},
+        "per_angle_salvageable": {str(c["angle"]): c["score_details"]["salvageable"] for c in all_candidates},
         "whether_recovery_improved_the_result": improvement_achieved,
     }
     
