@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
+from dotenv import load_dotenv
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
 
@@ -19,6 +20,9 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
     """
     
     def __init__(self):
+        # Automatically load environment variables from local .env file
+        load_dotenv(".env")
+        
         # 1. Read Azure configuration settings from the environment
         self.endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT")
         self.api_key = os.environ.get("DOCUMENTINTELLIGENCE_API_KEY")
@@ -92,3 +96,4 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
         # 7. Normalize raw response payload to the CanonicalInvoice schema
         canonical_invoice = normalize_azure_invoice(result_dict)
         return canonical_invoice
+

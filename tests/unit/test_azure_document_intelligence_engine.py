@@ -13,7 +13,8 @@ def clean_env():
     with patch.dict(os.environ, {}, clear=True):
         yield
 
-def test_missing_endpoint_raises_value_error(clean_env):
+@patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
+def test_missing_endpoint_raises_value_error(mock_load_dotenv, clean_env):
     """Verify ValueError is raised if endpoint env var is missing."""
     with patch.dict(os.environ, {"DOCUMENTINTELLIGENCE_API_KEY": "some-key"}):
         engine = AzureDocumentIntelligenceEngine()
@@ -21,7 +22,8 @@ def test_missing_endpoint_raises_value_error(clean_env):
             engine.extract("fake/path.jpg")
         assert "DOCUMENTINTELLIGENCE_ENDPOINT is not configured" in str(excinfo.value)
 
-def test_missing_api_key_raises_value_error(clean_env):
+@patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
+def test_missing_api_key_raises_value_error(mock_load_dotenv, clean_env):
     """Verify ValueError is raised if API key env var is missing."""
     with patch.dict(os.environ, {"DOCUMENTINTELLIGENCE_ENDPOINT": "http://fake-endpoint.com"}):
         engine = AzureDocumentIntelligenceEngine()
@@ -29,7 +31,8 @@ def test_missing_api_key_raises_value_error(clean_env):
             engine.extract("fake/path.jpg")
         assert "DOCUMENTINTELLIGENCE_API_KEY is not configured" in str(excinfo.value)
 
-def test_missing_file_raises_file_not_found(clean_env):
+@patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
+def test_missing_file_raises_file_not_found(mock_load_dotenv, clean_env):
     """Verify FileNotFoundError is raised if the target document does not exist."""
     env_vars = {
         "DOCUMENTINTELLIGENCE_ENDPOINT": "http://fake-endpoint.com",
@@ -41,12 +44,13 @@ def test_missing_file_raises_file_not_found(clean_env):
             engine.extract("fake/non_existent_file.jpg")
         assert "Document file not found at" in str(excinfo.value)
 
+@patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
 @patch("extraction.engines.azure_document_intelligence_engine.DocumentIntelligenceClient")
 @patch("extraction.engines.azure_document_intelligence_engine.AzureKeyCredential")
 @patch("extraction.engines.azure_document_intelligence_engine.normalize_azure_invoice")
 @patch("builtins.open", new_callable=mock_open)
 @patch("pathlib.Path.exists")
-def test_successful_extract(mock_exists, mock_file, mock_normalize, mock_credential, mock_client, clean_env):
+def test_successful_extract(mock_exists, mock_file, mock_normalize, mock_credential, mock_client, mock_load_dotenv, clean_env):
     """Verify successful extraction, credentials binding, and result parsing."""
     mock_exists.return_value = True
     
@@ -90,11 +94,12 @@ def test_successful_extract(mock_exists, mock_file, mock_normalize, mock_credent
         mock_client_instance.begin_analyze_document.assert_called_once()
         mock_normalize.assert_called_once_with(mock_dict)
 
+@patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
 @patch("extraction.engines.azure_document_intelligence_engine.DocumentIntelligenceClient")
 @patch("extraction.engines.azure_document_intelligence_engine.AzureKeyCredential")
 @patch("extraction.engines.azure_document_intelligence_engine.normalize_azure_invoice")
 @patch("pathlib.Path.exists")
-def test_extract_saves_raw_when_configured(mock_exists, mock_normalize, mock_credential, mock_client, clean_env):
+def test_extract_saves_raw_when_configured(mock_exists, mock_normalize, mock_credential, mock_client, mock_load_dotenv, clean_env):
     """Verify raw JSON responses are saved to local_runs when configured to do so."""
     mock_exists.return_value = True
     
