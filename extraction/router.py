@@ -2,10 +2,13 @@ import os
 from typing import Dict, Type
 from extraction.base import DocumentExtractionEngine
 from extraction.engines.legacy_engine import LegacyExtractionEngine
+from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
 
 # Mapping of supported engine names to their respective engine classes.
+# Supports 'legacy' (original OCR/TSR) and 'azure' (Document Intelligence).
 ENGINES: Dict[str, Type[DocumentExtractionEngine]] = {
     "legacy": LegacyExtractionEngine,
+    "azure": AzureDocumentIntelligenceEngine,
 }
 
 def get_extraction_engine() -> DocumentExtractionEngine:
@@ -24,3 +27,4 @@ def get_extraction_engine() -> DocumentExtractionEngine:
         
     engine_class = ENGINES[engine_name]
     return engine_class()
+
