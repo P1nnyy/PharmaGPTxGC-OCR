@@ -43,3 +43,6 @@ item_rows_clean.json
 
 .DS_Store
 **/.DS_Store
+
+frontend/node_modules/
+frontend/dist/
