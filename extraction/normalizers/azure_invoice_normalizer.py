@@ -7,9 +7,42 @@ def is_numeric(s: str) -> bool:
     # Remove a single decimal point and check if the remainder is digits
     return s.replace(".", "", 1).isdigit()
 
+def clean_decimal_string(val: str) -> str:
+    """
+    Cleans up numeric strings from OCR and formatting variations:
+    - Removes currency symbols ($, ₹).
+    - Converts spaces between numbers (e.g. "52 53") to a dot (e.g. "52.53").
+    - Handles commas: if a comma is followed by exactly two digits at the end of the string
+      (e.g., "126,99"), treats the last comma as a decimal separator and replaces it with a dot,
+      while removing any other commas. Otherwise, removes all commas as thousands separators.
+    """
+    s = val.strip()
+    # Remove common currency symbols
+    s = s.replace("$", "").replace("₹", "")
+    
+    # Check for space as dot separator (e.g., "52 53" -> "52.53")
+    if re.match(r'^\d+ +\d+$', s):
+        s = re.sub(r' +', '.', s)
+        return s
+        
+    # Remove all other whitespace
+    s = s.replace(" ", "")
+
+    if "," in s:
+        # Check if the last comma is followed by exactly two digits at the end
+        if re.search(r',\d{2}$', s):
+            r_idx = s.rfind(",")
+            # Replace the last comma with a dot and remove all other commas
+            s = s[:r_idx].replace(",", "") + "." + s[r_idx+1:]
+        else:
+            # Just remove commas as thousands separators (e.g., "1,269.90" -> "1269.90")
+            s = s.replace(",", "")
+            
+    return s
+
 def parse_decimal_safe(value: Any) -> Any:
     """
-    Safely parses input to float or int.
+    Safely parses input to float or int after cleaning it.
     If parsing fails, returns the original stripped string.
     """
     if value is None:
@@ -20,9 +53,10 @@ def parse_decimal_safe(value: Any) -> Any:
     if not s:
         return None
     try:
-        if "." in s:
-            return float(s)
-        return int(s)
+        clean = clean_decimal_string(s)
+        if "." in clean:
+            return float(clean)
+        return int(clean)
     except ValueError:
         return s
 
@@ -31,8 +65,7 @@ def try_parse_float(val: Any) -> Optional[float]:
     if val is None:
         return None
     try:
-        # Strip common currency symbols, commas, and whitespace
-        clean = str(val).replace(",", "").replace("$", "").replace("₹", "").strip()
+        clean = clean_decimal_string(str(val))
         return float(clean)
     except ValueError:
         return None
@@ -40,61 +73,97 @@ def try_parse_float(val: Any) -> Optional[float]:
 def normalize_header(header_text: str) -> Optional[str]:
     """
     Normalizes Azure table header text to canonical column keys.
-    Maps variations of common columns used in pharma invoices.
+    Maps variations of common columns used in pharma invoices, supporting typos.
     """
     t = header_text.lower().strip()
+    # Normalize multiple whitespaces to single space
+    t = re.sub(r'\s+', ' ', t)
     
     # 1. Serial column mapping
-    if t in ["s", "s.", "sr", "sr.", "sl", "sl."]:
+    if t in ["51", "sl", "s1", "sr", "s.no", "s", "s.", "sr.", "sl."]:
         return "serial"
     
-    # 2. Quantity column mapping
-    if t in ["qty", "qty.", "quantity", "quant"]:
-        return "quantity"
+    # 2. Product code column mapping
+    if t in ["pchde", "pcode", "product code", "item code"]:
+        return "product_code"
     
-    # 3. Pack column mapping
-    if t in ["pack", "packing", "pkg"]:
-        return "pack"
-    
-    # 4. Product column mapping
-    if t in ["product", "particulars", "item", "description", "product name", "item name"]:
+    # 3. Product column mapping
+    if t in ["product", "particulars", "item", "description", "product name", "item name", "tiem description", "product description"]:
         return "product"
     
-    # 5. Batch column mapping
+    # 4. Pack column mapping
+    if t in ["ufc", "uom", "unit", "pack", "packing", "pkg"]:
+        return "pack"
+    
+    # 5. Quantity column mappings
+    if t in ["total 0y", "total qy", "total qty"]:
+        return "quantity_total"
+    if t == "t'es":
+        return "quantity_tes"
+    if t in ["qty", "qty.", "quantity", "quant", "pes", "pcs", "pieces"]:
+        return "quantity_pcs"
+    
+    # 6. Batch column mapping
     if t in ["batch", "batch no", "batch no.", "batchno", "b.no", "b.no."]:
         return "batch"
     
-    # 6. Expiry column mapping
+    # 7. Expiry column mapping
     if t in ["exp", "expiry", "exp.", "exp date", "exp.date", "expiry date"]:
         return "expiry"
     
-    # 7. HSN column mapping
+    # 8. HSN column mapping
     if t in ["hsn", "hsn code", "hsncode", "hsn/sac"]:
         return "hsn"
     
-    # 8. MRP column mapping
+    # 9. MRP column mapping
     if t in ["mrp", "m.r.p.", "m.r.p"]:
         return "mrp"
     
-    # 9. Rate column mapping
+    # 10. Rate column mapping
     if t in ["rate", "unit rate", "price", "unit price"]:
         return "rate"
-    
-    # 10. Discount column mapping
-    if t in ["dis", "dis.", "disc", "disc.", "discount", "disc %", "discount %", "dis %"]:
+        
+    # 11. Gross amount column mapping
+    if t in ["grass amt", "gross amt", "gross_amt"]:
+        return "gross_amount"
+        
+    # 12. Discount column mappings
+    if t == "sch amt":
+        return "sch_amt"
+    if t == "dise amt":
+        return "dise_amt"
+    if t in ["dis", "dis.", "disc", "disc.", "discount", "disc %", "discount %", "dis %", "disc amt", "discount amt"]:
         return "discount"
     
-    # 11. GST column mappings (SGST, CGST, IGST)
+    # 13. GST percent column mappings
+    if t in ["ott %", "gst %", "tax %"]:
+        return "gst_percent"
     if "sgst" in t:
+        if "amt" in t or "amount" in t:
+            return "sgst_amount"
         return "sgst_percent"
     if "cgst" in t:
+        if "amt" in t or "amount" in t or "ciget" in t:
+            return "cgst_amount"
         return "cgst_percent"
     if "igst" in t:
+        if "amt" in t or "amount" in t:
+            return "igst_amount"
         return "igst_percent"
+        
+    # 14. CGST / SGST individual amount mappings
+    if t in ["howwy ciget", "cgst amt", "ciget amt", "cgst amount"]:
+        return "cgst_amount"
+    if t in ["øget amt", "oget amt", "sgst amt", "sgst amount"]:
+        return "sgst_amount"
     
-    # 12. Amount column mapping
-    if t in ["amount", "amt", "amt.", "value", "net amount", "total amount"]:
+    # 15. Amount / Net Amount mapping
+    if t in ["net amt", "net amount", "amount", "amt", "amt.", "value", "total amount"]:
         return "amount"
+        
+    # 16. Taxable amount mapping
+    if t in ["taxable amt", "trashle amt", "taxable amount"]:
+        return "taxable_amount"
         
     return None
 
@@ -130,9 +199,7 @@ def extract_corrected_qty(qty_text: Optional[str], serial_text: Optional[str]) -
     return None
 
 def extract_gst_percent(sgst_raw: Any, cgst_raw: Any, igst_raw: Any) -> Optional[float]:
-    """
-    Combines SGST and CGST percentages, or falls back to IGST percent.
-    """
+    """Combines SGST and CGST percentages, or falls back to IGST percent."""
     sgst_val = try_parse_float(sgst_raw)
     cgst_val = try_parse_float(cgst_raw)
     igst_val = try_parse_float(igst_raw)
@@ -158,6 +225,88 @@ def score_footer_table(grid: List[List[str]]) -> int:
             if any(k in lbl for k in footer_keys) and val:
                 score += 1
     return score
+
+def parse_horizontal_summary_table(grid: List[List[str]]) -> Optional[Dict[str, float]]:
+    """
+    Parses horizontal totals summary grids (like CM Associates TABLE 2)
+    where particulars, gross, discount, taxes, net are column headers.
+    Locates the Total row and yields normalized totals.
+    """
+    if not grid or len(grid) < 2:
+        return None
+        
+    # Scan for a header row containing at least two core totals columns
+    header_idx = None
+    target_terms = {"particulars", "gros ami", "gross amt", "sch amt", "trashle amt", "taxable amt", "net amt", "net payable"}
+    
+    for r_idx, row in enumerate(grid):
+        match_count = 0
+        for cell in row:
+            c = cell.lower().strip()
+            if any(term in c for term in target_terms):
+                match_count += 1
+        if match_count >= 2:
+            header_idx = r_idx
+            break
+            
+    if header_idx is None:
+        return None
+        
+    # Locate the Total row underneath
+    total_row_idx = None
+    for r_idx in range(header_idx + 1, len(grid)):
+        row = grid[r_idx]
+        if row and row[0].lower().strip() == "total":
+            total_row_idx = r_idx
+            break
+            
+    if total_row_idx is None:
+        # Fall back to the last row
+        total_row_idx = len(grid) - 1
+        
+    header_row = grid[header_idx]
+    total_row = grid[total_row_idx]
+    
+    res = {}
+    gross_vals = []
+    disc_vals = []
+    taxable_vals = []
+    tax_vals = []
+    grand_total_vals = []
+    
+    for c_idx, cell in enumerate(header_row):
+        if c_idx >= len(total_row):
+            continue
+        c = cell.lower().strip()
+        val = try_parse_float(total_row[c_idx])
+        if val is None:
+            continue
+            
+        if "gros" in c or "gross" in c:
+            gross_vals.append(val)
+        elif "sch amt" in c or "oth disc" in c or "discount" in c or "disc amt" in c:
+            disc_vals.append(val)
+        elif "trashle" in c or "taxable" in c:
+            taxable_vals.append(val)
+        elif "the amt" in c or "tax amt" in c or "total tax" in c:
+            tax_vals.append(val)
+        elif "net payable" in c:
+            grand_total_vals.insert(0, val) # net payable has priority over net amt
+        elif "net amt" in c or "net amount" in c:
+            grand_total_vals.append(val)
+            
+    if gross_vals:
+        res["subtotal"] = gross_vals[0]
+    if disc_vals:
+        res["discount"] = sum(disc_vals)
+    if taxable_vals:
+        res["taxable_amount"] = taxable_vals[0]
+    if tax_vals:
+        res["total_tax"] = tax_vals[0]
+    if grand_total_vals:
+        res["grand_total"] = grand_total_vals[0]
+        
+    return res
 
 def extract_field_value(fields: dict, keys: List[str]) -> Any:
     """
@@ -200,7 +349,6 @@ def build_grid(table: dict) -> List[List[str]]:
         c = cell.get("columnIndex", 0)
         content = cell.get("content", "")
         if 0 <= r < row_count and 0 <= c < col_count:
-            # Clean up text by stripping whitespace
             grid[r][c] = content
             
     return grid
@@ -231,7 +379,12 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     selected_header_row_idx = None
     max_item_score = -1
     
-    detection_target_headers = {"product", "batch", "expiry", "hsn", "mrp", "rate", "amount", "quantity"}
+    # Target headers criteria for item table detection (matches various typos / variations)
+    detection_target_headers = {
+        "product", "batch", "expiry", "hsn", "mrp", "rate", "amount", 
+        "quantity_total", "quantity_tes", "quantity_pcs", "quantity",
+        "taxable_amount", "gross_amount"
+    }
     
     for table_idx, grid in enumerate(grids):
         # Scan each row in the grid as a candidate header row
@@ -252,51 +405,65 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # 3. Select the footer table
     selected_footer_table_idx = None
     max_footer_score = -1
+    is_footer_horizontal = False
+    horizontal_footer_data = None
     
     for table_idx, grid in enumerate(grids):
         # We don't want the same table to be both item and footer unless it's the only table
         if table_idx == selected_item_table_idx and len(grids) > 1:
             continue
+            
+        # Try parsing as horizontal summary table first (like CM Associates TABLE 2)
+        h_data = parse_horizontal_summary_table(grid)
+        if h_data:
+            selected_footer_table_idx = table_idx
+            is_footer_horizontal = True
+            horizontal_footer_data = h_data
+            break
+            
         score = score_footer_table(grid)
         if score > max_footer_score:
             max_footer_score = score
             selected_footer_table_idx = table_idx
+            is_footer_horizontal = False
             
-    if selected_footer_table_idx is None or max_footer_score < 1:
-        selected_footer_table_idx = None
+    if selected_footer_table_idx is None:
         warnings.append("No separate footer table identified.")
         
     # 4. Extract footer data
     footer_data = {}
     if selected_footer_table_idx is not None:
-        footer_grid = grids[selected_footer_table_idx]
-        for row in footer_grid:
-            if len(row) < 2:
-                continue
-            lbl = row[0].lower().strip()
-            # Find the value column (typically column 1, but check subsequent if empty)
-            val_str = row[1].strip()
-            if not val_str and len(row) > 2:
-                for col_val in row[2:]:
-                    if col_val.strip():
-                        val_str = col_val.strip()
-                        break
-            
-            val = try_parse_float(val_str)
-            if "sub total" in lbl or "subtotal" in lbl:
-                footer_data["subtotal"] = val
-            elif "discount" in lbl:
-                footer_data["discount"] = val
-            elif "sgst" in lbl:
-                footer_data["sgst"] = val
-            elif "cgst" in lbl:
-                footer_data["cgst"] = val
-            elif "igst" in lbl:
-                footer_data["igst"] = val
-            elif any(x in lbl for x in ["grand total", "net total", "payable amount", "total payable", "net amt", "bill amount"]):
-                footer_data["grand_total"] = val
-            elif "round" in lbl:
-                footer_data["roundoff"] = val
+        if is_footer_horizontal and horizontal_footer_data:
+            footer_data = horizontal_footer_data
+        else:
+            footer_grid = grids[selected_footer_table_idx]
+            for row in footer_grid:
+                if len(row) < 2:
+                    continue
+                lbl = row[0].lower().strip()
+                # Find the value column (typically column 1, but check subsequent if empty)
+                val_str = row[1].strip()
+                if not val_str and len(row) > 2:
+                    for col_val in row[2:]:
+                        if col_val.strip():
+                            val_str = col_val.strip()
+                            break
+                
+                val = try_parse_float(val_str)
+                if "sub total" in lbl or "subtotal" in lbl:
+                    footer_data["subtotal"] = val
+                elif "discount" in lbl:
+                    footer_data["discount"] = val
+                elif "sgst" in lbl:
+                    footer_data["sgst"] = val
+                elif "cgst" in lbl:
+                    footer_data["cgst"] = val
+                elif "igst" in lbl:
+                    footer_data["igst"] = val
+                elif any(x in lbl for x in ["grand total", "net total", "payable amount", "total payable", "net amt", "bill amount"]):
+                    footer_data["grand_total"] = val
+                elif "round" in lbl:
+                    footer_data["roundoff"] = val
 
     # 5. Extract document header fields
     doc = documents[0] if documents else {}
@@ -311,15 +478,11 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     doc_grand_total = try_parse_float(extract_field_value(fields, ["InvoiceTotal"]))
     doc_tax = try_parse_float(extract_field_value(fields, ["TotalTax", "Tax"]))
     
-    # 6. Merge header fields (footer data takes precedence for totals)
-    subtotal = footer_data.get("subtotal") if footer_data.get("subtotal") is not None else doc_subtotal
-    discount = footer_data.get("discount")
-    cgst = footer_data.get("cgst")
-    sgst = footer_data.get("sgst")
-    igst = footer_data.get("igst")
-    grand_total = footer_data.get("grand_total") if footer_data.get("grand_total") is not None else doc_grand_total
+    # Extracted CGST / SGST individual amount values from item table total row (e.g. Table 3 row 7)
+    item_table_cgst = None
+    item_table_sgst = None
     
-    # 7. Parse line items from selected item table
+    # 6. Parse line items from selected item table
     line_items = []
     if selected_item_table_idx is not None:
         item_grid = grids[selected_item_table_idx]
@@ -328,8 +491,12 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         
         for r_idx in range(selected_header_row_idx + 1, len(item_grid)):
             row = item_grid[r_idx]
-            # Skip rows containing footer content
-            if is_footer_row(row):
+            
+            # Check if this row is the Total row of the item table
+            is_item_total_row = (row and row[0].lower().strip() == "total") or (len(row) > 2 and row[2].lower().strip() == "total")
+            
+            # Skip rows containing footer content unless it is the total row we want to inspect for taxes
+            if is_footer_row(row) and not is_item_total_row:
                 continue
                 
             row_data = {}
@@ -341,28 +508,77 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                         if col_name not in row_data or not row_data[col_name]:
                             row_data[col_name] = val
                             
-            # Filtering criteria: require product name OR batch OR amount to treat as an item row
             product_val = row_data.get("product", "").strip()
-            batch_val = row_data.get("batch", "").strip()
-            amount_val = row_data.get("amount", "").strip()
             
-            if not (product_val or batch_val or amount_val):
+            # If it is the total row, extract CGST and SGST amount values and skip item conversion
+            if is_item_total_row or product_val.lower().strip() == "total":
+                for c_idx, val in enumerate(row):
+                    if c_idx < len(col_names):
+                        col_name = col_names[c_idx]
+                        if col_name == "cgst_amount":
+                            item_table_cgst = try_parse_float(val)
+                        elif col_name == "sgst_amount":
+                            item_table_sgst = try_parse_float(val)
                 continue
                 
-            # Quantity extraction
+            batch_val = row_data.get("batch", "").strip()
+            amount_val = row_data.get("amount", "").strip()
+            taxable_amount_val = row_data.get("taxable_amount", "").strip()
+            
+            if not (product_val or batch_val or amount_val or taxable_amount_val):
+                continue
+                
+            # Quantity extraction prioritizes Total 0y, then t'es, then standard qty column
+            qty_total = row_data.get("quantity_total")
+            qty_tes = row_data.get("quantity_tes")
+            qty_pcs = row_data.get("quantity_pcs")
             qty_raw = row_data.get("quantity")
             serial_raw = row_data.get("serial")
-            quantity = extract_corrected_qty(qty_raw, serial_raw)
             
+            quantity = None
+            if qty_total is not None and qty_total.strip():
+                quantity = extract_corrected_qty(qty_total, serial_raw)
+            elif qty_tes is not None and qty_tes.strip():
+                quantity = extract_corrected_qty(qty_tes, serial_raw)
+            elif qty_pcs is not None and qty_pcs.strip():
+                quantity = extract_corrected_qty(qty_pcs, serial_raw)
+            else:
+                quantity = extract_corrected_qty(qty_raw, serial_raw)
+                
+            # Discount extraction adds SCH Amt and Dise Amt if both are present
+            sch_val = try_parse_float(row_data.get("sch_amt"))
+            dise_val = try_parse_float(row_data.get("dise_amt"))
+            discount_val = None
+            if sch_val is not None and dise_val is not None:
+                discount_val = sch_val + dise_val
+            elif sch_val is not None:
+                discount_val = sch_val
+            elif dise_val is not None:
+                discount_val = dise_val
+            else:
+                discount_val = parse_decimal_safe(row_data.get("discount"))
+                
             # GST percent
-            gst_percent = extract_gst_percent(
-                row_data.get("sgst_percent"),
-                row_data.get("cgst_percent"),
-                row_data.get("igst_percent")
-            )
+            gst_percent_raw = row_data.get("gst_percent")
+            gst_percent = try_parse_float(gst_percent_raw)
+            if gst_percent is None:
+                gst_percent = extract_gst_percent(
+                    row_data.get("sgst_percent"),
+                    row_data.get("cgst_percent"),
+                    row_data.get("igst_percent")
+                )
+                
+            # Amount fallback to taxable_amount if net amt (amount) is missing
+            amount_raw = row_data.get("amount")
+            if amount_raw is None or not str(amount_raw).strip():
+                amount_raw = row_data.get("taxable_amount")
+            amount = parse_decimal_safe(amount_raw)
+            
+            # Clean up newlines in product name to standard spaces
+            product_name = product_val.replace("\n", " ").strip() if product_val else None
             
             item = CanonicalLineItem(
-                name=product_val if product_val else None,
+                name=product_name,
                 pack=row_data.get("pack") if row_data.get("pack") else None,
                 batch=batch_val if batch_val else None,
                 expiry=row_data.get("expiry") if row_data.get("expiry") else None,
@@ -371,13 +587,30 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                 free_quantity=parse_decimal_safe(row_data.get("free_quantity")),
                 mrp=parse_decimal_safe(row_data.get("mrp")),
                 rate=parse_decimal_safe(row_data.get("rate")),
-                discount=parse_decimal_safe(row_data.get("discount")),
+                discount=discount_val,
                 gst_percent=gst_percent,
-                amount=parse_decimal_safe(row_data.get("amount")),
+                amount=amount,
                 confidence=None
             )
             line_items.append(item)
             
+    # 7. Merge header fields (footer data takes precedence for totals)
+    subtotal = footer_data.get("subtotal") if footer_data.get("subtotal") is not None else doc_subtotal
+    discount = footer_data.get("discount")
+    if discount is None:
+        discount = footer_data.get("discount")
+        
+    cgst = footer_data.get("cgst")
+    sgst = footer_data.get("sgst")
+    igst = footer_data.get("igst")
+    grand_total = footer_data.get("grand_total") if footer_data.get("grand_total") is not None else doc_grand_total
+    
+    # Fallback to item table total row tax amounts if summary totals did not provide CGST/SGST explicitly
+    if cgst is None and item_table_cgst is not None:
+        cgst = item_table_cgst
+    if sgst is None and item_table_sgst is not None:
+        sgst = item_table_sgst
+        
     # 8. Calculate extraction confidence
     item_table_found = (selected_item_table_idx is not None)
     has_line_items = (len(line_items) > 0)
@@ -410,7 +643,11 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         "doc_fields_tax": doc_tax
     }
     
-    # Store roundoff in metadata
+    # Add optional keys if horizontal table parsed them
+    if "taxable_amount" in footer_data:
+        raw_engine_metadata["taxable_amount"] = footer_data["taxable_amount"]
+    if "total_tax" in footer_data:
+        raw_engine_metadata["total_tax"] = footer_data["total_tax"]
     if "roundoff" in footer_data:
         raw_engine_metadata["roundoff"] = footer_data["roundoff"]
         
