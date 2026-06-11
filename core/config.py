@@ -5,7 +5,9 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    # Configure settings behavior. We ignore extra variables in the .env file to allow
+    # the Azure-specific smoke test configuration variables to coexist peacefully.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     PROJECT_NAME: str = "PharmaGPT OCR API"
     LOG_LEVEL: str = "INFO"
@@ -27,8 +29,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_ocr_results_dir(self):
+        # Derive the default OCR results directory if not explicitly provided
         if not self.OCR_RESULTS_DIR:
             self.OCR_RESULTS_DIR = os.path.join(self.DATASETS_DIR, "ocr_results")
         return self
 
 settings = Settings()
+
