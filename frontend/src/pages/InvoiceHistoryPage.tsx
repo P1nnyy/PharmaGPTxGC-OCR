@@ -24,6 +24,8 @@ export const InvoiceHistoryPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sellerFilter, setSellerFilter] = useState('all');
   const [selectedInvoices, setSelectedInvoices] = useState<string[]>([]);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [toastText, setToastText] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 8;
 
@@ -132,11 +134,14 @@ export const InvoiceHistoryPage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  // Bulk Delete
+  // Bulk Delete Action: Show Custom Modal
   const handleBulkDelete = () => {
     if (selectedInvoices.length === 0) return;
-    if (!window.confirm(`Are you sure you want to delete ${selectedInvoices.length} selected runs?`)) return;
+    setShowDeleteConfirm(true);
+  };
 
+  // Safe confirm handler for bulk deletion
+  const confirmBulkDelete = () => {
     try {
       const storedRuns = localStorage.getItem('ocr_workbench_runs');
       if (storedRuns) {
@@ -149,16 +154,67 @@ export const InvoiceHistoryPage: React.FC = () => {
           localStorage.removeItem(`ocr_workbench_run_detail_${id}`);
         });
 
-        // Trigger reload by going back/refreshing context
-        window.location.reload();
+        const deletedCount = selectedInvoices.length;
+        setSelectedInvoices([]);
+        setShowDeleteConfirm(false);
+        setToastText(`Successfully deleted ${deletedCount} invoice run(s).`);
+
+        // Trigger reload after a short delay for visual success toast
+        setTimeout(() => {
+          setToastText(null);
+          window.location.reload();
+        }, 1200);
       }
     } catch (e) {
       console.error(e);
+      setShowDeleteConfirm(false);
     }
   };
 
   return (
     <div className="space-y-6 animate-fade-in">
+      {/* Toast Alert Banner */}
+      {toastText && (
+        <div className="fixed top-16 right-6 bg-[#0f172a] text-white border border-gray-800 px-4 py-3 rounded-xl text-xs font-semibold z-50 shadow-xl flex items-center space-x-2 animate-in slide-in-from-top duration-300">
+          <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping" />
+          <span>{toastText}</span>
+        </div>
+      )}
+
+      {/* Confirmation Dialog Overlay */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 max-w-md w-full mx-4 shadow-xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start space-x-3">
+              <div className="p-2 bg-red-50 text-red-600 rounded-xl shrink-0">
+                <Trash2 size={22} />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-[#0f172a]">Delete selected invoices?</h3>
+                <p className="text-xs text-gray-500 leading-normal">
+                  This will remove the {selectedInvoices.length} selected invoice records and their extraction details from this browser. This action cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-gray-100">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmBulkDelete}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer"
+              >
+                Delete Invoices
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-[#0f172a] tracking-tight">Invoice History</h2>
