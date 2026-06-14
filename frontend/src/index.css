@@ -9,42 +9,42 @@
 body {
   margin: 0;
   padding: 0;
-  background-color: #0b0f17;
-  color: #c9d1d9;
+  background-color: #f4f5fa;
+  color: #1f2937;
   font-family: var(--font-sans);
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Custom Scrollbar for dense developer dashboard */
+/* Custom Scrollbar for modern invoice table */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0d1117;
+  background: #f1f2f6;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #21262d;
+  background: #cbd5e1;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #30363d;
+  background: #94a3b8;
 }
 
 /* Scrollable container styling */
 .custom-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: #21262d #0d1117;
+  scrollbar-color: #cbd5e1 #f1f2f6;
 }
 
 /* Selection highlight color */
 ::selection {
-  background-color: rgba(56, 139, 253, 0.4);
-  color: #ffffff;
+  background-color: rgba(59, 130, 246, 0.2);
+  color: #1e3a8a;
 }
 
 /* Code monospace formatting helper */
@@ -60,3 +60,4 @@ body {
 .image-zoom-container:active {
   cursor: grabbing;
 }
+

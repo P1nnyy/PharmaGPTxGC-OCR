@@ -2,7 +2,7 @@ export interface RunSummary {
   run_id: string;
   filename: string;
   timestamp: string;
-  status: 'safe_for_erp' | 'needs_review' | 'failed';
+  status: 'safe_for_erp' | 'needs_review' | 'failed' | 'verified';
   confidence: number;
   token_coverage: number;
   representability_score: number;

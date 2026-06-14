@@ -14,12 +14,7 @@ import { normalizeBBox } from '../utils/geometry';
 // Gating flag for mock / demo data
 export const ENABLE_MOCK_DATA = import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
 
-// Helper to generate a timestamp in ISO format
-const getTimestamp = (offsetHours = 0) => {
-  const date = new Date();
-  date.setHours(date.getHours() - offsetHours);
-  return date.toISOString();
-};
+
 
 // Helper to cache uploaded image as base64 in sessionStorage
 async function cacheImageLocal(runId: string, file: File): Promise<void> {
@@ -255,106 +250,7 @@ export const getInvoiceImageSvgUrl = (filename: string, _overlayMode?: string): 
 };
 
 // Prefilled local run records reflecting files found in local_runs/
-const initialRuns: RunSummary[] = [
-  {
-    run_id: 'RUN_20260603_213604_1',
-    filename: '38e5c640-96c4-4268-b092-58de09e63216.JPG',
-    timestamp: getTimestamp(48),
-    status: 'needs_review',
-    confidence: 0.897,
-    token_coverage: 0.942,
-    representability_score: 0.865,
-    selected_table_id: 'ITEMS_001',
-    selected_table_shape: '4 Rows x 8 Columns',
-    missing_fields: ['subtotal'],
-    row_math_status: 'unmeasurable',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_2',
-    filename: '49bdab61-6a62-469d-a942-5b41bf02eb6c.JPG',
-    timestamp: getTimestamp(46),
-    status: 'needs_review',
-    confidence: 0.915,
-    token_coverage: 0.912,
-    representability_score: 0.720,
-    selected_table_id: 'ITEMS_002',
-    selected_table_shape: '2 Rows x 6 Columns',
-    missing_fields: ['grand_total'],
-    row_math_status: 'unmeasurable',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_3',
-    filename: '7d4c3bb9-2c0b-4c75-b7d4-7c23244401bb.JPG',
-    timestamp: getTimestamp(44),
-    status: 'needs_review',
-    confidence: 0.765,
-    token_coverage: 0.824,
-    representability_score: 0.584,
-    selected_table_id: 'ITEMS_003',
-    selected_table_shape: '9 Rows x 7 Columns',
-    missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_4',
-    filename: '7e9a0d92-49b0-40e4-bc0d-7577f52ea29d.JPG',
-    timestamp: getTimestamp(40),
-    status: 'safe_for_erp',
-    confidence: 0.965,
-    token_coverage: 0.985,
-    representability_score: 0.984,
-    selected_table_id: 'ITEMS_004',
-    selected_table_shape: '11 Rows x 8 Columns',
-    missing_fields: [],
-    row_math_status: 'pass',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_5',
-    filename: '9ed2543c-2e03-42ea-9fec-c68ee8c39625.JPG',
-    timestamp: getTimestamp(36),
-    status: 'needs_review',
-    confidence: 0.814,
-    token_coverage: 0.875,
-    representability_score: 0.652,
-    selected_table_id: 'ITEMS_005',
-    selected_table_shape: '6 Rows x 8 Columns',
-    missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_6',
-    filename: 'caf60269-bcd3-43e9-ad8c-2293eefbdbcb.JPG',
-    timestamp: getTimestamp(32),
-    status: 'needs_review',
-    confidence: 0.826,
-    token_coverage: 0.892,
-    representability_score: 0.620,
-    selected_table_id: 'ITEMS_006',
-    selected_table_shape: '10 Rows x 7 Columns',
-    missing_fields: ['subtotal', 'grand_total'],
-    row_math_status: 'unmeasurable',
-    is_demo: true
-  },
-  {
-    run_id: 'RUN_20260603_213604_7',
-    filename: 'cb07d17e-fd1c-4ff6-8b05-7b699189485d.JPG',
-    timestamp: getTimestamp(28),
-    status: 'failed',
-    confidence: 0.450,
-    token_coverage: 0.650,
-    representability_score: 0.350,
-    selected_table_id: 'ITEMS_007',
-    selected_table_shape: '6 Rows x 4 Columns',
-    missing_fields: ['subtotal', 'cgst', 'sgst'],
-    row_math_status: 'fail',
-    is_demo: true
-  }
-];
+const initialRuns: RunSummary[] = [];
 
 // Helper to clear storage
 export function clearWorkbenchRunStorage() {
