@@ -17,6 +17,9 @@ def clean_decimal_string(val: str) -> str:
       while removing any other commas. Otherwise, removes all commas as thousands separators.
     """
     s = val.strip()
+    # Strip leading noise characters: |, :, ;, space
+    while s and s[0] in ['|', ':', ';', ' ']:
+        s = s[1:].strip()
     # Remove common currency symbols
     s = s.replace("$", "").replace("₹", "")
     
@@ -103,6 +106,10 @@ def normalize_header(header_text: str) -> Optional[str]:
     if t in ["qty", "qty.", "quantity", "quant", "pes", "pcs", "pieces"]:
         return "quantity_pcs"
     
+    # 5.5 Free Quantity column mapping
+    if t in ["free", "free qty", "free quantity", "free.qty", "free.quantity"]:
+        return "free_quantity"
+    
     # 6. Batch column mapping
     if t in ["batch", "batch no", "batch no.", "batchno", "b.no", "b.no."]:
         return "batch"
@@ -166,6 +173,62 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "taxable_amount"
         
     return None
+
+def normalize_header_row(header_row: List[str]) -> List[Optional[str]]:
+    """
+    Normalizes a complete row of table headers, handling duplicate columns
+    like 'Value' in a context-aware way and cleaning up noise.
+    """
+    cleaned_full = []
+    for cell in header_row:
+        # Replace all whitespaces/newlines with single space
+        full = re.sub(r'\s+', ' ', cell.lower().strip())
+        cleaned_full.append(full)
+        
+    # Determine if there is any explicit amount column
+    has_explicit_amount = False
+    for cell in header_row:
+        full = re.sub(r'\s+', ' ', cell.lower().strip())
+        if full != "value":
+            norm = normalize_header(full)
+            if norm == "amount":
+                has_explicit_amount = True
+                break
+                
+    col_names = []
+    for i, cell in enumerate(header_row):
+        t = cleaned_full[i]
+        
+        # 1. Batch header cleanup
+        if "batch" in t or t.startswith("batch") or t.startswith("b.no") or "b.no" in t:
+            col_names.append("batch")
+            continue
+            
+        # 2. Context-aware Value mapping
+        if t == "value":
+            mapped = None
+            if i > 0:
+                prev_t = cleaned_full[i-1]
+                if "sgst" in prev_t:
+                    mapped = "sgst_amount"
+                elif "cgst" in prev_t:
+                    mapped = "cgst_amount"
+                elif "igst" in prev_t:
+                    mapped = "igst_amount"
+                elif any(term in prev_t for term in ["gst", "tax", "dis", "discount"]):
+                    mapped = None
+                    
+            if mapped is None:
+                if not has_explicit_amount:
+                    mapped = "amount"
+            col_names.append(mapped)
+            continue
+            
+        # 3. Standard normalization using full cell content
+        norm = normalize_header(cell)
+        col_names.append(norm)
+        
+    return col_names
 
 def extract_corrected_qty(qty_text: Optional[str], serial_text: Optional[str]) -> Optional[Any]:
     """
@@ -487,7 +550,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     if selected_item_table_idx is not None:
         item_grid = grids[selected_item_table_idx]
         header_row = item_grid[selected_header_row_idx]
-        col_names = [normalize_header(cell) for cell in header_row]
+        col_names = normalize_header_row(header_row)
         
         for r_idx in range(selected_header_row_idx + 1, len(item_grid)):
             row = item_grid[r_idx]

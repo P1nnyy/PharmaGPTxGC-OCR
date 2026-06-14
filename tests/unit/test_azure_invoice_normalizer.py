@@ -470,3 +470,100 @@ def test_cm_associates_format():
     # Verify SGST is not 17.0 (from Pes column)
     assert invoice.sgst != 17.0
 
+def test_mahajan_medical_agencies_format():
+    """Verify normalization of Mahajan Medical Agencies format with multiple Value columns under tax slab headers."""
+    raw_data = {
+        "modelId": "prebuilt-invoice",
+        "tables": [
+            {
+                "rowCount": 3,
+                "columnCount": 18,
+                "cells": [
+                    # Row 0 - Headers
+                    {"rowIndex": 0, "columnIndex": 0, "content": "S."},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "Qty."},
+                    {"rowIndex": 0, "columnIndex": 2, "content": "Free"},
+                    {"rowIndex": 0, "columnIndex": 3, "content": "Mfr"},
+                    {"rowIndex": 0, "columnIndex": 4, "content": "Pack"},
+                    {"rowIndex": 0, "columnIndex": 5, "content": "Product Name"},
+                    {"rowIndex": 0, "columnIndex": 6, "content": ""},
+                    {"rowIndex": 0, "columnIndex": 7, "content": "Batch"},
+                    {"rowIndex": 0, "columnIndex": 8, "content": "Exp"},
+                    {"rowIndex": 0, "columnIndex": 9, "content": "HSN"},
+                    {"rowIndex": 0, "columnIndex": 10, "content": "M.R.P"},
+                    {"rowIndex": 0, "columnIndex": 11, "content": "Rate"},
+                    {"rowIndex": 0, "columnIndex": 12, "content": "Dis"},
+                    {"rowIndex": 0, "columnIndex": 13, "content": "SGST"},
+                    {"rowIndex": 0, "columnIndex": 14, "content": "Value"},
+                    {"rowIndex": 0, "columnIndex": 15, "content": "CGST"},
+                    {"rowIndex": 0, "columnIndex": 16, "content": "Value"},
+                    {"rowIndex": 0, "columnIndex": 17, "content": "Amount"},
+
+                    # Row 1 - ROSULIP
+                    {"rowIndex": 1, "columnIndex": 0, "content": "1"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "2"},
+                    {"rowIndex": 1, "columnIndex": 2, "content": ""},
+                    {"rowIndex": 1, "columnIndex": 3, "content": "CIPL"},
+                    {"rowIndex": 1, "columnIndex": 4, "content": "1×10"},
+                    {"rowIndex": 1, "columnIndex": 5, "content": "ROSULIP 20 TABS"},
+                    {"rowIndex": 1, "columnIndex": 6, "content": ""},
+                    {"rowIndex": 1, "columnIndex": 7, "content": ""},
+                    {"rowIndex": 1, "columnIndex": 8, "content": "7/27\n/28"},
+                    {"rowIndex": 1, "columnIndex": 9, "content": "30049099"},
+                    {"rowIndex": 1, "columnIndex": 10, "content": "320.83"},
+                    {"rowIndex": 1, "columnIndex": 11, "content": "244.44"},
+                    {"rowIndex": 1, "columnIndex": 12, "content": "|0.00"},
+                    {"rowIndex": 1, "columnIndex": 13, "content": "2.50"},
+                    {"rowIndex": 1, "columnIndex": 14, "content": "11.49"},
+                    {"rowIndex": 1, "columnIndex": 15, "content": "2.50"},
+                    {"rowIndex": 1, "columnIndex": 16, "content": "11.49"},
+                    {"rowIndex": 1, "columnIndex": 17, "content": "488.88"},
+
+                    # Row 2 - METOLAR
+                    {"rowIndex": 2, "columnIndex": 0, "content": "2"},
+                    {"rowIndex": 2, "columnIndex": 1, "content": "3"},
+                    {"rowIndex": 2, "columnIndex": 2, "content": ""},
+                    {"rowIndex": 2, "columnIndex": 3, "content": "CIPL"},
+                    {"rowIndex": 2, "columnIndex": 4, "content": "1X15"},
+                    {"rowIndex": 2, "columnIndex": 5, "content": "METOLAR 25 TABS"},
+                    {"rowIndex": 2, "columnIndex": 6, "content": ""},
+                    {"rowIndex": 2, "columnIndex": 7, "content": "55A0346"},
+                    {"rowIndex": 2, "columnIndex": 8, "content": ""},
+                    {"rowIndex": 2, "columnIndex": 9, "content": "30049074"},
+                    {"rowIndex": 2, "columnIndex": 10, "content": "42.63"},
+                    {"rowIndex": 2, "columnIndex": 11, "content": "32.48"},
+                    {"rowIndex": 2, "columnIndex": 12, "content": "0.00"},
+                    {"rowIndex": 2, "columnIndex": 13, "content": "2.50"},
+                    {"rowIndex": 2, "columnIndex": 14, "content": "2.29"},
+                    {"rowIndex": 2, "columnIndex": 15, "content": "2.50"},
+                    {"rowIndex": 2, "columnIndex": 16, "content": "2.29"},
+                    {"rowIndex": 2, "columnIndex": 17, "content": "97.44"},
+                ]
+            }
+        ]
+    }
+    
+    invoice = normalize_azure_invoice(raw_data)
+    assert len(invoice.line_items) == 2
+
+    # Assertions for ROSULIP
+    item1 = invoice.line_items[0]
+    assert item1.name == "ROSULIP 20 TABS"
+    assert item1.quantity == 2
+    assert item1.free_quantity is None
+    assert item1.hsn == "30049099"
+    assert item1.mrp == 320.83
+    assert item1.rate == 244.44
+    assert item1.discount == 0.0
+    assert item1.gst_percent == 5.0
+    assert item1.amount == 488.88
+
+    # Assertions for METOLAR
+    item2 = invoice.line_items[1]
+    assert item2.name == "METOLAR 25 TABS"
+    assert item2.quantity == 3
+    assert item2.batch == "55A0346"
+    assert item2.mrp == 42.63
+    assert item2.rate == 32.48
+    assert item2.amount == 97.44
+
