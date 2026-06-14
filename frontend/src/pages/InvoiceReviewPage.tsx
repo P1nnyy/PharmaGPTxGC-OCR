@@ -13,7 +13,6 @@ import {
   AlertTriangle,
   Info,
   RefreshCw,
-  Calculator,
   X // Used for closing the details side drawer
 } from 'lucide-react';
 
@@ -46,13 +45,66 @@ interface TableLineItem {
   discount: number | null;
   gst_percent: number | null;
   amount: number | null;
+  is_suggested_amount?: boolean;
 }
 
-// Helper: Safely parses numeric fields, returning null on missing/empty values
-const parseOptionalFloat = (val: any): number | null => {
-  if (val === null || val === undefined || val === '') return null;
-  const num = parseFloat(val);
+// Helper: Check if a value is present (non-empty string, non-null, non-undefined)
+const isPresent = (value: any): boolean => {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+};
+
+// Helper: Safely parses numeric fields, cleaning currency symbols, returning null on missing/empty values
+const toNumberOrNull = (value: any): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const cleaned = String(value).replace(/[₹$,]/g, '').trim();
+  if (cleaned === '') return null;
+  const num = parseFloat(cleaned);
   return isNaN(num) ? null : num;
+};
+
+// Helper: Formats currency displays, returning "—" for missing values
+const formatCurrencyOrDash = (value: any): string => {
+  const num = toNumberOrNull(value);
+  if (num === null) return '—';
+  return `₹${num.toFixed(2)}`;
+};
+
+const formatQuantityOrDash = (value: any): string => {
+  const num = toNumberOrNull(value);
+  if (num === null) return '—';
+  return num.toFixed(2);
+};
+
+// Helper: Billed quantity
+const getBilledQty = (item: TableLineItem): number | null => {
+  return item.quantity;
+};
+
+// Helper: Free quantity
+const getFreeQty = (item: TableLineItem): number | null => {
+  return item.free_quantity;
+};
+
+// Helper: Billed Qty + Free Qty
+const getReceivedQty = (item: TableLineItem): number => {
+  const billed = item.quantity ?? 0;
+  const free = item.free_quantity ?? 0;
+  return billed + free;
+};
+
+// Helper: Numeric line item amount
+const getItemAmount = (item: TableLineItem): number | null => {
+  return item.amount;
+};
+
+// Helper: Safely extracts amount from various backend fallback keys
+const getAmountFromItem = (item: any): any => {
+  if (item.amount !== undefined && item.amount !== null && item.amount !== '') return item.amount;
+  if (item.line_total !== undefined && item.line_total !== null && item.line_total !== '') return item.line_total;
+  if (item.net_amount !== undefined && item.net_amount !== null && item.net_amount !== '') return item.net_amount;
+  if (item.value !== undefined && item.value !== null && item.value !== '') return item.value;
+  if (item.raw?.amount !== undefined && item.raw?.amount !== null && item.raw?.amount !== '') return item.raw.amount;
+  return null;
 };
 
 // Helper: Safely normalizes string values, returning empty string on missing/null
@@ -61,46 +113,8 @@ const parseOptionalString = (val: any): string => {
   return String(val).trim();
 };
 
-// Helper: Formats currency displays, returning "—" for missing totals
-const formatCurrency = (value: any): string => {
-  if (value === null || value === undefined || value === '') {
-    return '—';
-  }
-  const num = parseFloat(value);
-  if (isNaN(num)) {
-    return '—';
-  }
-  return `₹${num.toFixed(2)}`;
-};
-
-
-
-// Helper: Extracts quantity dynamically, supporting qty / quantity mappings
-const getLineItemQty = (item: any): any => {
-  if (item.quantity !== undefined && item.quantity !== null && item.quantity !== '') {
-    return item.quantity;
-  }
-  if (item.qty !== undefined && item.qty !== null && item.qty !== '') {
-    return item.qty;
-  }
-  return '';
-};
-
-// Helper: Safely returns line item amount
-const getLineItemAmount = (item: any): any => {
-  if (item.amount !== undefined && item.amount !== null && item.amount !== '') {
-    return item.amount;
-  }
-  return '';
-};
-
-// Helper: Safely returns line item MRP
-const getLineItemMRP = (item: any): any => {
-  if (item.mrp !== undefined && item.mrp !== null && item.mrp !== '') {
-    return item.mrp;
-  }
-  return '';
-};
+// Legacy helper compatibility mappings
+const parseOptionalFloat = toNumberOrNull;
 
 export const InvoiceReviewPage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
@@ -113,6 +127,15 @@ export const InvoiceReviewPage: React.FC = () => {
   // Zoom & Rotation Preview State for the original scan
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
+
+  // Image dragging/panning state
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // Raw engine metadata state
+  const [rawEngineMetadata, setRawEngineMetadata] = useState<any>(null);
 
   // Editor states
   const [header, setHeader] = useState<InvoiceHeader>({
@@ -136,6 +159,92 @@ export const InvoiceReviewPage: React.FC = () => {
   // ID of the line item currently active in the details side drawer
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
+  // Mouse handlers for click-drag panning scan image
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (zoom <= 1) return;
+    setIsDragging(true);
+    setDragStart({ x: e.clientX - panX, y: e.clientY - panY });
+    e.preventDefault();
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDragging || zoom <= 1) return;
+    const newPanX = e.clientX - dragStart.x;
+    const newPanY = e.clientY - dragStart.y;
+    setPanX(newPanX);
+    setPanY(newPanY);
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const getCursorClass = () => {
+    if (zoom <= 1) return 'cursor-default';
+    return isDragging ? 'cursor-grabbing' : 'cursor-grab';
+  };
+
+  // Scroll to and focus the first missing critical field
+  const handleScrollToFirstMissing = () => {
+    const headerFields: (keyof InvoiceHeader)[] = ['invoice_date', 'invoice_number', 'seller_name', 'grand_total'];
+    for (const field of headerFields) {
+      if (isCriticalHeaderMissing(field)) {
+        const el = document.getElementById(`header-${field}`);
+        if (el) {
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+    }
+
+    for (const item of lineItems) {
+      if (isCriticalItemMissing(item, 'product_name')) {
+        const el = document.getElementById(`item-name-${item.id}`);
+        if (el) {
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (isCriticalItemMissing(item, 'batch')) {
+        const el = document.getElementById(`item-batch-${item.id}`);
+        if (el) {
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (isCriticalItemMissing(item, 'hsn')) {
+        const el = document.getElementById(`item-hsn-${item.id}`);
+        if (el) {
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (isCriticalItemMissing(item, 'quantity')) {
+        setSelectedItemId(item.id);
+        window.setTimeout(() => {
+          const el = document.getElementById(`item-quantity-${item.id}`);
+          if (el) {
+            el.focus();
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 0);
+        return;
+      }
+      if (isCriticalItemMissing(item, 'amount')) {
+        const el = document.getElementById(`item-amount-${item.id}`);
+        if (el) {
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+    }
+  };
+
   // Check if critical header fields are missing
   const isCriticalHeaderMissing = (field: keyof InvoiceHeader) => {
     const val = header[field];
@@ -146,11 +255,11 @@ export const InvoiceReviewPage: React.FC = () => {
   const isCriticalItemMissing = (item: TableLineItem, field: keyof TableLineItem) => {
     let val: any = item[field];
     if (field === 'quantity') {
-      val = getLineItemQty(item);
+      val = getBilledQty(item);
     } else if (field === 'amount') {
-      val = getLineItemAmount(item);
+      val = getItemAmount(item);
     }
-    return val === null || val === undefined || val === '';
+    return val === null || val === undefined || String(val).trim() === '';
   };
 
   // Calculate the total number of missing critical fields
@@ -163,6 +272,7 @@ export const InvoiceReviewPage: React.FC = () => {
     
     lineItems.forEach((item) => {
       if (isCriticalItemMissing(item, 'product_name')) count++;
+      if (isCriticalItemMissing(item, 'batch')) count++;
       if (isCriticalItemMissing(item, 'hsn')) count++;
       if (isCriticalItemMissing(item, 'quantity')) count++;
       if (isCriticalItemMissing(item, 'amount')) count++;
@@ -176,6 +286,11 @@ export const InvoiceReviewPage: React.FC = () => {
     if (!runId) return;
     setIsLoading(true);
     setError(null);
+    setZoom(1);
+    setRotation(0);
+    setPanX(0);
+    setPanY(0);
+    setIsDragging(false);
 
     try {
       const storedRuns = localStorage.getItem('ocr_workbench_runs');
@@ -273,6 +388,7 @@ export const InvoiceReviewPage: React.FC = () => {
 
       const detail = JSON.parse(rawDetailStr);
       setConfidence(Math.round((detail.confidence || 0.85) * 100));
+      setRawEngineMetadata(detail.raw_engine_metadata || null);
 
       // Parse structured header fields without zero-defaulting
       setHeader({
@@ -293,7 +409,18 @@ export const InvoiceReviewPage: React.FC = () => {
 
       if (Array.isArray(detail.line_items) && detail.line_items.length > 0) {
         parsedItems = detail.line_items.map((item: any, idx: number) => {
-          const qty = item.quantity !== undefined ? item.quantity : item.qty;
+          const qty = toNumberOrNull(item.quantity !== undefined ? item.quantity : item.qty);
+          const rate = toNumberOrNull(item.rate);
+          const rawAmount = getAmountFromItem(item);
+          let amount = toNumberOrNull(rawAmount);
+          let is_suggested_amount = false;
+
+          if (amount === null && qty !== null && rate !== null) {
+            const disc = toNumberOrNull(item.discount) || 0;
+            amount = parseFloat((qty * rate - disc).toFixed(2));
+            is_suggested_amount = true;
+          }
+
           return {
             id: `item-${idx}`,
             product_name: parseOptionalString(item.name || item.product_name || item.product),
@@ -301,19 +428,31 @@ export const InvoiceReviewPage: React.FC = () => {
             expiry: parseOptionalString(item.expiry),
             hsn: parseOptionalString(item.hsn),
             pack: parseOptionalString(item.pack),
-            quantity: parseOptionalFloat(qty),
-            free_quantity: parseOptionalFloat(item.free_quantity),
-            mrp: parseOptionalFloat(item.mrp),
-            rate: parseOptionalFloat(item.rate),
-            discount: parseOptionalFloat(item.discount),
-            gst_percent: parseOptionalFloat(item.gst_percent),
-            amount: parseOptionalFloat(item.amount)
+            quantity: qty,
+            free_quantity: toNumberOrNull(item.free_quantity),
+            mrp: toNumberOrNull(item.mrp),
+            rate: rate,
+            discount: toNumberOrNull(item.discount),
+            gst_percent: toNumberOrNull(item.gst_percent),
+            amount: amount,
+            is_suggested_amount: is_suggested_amount
           };
         });
       } else if (detail.metadata?.llm_extraction?.items) {
         const rawLlmItems = detail.metadata.llm_extraction.items;
         parsedItems = rawLlmItems.map((item: any, idx: number) => {
-          const qty = item.qty !== undefined ? item.qty : item.quantity;
+          const qty = toNumberOrNull(item.qty !== undefined ? item.qty : item.quantity);
+          const rate = toNumberOrNull(item.rate);
+          const rawAmount = getAmountFromItem(item);
+          let amount = toNumberOrNull(rawAmount);
+          let is_suggested_amount = false;
+
+          if (amount === null && qty !== null && rate !== null) {
+            const disc = toNumberOrNull(item.discount) || 0;
+            amount = parseFloat((qty * rate - disc).toFixed(2));
+            is_suggested_amount = true;
+          }
+
           return {
             id: `item-${idx}`,
             product_name: parseOptionalString(item.product_name || item.name),
@@ -321,13 +460,14 @@ export const InvoiceReviewPage: React.FC = () => {
             expiry: parseOptionalString(item.expiry),
             hsn: parseOptionalString(item.hsn_code || item.hsn),
             pack: parseOptionalString(item.pack),
-            quantity: parseOptionalFloat(qty),
-            free_quantity: parseOptionalFloat(item.free_quantity),
-            mrp: parseOptionalFloat(item.mrp),
-            rate: parseOptionalFloat(item.rate),
-            discount: parseOptionalFloat(item.discount),
-            gst_percent: parseOptionalFloat(item.gst_percent),
-            amount: parseOptionalFloat(item.amount)
+            quantity: qty,
+            free_quantity: toNumberOrNull(item.free_quantity),
+            mrp: toNumberOrNull(item.mrp),
+            rate: rate,
+            discount: toNumberOrNull(item.discount),
+            gst_percent: toNumberOrNull(item.gst_percent),
+            amount: amount,
+            is_suggested_amount: is_suggested_amount
           };
         });
       } else if (Array.isArray(detail.structured_tables) && detail.structured_tables.length > 0) {
@@ -345,11 +485,22 @@ export const InvoiceReviewPage: React.FC = () => {
 
             const qtyText = cellTextFor('quantity') || cellTextFor('quantity_pcs');
             const rateText = cellTextFor('unit_price') || cellTextFor('rate');
-            const amountText = cellTextFor('row_total') || cellTextFor('amount');
+            const amountText = cellTextFor('row_total') || cellTextFor('amount') || cellTextFor('value');
             const mrpText = cellTextFor('mrp');
             const discountText = cellTextFor('discount');
             const gstText = cellTextFor('gst_percent');
             const freeQtyText = cellTextFor('free_quantity');
+
+            const qty = toNumberOrNull(qtyText);
+            const rate = toNumberOrNull(rateText);
+            let amount = toNumberOrNull(amountText);
+            let is_suggested_amount = false;
+
+            if (amount === null && qty !== null && rate !== null) {
+              const disc = toNumberOrNull(discountText) || 0;
+              amount = parseFloat((qty * rate - disc).toFixed(2));
+              is_suggested_amount = true;
+            }
 
             return {
               id: `item-${idx}`,
@@ -358,13 +509,14 @@ export const InvoiceReviewPage: React.FC = () => {
               expiry: parseOptionalString(cellTextFor('expiry_date') || cellTextFor('expiry')),
               hsn: parseOptionalString(cellTextFor('hsn_code') || cellTextFor('hsn')),
               pack: parseOptionalString(cellTextFor('pack')),
-              quantity: parseOptionalFloat(qtyText),
-              free_quantity: parseOptionalFloat(freeQtyText),
-              mrp: parseOptionalFloat(mrpText),
-              rate: parseOptionalFloat(rateText),
-              discount: parseOptionalFloat(discountText),
-              gst_percent: parseOptionalFloat(gstText),
-              amount: parseOptionalFloat(amountText)
+              quantity: qty,
+              free_quantity: toNumberOrNull(freeQtyText),
+              mrp: toNumberOrNull(mrpText),
+              rate: rate,
+              discount: toNumberOrNull(discountText),
+              gst_percent: toNumberOrNull(gstText),
+              amount: amount,
+              is_suggested_amount: is_suggested_amount
             };
           });
         }
@@ -395,17 +547,24 @@ export const InvoiceReviewPage: React.FC = () => {
 
         const updatedItem = { ...item, [key]: value };
 
-        // Auto-recalculate row amount if Quantity/Rate/Discount changes
+        // Auto-recalculate row amount if Quantity/Rate/Discount changes and amount was missing/suggested
         if (key === 'quantity' || key === 'rate' || key === 'discount') {
-          const qty = key === 'quantity' ? parseOptionalFloat(value) : getLineItemQty(item);
-          const rate = key === 'rate' ? parseOptionalFloat(value) : item.rate;
-          const disc = key === 'discount' ? parseOptionalFloat(value) : item.discount;
+          const qty = key === 'quantity' ? toNumberOrNull(value) : item.quantity;
+          const rate = key === 'rate' ? toNumberOrNull(value) : item.rate;
+          const disc = key === 'discount' ? toNumberOrNull(value) : item.discount;
           
-          if (qty !== null && rate !== null) {
-            updatedItem.amount = parseFloat((qty * rate - (disc || 0)).toFixed(2));
-          } else {
-            updatedItem.amount = null;
+          if (item.amount === null || item.is_suggested_amount) {
+            if (qty !== null && rate !== null) {
+              updatedItem.amount = parseFloat((qty * rate - (disc || 0)).toFixed(2));
+              updatedItem.is_suggested_amount = true;
+            } else {
+              updatedItem.amount = null;
+              updatedItem.is_suggested_amount = false;
+            }
           }
+        } else if (key === 'amount') {
+          // User explicitly edited amount, so it is no longer suggested
+          updatedItem.is_suggested_amount = false;
         }
 
         return updatedItem;
@@ -441,50 +600,89 @@ export const InvoiceReviewPage: React.FC = () => {
     }
   };
 
+  // Prefer header discount, then fall back to metadata discount fields
+  const discountVal = header.discount !== null
+    ? header.discount
+    : toNumberOrNull(rawEngineMetadata?.discount ?? rawEngineMetadata?.summary?.discount ?? rawEngineMetadata?.total_discount);
+
   // Dynamic calculations: Line Total
-  const computedSubtotal = parseFloat(
-    lineItems.reduce((sum, item) => sum + (getLineItemAmount(item) || 0), 0).toFixed(2)
-  );
+  const presentAmounts = lineItems
+    .map(item => getItemAmount(item))
+    .filter((amt): amt is number => amt !== null && amt !== undefined);
+
+  const computedSubtotal = presentAmounts.length > 0
+    ? parseFloat(presentAmounts.reduce((sum, amt) => sum + amt, 0).toFixed(2))
+    : null;
 
   // Dynamic calculations: GST Total (sum of CGST + SGST + IGST)
-  const cgstVal = parseOptionalFloat(header.cgst);
-  const sgstVal = parseOptionalFloat(header.sgst);
-  const igstVal = parseOptionalFloat(header.igst);
+  const cgstVal = toNumberOrNull(header.cgst);
+  const sgstVal = toNumberOrNull(header.sgst);
+  const igstVal = toNumberOrNull(header.igst);
 
   const hasGstValues = cgstVal !== null || sgstVal !== null || igstVal !== null;
   const computedGstTotal = hasGstValues
     ? parseFloat(((cgstVal || 0) + (sgstVal || 0) + (igstVal || 0)).toFixed(2))
     : null;
 
+  // Extract roundoff safely from raw metadata
+  const roundoffVal = rawEngineMetadata?.roundoff ?? rawEngineMetadata?.round_off ?? null;
+  const roundoff = toNumberOrNull(roundoffVal);
+
   // Math validation logic (ensures we don't calculate false mismatches)
-  const missingAmountsCount = lineItems.filter(item => getLineItemAmount(item) === '').length;
-  const hasMissingGrandTotal = header.grand_total === null || header.grand_total === undefined || String(header.grand_total) === '';
+  const isSuggestedAmtPresent = lineItems.some(item => item.is_suggested_amount);
+  const isAnyAmountMissing = lineItems.some(item => !isPresent(getItemAmount(item)));
+  const hasMissingGrandTotal = !isPresent(header.grand_total);
+  const hasMissingSubtotal = !isPresent(header.subtotal);
 
-  let mathStatus: 'matched' | 'mismatch' | 'missing_fields' = 'matched';
-  let mathStatusMessage = 'Sum of lines matches grand total';
+  let mathStatus: 'matched' | 'mismatch' | 'missing_fields';
+  let mathStatusMessage: string;
 
-  if (missingAmountsCount > 0) {
+  if (isAnyAmountMissing || isSuggestedAmtPresent) {
     mathStatus = 'missing_fields';
-    mathStatusMessage = 'Needs Review: Missing item amounts';
-  } else if (hasMissingGrandTotal) {
+    mathStatusMessage = 'Missing item amounts';
+  } else if (hasMissingGrandTotal || hasMissingSubtotal) {
     mathStatus = 'missing_fields';
-    mathStatusMessage = 'Needs Review: Missing grand total';
+    mathStatusMessage = 'Needs manual review';
   } else {
-    // Both inclusive-tax and exclusive-tax validation sums are validated with 2.0 Rs tolerance
-    const gstPortion = computedGstTotal || 0;
-    const discountPortion = parseOptionalFloat(header.discount) || 0;
-    const computedGrandTotal = computedSubtotal + gstPortion - discountPortion;
-    const difference = Math.abs((parseOptionalFloat(header.grand_total) || 0) - computedGrandTotal);
-    const differenceExcludeTax = Math.abs((parseOptionalFloat(header.grand_total) || 0) - computedSubtotal);
+    const subVal = toNumberOrNull(header.subtotal);
+    const discVal = discountVal !== null ? discountVal : 0;
+    const gstTotal = computedGstTotal !== null ? computedGstTotal : 0;
+    const rOff = roundoff !== null ? roundoff : 0;
+    const grandVal = toNumberOrNull(header.grand_total) || 0;
 
-    const matches = difference <= 2.0 || differenceExcludeTax <= 2.0;
+    // Check 1: Vendor Formula (Subtotal - Discount + GST Total + Roundoff = Grand Total)
+    let isFormulaMatched = true;
+    if (subVal !== null) {
+      const calculatedGrand = subVal - discVal + gstTotal + rOff;
+      if (Math.abs(calculatedGrand - grandVal) > 2.0) {
+        isFormulaMatched = false;
+      }
+    }
 
-    if (matches) {
-      mathStatus = 'matched';
-      mathStatusMessage = 'Sum of lines matches grand total';
-    } else {
+    // Check 2: Line Total comparison with Subtotal
+    let isLineTotalMatched = true;
+    if (subVal !== null && computedSubtotal !== null) {
+      const diffWithSubtotal = Math.abs(computedSubtotal - subVal);
+      const diffWithTaxable = Math.abs(computedSubtotal - (subVal - discVal));
+      if (diffWithSubtotal > 2.0 && diffWithTaxable > 2.0) {
+        isLineTotalMatched = false;
+      }
+    }
+
+    if (!isFormulaMatched) {
+      if (subVal !== null && discountVal === null && Math.abs(subVal + gstTotal + rOff - grandVal) > 2.0) {
+        mathStatus = 'mismatch';
+        mathStatusMessage = 'Missing discount';
+      } else {
+        mathStatus = 'mismatch';
+        mathStatusMessage = 'Formula mismatch';
+      }
+    } else if (!isLineTotalMatched) {
       mathStatus = 'mismatch';
-      mathStatusMessage = 'Items sum mismatch';
+      mathStatusMessage = 'Line total differs from subtotal';
+    } else {
+      mathStatus = 'matched';
+      mathStatusMessage = 'Matched';
     }
   }
 
@@ -570,14 +768,14 @@ export const InvoiceReviewPage: React.FC = () => {
 
       // 3. Save SKUs to local Inventory database (safe conversion to avoid NaNs)
       const storedInventory = localStorage.getItem('pharmaflow_inventory');
-      let inventory = storedInventory ? JSON.parse(storedInventory) : [];
+      const inventory = storedInventory ? JSON.parse(storedInventory) : [];
 
       lineItems.forEach((item) => {
         if (!item.product_name.trim()) return;
 
-        const qty = parseFloat(getLineItemQty(item) as any) || 0;
-        const mrp = parseFloat(getLineItemMRP(item) as any) || 0;
-        const gst = parseFloat(item.gst_percent as any) || 0;
+        const totalQty = getReceivedQty(item);
+        const mrp = item.mrp || 0;
+        const gst = item.gst_percent || 0;
 
         // Check if matching SKU is already in inventory
         const existingIdx = inventory.findIndex(
@@ -587,7 +785,7 @@ export const InvoiceReviewPage: React.FC = () => {
         );
 
         if (existingIdx >= 0) {
-          inventory[existingIdx].quantity += qty;
+          inventory[existingIdx].quantity += totalQty;
           inventory[existingIdx].source_invoice = header.invoice_number || runId || 'Unknown';
         } else {
           inventory.push({
@@ -595,7 +793,7 @@ export const InvoiceReviewPage: React.FC = () => {
             product: item.product_name,
             batch: item.batch || 'N/A',
             expiry: item.expiry || 'N/A',
-            quantity: qty,
+            quantity: totalQty,
             mrp: mrp || parseFloat(item.rate as any) || 0,
             gst: gst,
             source_invoice: header.invoice_number || runId || 'Unknown'
@@ -623,12 +821,12 @@ export const InvoiceReviewPage: React.FC = () => {
         item.expiry,
         item.hsn,
         item.pack,
-        getLineItemQty(item),
-        getLineItemMRP(item),
+        getBilledQty(item),
+        item.mrp,
         item.rate,
         item.discount,
         item.gst_percent,
-        getLineItemAmount(item)
+        getItemAmount(item)
       ]
         .map((val) => `"${String(val ?? '').replace(/"/g, '""')}"`)
         .join(',');
@@ -709,7 +907,10 @@ export const InvoiceReviewPage: React.FC = () => {
           
           {/* Badge: Critical Missing Fields Count */}
           {getMissingFieldsCount() > 0 && (
-            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 animate-pulse flex items-center space-x-1">
+            <span
+              onClick={handleScrollToFirstMissing}
+              className="px-2.5 py-1 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 animate-pulse flex items-center space-x-1 cursor-pointer hover:bg-red-100 transition-colors"
+            >
               <AlertTriangle size={10} />
               <span>Missing Fields: {getMissingFieldsCount()}</span>
             </span>
@@ -723,6 +924,12 @@ export const InvoiceReviewPage: React.FC = () => {
           >
             <FileSpreadsheet size={14} className="text-green-600" />
             <span>Export Excel</span>
+          </button>
+          <button
+            onClick={handleSaveDraft}
+            className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
+          >
+            Save Draft
           </button>
           <button
             onClick={handleMarkAsVerified}
@@ -744,29 +951,46 @@ export const InvoiceReviewPage: React.FC = () => {
             <div className="flex items-center space-x-2 bg-slate-50 p-1 rounded-lg border border-gray-200">
               <button
                 onClick={() => setZoom((z) => Math.min(3, z + 0.15))}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors"
+                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
                 title="Zoom In"
               >
                 <ZoomIn size={14} />
               </button>
               <button
-                onClick={() => setZoom((z) => Math.max(0.5, z - 0.15))}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors"
+                onClick={() => {
+                  setZoom((z) => {
+                    const newZoom = Math.max(0.5, z - 0.15);
+                    if (newZoom <= 1) {
+                      setPanX(0);
+                      setPanY(0);
+                    }
+                    return newZoom;
+                  });
+                }}
+                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
                 title="Zoom Out"
               >
                 <ZoomOut size={14} />
               </button>
               <button
-                onClick={() => setZoom(1)}
-                className="text-[10px] font-bold text-gray-500 px-1 hover:text-gray-800"
+                onClick={() => {
+                  setZoom(1);
+                  setPanX(0);
+                  setPanY(0);
+                }}
+                className="text-[10px] font-bold text-gray-500 px-1 hover:text-gray-800 cursor-pointer"
                 title="Reset Zoom"
               >
                 100%
               </button>
               <div className="w-px h-3 bg-gray-200" />
               <button
-                onClick={() => setRotation((r) => (r + 90) % 360)}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors"
+                onClick={() => {
+                  setRotation((r) => (r + 90) % 360);
+                  setPanX(0);
+                  setPanY(0);
+                }}
+                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
                 title="Rotate 90°"
               >
                 <RotateCw size={14} />
@@ -775,11 +999,17 @@ export const InvoiceReviewPage: React.FC = () => {
           </div>
 
           {/* Scanner Viewport */}
-          <div className="bg-[#f8fafc] border border-slate-100 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center p-4 relative custom-scrollbar">
+          <div 
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            className={`bg-[#f8fafc] border border-slate-100 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center p-4 relative custom-scrollbar ${getCursorClass()}`}
+          >
             <div 
-              className="transition-transform duration-200 flex items-center justify-center origin-center"
+              className={`flex items-center justify-center origin-center ${isDragging ? '' : 'transition-transform duration-200'}`}
               style={{
-                transform: `scale(${zoom}) rotate(${rotation}deg)`
+                transform: `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`
               }}
             >
               <img
@@ -795,12 +1025,12 @@ export const InvoiceReviewPage: React.FC = () => {
 
           <div className="text-[10px] text-gray-400 flex items-center space-x-1">
             <Info size={12} className="text-gray-400" />
-            <span>Mouse scroll and drag inside the panel is disabled. Use toolbar buttons to zoom/rotate.</span>
+            <span>Zoom in to drag/pan the invoice. Use toolbar buttons to zoom/rotate.</span>
           </div>
         </div>
 
-        {/* Right Extracted Editor Panel (Col Span 7) with absolute slide-drawer container */}
-        <div className="lg:col-span-7 bg-white rounded-2xl border border-[#e2e8f0] shadow-sm flex flex-col justify-between overflow-hidden relative">
+        {/* Right Invoice Details and Totals Panel */}
+        <div className="lg:col-span-7 bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden relative">
           <div className="p-6 space-y-6">
             
             {/* 1. Header Metadata Section */}
@@ -814,6 +1044,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 <div className="space-y-1">
                   <span className="text-[10px] font-semibold text-gray-400 block">Invoice Date *</span>
                   <input
+                    id="header-invoice_date"
                     type="text"
                     value={header.invoice_date}
                     placeholder="—"
@@ -828,6 +1059,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 <div className="space-y-1">
                   <span className="text-[10px] font-semibold text-gray-400 block">Invoice Number *</span>
                   <input
+                    id="header-invoice_number"
                     type="text"
                     value={header.invoice_number}
                     placeholder="—"
@@ -842,6 +1074,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 <div className="space-y-1">
                   <span className="text-[10px] font-semibold text-gray-400 block">Seller *</span>
                   <input
+                    id="header-seller_name"
                     type="text"
                     value={header.seller_name}
                     placeholder="—"
@@ -856,6 +1089,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 <div className="space-y-1">
                   <span className="text-[10px] font-semibold text-gray-400 block">Buyer</span>
                   <input
+                    id="header-buyer_name"
                     type="text"
                     value={header.buyer_name}
                     placeholder="—"
@@ -868,6 +1102,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 <div className="space-y-1">
                   <span className="text-[10px] font-semibold text-gray-400 block">Grand Total *</span>
                   <input
+                    id="header-grand_total"
                     type="number"
                     step="any"
                     value={header.grand_total ?? ''}
@@ -881,229 +1116,96 @@ export const InvoiceReviewPage: React.FC = () => {
               </div>
             </div>
 
-            {/* 2. Line Items Table */}
+            {/* 2. Standardized Totals Breakdown Card */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between border-b border-gray-100 pb-2">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                  Line Items ({lineItems.length})
-                </h3>
-                <button
-                  onClick={handleAddRow}
-                  className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1.5 cursor-pointer"
-                >
-                  <Plus size={14} />
-                  <span>Add Row</span>
-                </button>
-              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 mt-6">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                    Totals Breakdown
+                  </h4>
+                  <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">
+                    Standardized Formula
+                  </span>
+                </div>
 
-              {/* Simplified Table Container (only Product Name, HSN, Qty, MRP, Amount, Action) */}
-              <div className="border border-[#e2e8f0] rounded-xl overflow-hidden max-h-[350px] overflow-y-auto custom-scrollbar">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead className="bg-[#f8fafc] border-b border-[#e2e8f0] text-gray-500 font-semibold text-[10px] uppercase tracking-wider sticky top-0 z-10">
-                    <tr>
-                      <th className="p-3 pl-4" style={{ width: '40%' }}>Product Name</th>
-                      <th className="p-3" style={{ width: '14%' }}>HSN</th>
-                      <th className="p-3 text-right" style={{ width: '10%' }}>Qty</th>
-                      <th className="p-3 text-right" style={{ width: '14%' }}>MRP</th>
-                      <th className="p-3 text-right" style={{ width: '16%' }}>Amount</th>
-                      <th className="p-3 text-center pr-4" style={{ width: '6%' }}>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#e2e8f0] bg-white">
-                    {lineItems.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="text-center py-12 text-gray-400 font-medium">
-                          No line items found. Click "Add Row" to append items.
-                        </td>
-                      </tr>
-                    ) : (
-                      lineItems.map((item) => {
-                        return (
-                          <tr
-                            key={item.id}
-                            className={`hover:bg-[#f8fafc]/50 transition-colors ${
-                              isCriticalItemMissing(item, 'product_name') ||
-                              isCriticalItemMissing(item, 'hsn') ||
-                              isCriticalItemMissing(item, 'quantity') ||
-                              isCriticalItemMissing(item, 'amount')
-                                ? 'bg-amber-50/10'
-                                : ''
-                            }`}
-                          >
-                            {/* Product Name */}
-                            <td className="p-2 pl-4">
-                              <input
-                                type="text"
-                                value={item.product_name}
-                                placeholder="—"
-                                onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
-                                className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                                  isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                                }`}
-                              />
-                            </td>
-
-                            {/* HSN */}
-                            <td className="p-2">
-                              <input
-                                type="text"
-                                value={item.hsn}
-                                placeholder="—"
-                                onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
-                                className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                                  isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                                }`}
-                              />
-                            </td>
-
-                            {/* Qty */}
-                            <td className="p-2 text-right">
-                              <input
-                                type="number"
-                                value={getLineItemQty(item) ?? ''}
-                                placeholder="—"
-                                onChange={(e) => handleItemChange(item.id, 'quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
-                                className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                                  isCriticalItemMissing(item, 'quantity') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                                }`}
-                              />
-                            </td>
-
-                            {/* MRP */}
-                            <td className="p-2 text-right">
-                              <input
-                                type="number"
-                                step="any"
-                                value={getLineItemMRP(item) ?? ''}
-                                placeholder="—"
-                                onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
-                                className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                                  isCriticalItemMissing(item, 'mrp') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                                }`}
-                              />
-                            </td>
-
-                            {/* Amount */}
-                            <td className="p-2 text-right font-semibold">
-                              <input
-                                type="number"
-                                step="any"
-                                value={getLineItemAmount(item) ?? ''}
-                                placeholder="—"
-                                onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
-                                className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-semibold ${
-                                  isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                                }`}
-                              />
-                            </td>
-
-                            {/* Action (Details Panel & Delete) */}
-                            <td className="p-2 text-center pr-4">
-                              <div className="flex items-center justify-center space-x-1.5">
-                                <button
-                                  onClick={() => setSelectedItemId(item.id)}
-                                  className="px-2.5 py-1.5 bg-[#f4f5fa] hover:bg-[#e2e8f0] text-[#1b5dfc] rounded-lg transition-colors cursor-pointer text-xs font-semibold"
-                                  title="View/Edit Secondary Fields"
-                                >
-                                  Details
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteRow(item.id)}
-                                  className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"
-                                  title="Delete Row"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
+                {/* Formula Display */}
+                <div className="bg-white border border-slate-100 rounded-lg p-3 text-center shadow-sm">
+                  <span className="text-[10px] text-gray-400 font-semibold block mb-1.5 uppercase tracking-wider">Formula</span>
+                  <div className="text-xs sm:text-sm font-bold text-gray-700 flex flex-wrap items-center justify-center gap-1">
+                    <span>{formatCurrencyOrDash(header.subtotal)}</span>
+                    <span className="text-gray-400 font-normal text-[10px]">(Subtotal)</span>
+                    <span className="mx-1 text-gray-400">-</span>
+                    <span className={discountVal !== null && discountVal > 0 ? "text-red-500" : "text-gray-700"}>
+                      {formatCurrencyOrDash(discountVal)}
+                    </span>
+                    <span className="text-gray-400 font-normal text-[10px]">(Discount)</span>
+                    <span className="mx-1 text-gray-400">+</span>
+                    <span className="text-green-600">{formatCurrencyOrDash(computedGstTotal)}</span>
+                    <span className="text-gray-400 font-normal text-[10px]">(GST Total)</span>
+                    {roundoff !== null && roundoff !== 0 && (
+                      <>
+                        <span className="mx-1 text-gray-400">{roundoff >= 0 ? '+' : '-'}</span>
+                        <span className="text-gray-600">{formatCurrencyOrDash(Math.abs(roundoff))}</span>
+                        <span className="text-gray-400 font-normal text-[10px]">(Adjustment)</span>
+                      </>
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-          </div>
-
-          {/* Sticky Totals Footer Summary Bar */}
-          <div className="bg-[#f8fafc] border-t border-[#e2e8f0] p-6 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-6 z-10">
-            
-            {/* 1. Subtotal / GST Totals */}
-            <div className="flex flex-wrap items-center gap-6">
-              <div className="space-y-0.5">
-                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Subtotal</span>
-                <span className="text-sm font-bold text-[#0f172a]">{formatCurrency(header.subtotal)}</span>
-              </div>
-
-              <div className="space-y-0.5">
-                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Line Total</span>
-                <span className="text-sm font-bold text-gray-500">{formatCurrency(computedSubtotal)}</span>
-              </div>
-
-              {header.discount !== null && header.discount !== 0 && (
-                <div className="space-y-0.5">
-                  <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Discount</span>
-                  <span className="text-sm font-bold text-red-600">-{formatCurrency(header.discount)}</span>
+                    <span className="mx-2 text-gray-400">=</span>
+                    <span className="text-[#1b5dfc] font-extrabold text-base">{formatCurrencyOrDash(header.grand_total)}</span>
+                  </div>
                 </div>
-              )}
-              
-              <div className="space-y-0.5">
-                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">GST Total</span>
-                <span className="text-sm font-bold text-[#0f172a]">{formatCurrency(computedGstTotal)}</span>
-              </div>
 
-              <div className="space-y-0.5">
-                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Grand Total</span>
-                <span className="text-base font-extrabold text-[#1b5dfc]">{formatCurrency(header.grand_total)}</span>
-              </div>
-            </div>
+                {/* Totals Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs pt-1">
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Subtotal</span>
+                    <span className="text-sm font-bold text-gray-900">{formatCurrencyOrDash(header.subtotal)}</span>
+                  </div>
 
-            {/* 2. Math status indicators & verify actions */}
-            <div className="flex flex-wrap items-center gap-4">
-              
-              {/* Math status badge */}
-              <div
-                className={`flex items-center space-x-1.5 px-3 py-2 rounded-xl text-[10px] font-bold ${
-                  mathStatus === 'matched'
-                    ? 'bg-green-50 text-green-700 border border-green-200'
-                    : 'bg-amber-50 text-amber-700 border border-amber-200'
-                }`}
-              >
-                <Calculator size={14} className={mathStatus === 'matched' ? 'text-green-600' : 'text-amber-600'} />
-                <div className="leading-tight text-left">
-                  <span className="block font-bold">
-                    {mathStatus === 'matched' ? 'Math Status: Matched' : 'Math Status: Needs Review'}
-                  </span>
-                  <span className="block font-normal text-[9px] text-gray-500">
-                    {mathStatusMessage}
-                  </span>
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Discount</span>
+                    <span className="text-sm font-bold text-red-500">{formatCurrencyOrDash(discountVal)}</span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">GST Total</span>
+                    <span className="text-sm font-bold text-gray-900">{formatCurrencyOrDash(computedGstTotal)}</span>
+                    {hasGstValues && (
+                      <div className="text-[9px] text-gray-400 leading-tight space-y-0.5 mt-1">
+                        {header.cgst !== null && <div>CGST: {formatCurrencyOrDash(header.cgst)}</div>}
+                        {header.sgst !== null && <div>SGST: {formatCurrencyOrDash(header.sgst)}</div>}
+                        {header.igst !== null && <div>IGST: {formatCurrencyOrDash(header.igst)}</div>}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Grand Total</span>
+                    <span className="text-sm font-extrabold text-[#1b5dfc]">{formatCurrencyOrDash(header.grand_total)}</span>
+                  </div>
+
+                  {/* Line Total (Separate) */}
+                  <div className="space-y-1 border-t border-slate-200 pt-3 col-span-2">
+                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Line Items Total</span>
+                    <span className="text-sm font-bold text-gray-600">{formatCurrencyOrDash(computedSubtotal)}</span>
+                    <span className="text-[9px] text-gray-400 block">Sum of item amounts listed in the table.</span>
+                  </div>
+
+                  {/* Roundoff / Adjustment (if present) */}
+                  {roundoff !== null && roundoff !== 0 && (
+                    <div className="space-y-1 border-t border-slate-200 pt-3 col-span-2">
+                      <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Adjustment / Roundoff</span>
+                      <span className="text-sm font-bold text-gray-600">{formatCurrencyOrDash(roundoff)}</span>
+                      <span className="text-[9px] text-gray-400 block">Extracted from raw engine metadata.</span>
+                    </div>
+                  )}
                 </div>
               </div>
-
-              {/* Controls */}
-              <div className="flex items-center space-x-2 shrink-0">
-                <button
-                  onClick={handleSaveDraft}
-                  className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2.5 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
-                >
-                  Save Draft
-                </button>
-                <button
-                  onClick={handleMarkAsVerified}
-                  className="bg-[#1b5dfc] hover:bg-[#154ecb] text-white font-semibold px-4 py-2.5 rounded-xl text-xs shadow-md shadow-blue-500/10 transition-colors cursor-pointer"
-                >
-                  Mark as Verified
-                </button>
-              </div>
-
             </div>
 
           </div>
 
           {/* Slide-over Side Drawer details panel for secondary line-item attributes */}
-          <div className={`absolute top-0 right-0 h-full w-full sm:w-[450px] bg-white border-l border-gray-200 shadow-2xl z-30 transition-transform duration-300 transform flex flex-col ${selectedItemId ? 'translate-x-0' : 'translate-x-full'}`}>
+          <div className={`fixed top-0 right-0 h-screen w-full sm:w-[450px] bg-white border-l border-gray-200 shadow-2xl z-50 transition-transform duration-300 transform flex flex-col ${selectedItemId ? 'translate-x-0' : 'translate-x-full'}`}>
             {/* Drawer Header */}
             <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-slate-50">
               <div>
@@ -1166,13 +1268,15 @@ export const InvoiceReviewPage: React.FC = () => {
 
                   {/* Batch */}
                   <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Batch Number</label>
+                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Batch Number *</label>
                     <input
                       type="text"
                       value={selectedItem.batch || ''}
                       onChange={(e) => handleItemChange(selectedItem.id, 'batch', e.target.value)}
                       placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
+                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                        isCriticalItemMissing(selectedItem, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                      }`}
                     />
                   </div>
 
@@ -1188,12 +1292,13 @@ export const InvoiceReviewPage: React.FC = () => {
                     />
                   </div>
 
-                  {/* Quantity */}
+                  {/* Billed Qty */}
                   <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Quantity *</label>
+                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Billed Qty *</label>
                     <input
+                      id={`item-quantity-${selectedItem.id}`}
                       type="number"
-                      value={getLineItemQty(selectedItem) ?? ''}
+                      value={getBilledQty(selectedItem) ?? ''}
                       onChange={(e) => handleItemChange(selectedItem.id, 'quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
                       placeholder="—"
                       className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
@@ -1202,16 +1307,30 @@ export const InvoiceReviewPage: React.FC = () => {
                     />
                   </div>
 
-                  {/* Free Quantity */}
+                  {/* Free Qty */}
                   <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Free Quantity</label>
+                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Free Qty</label>
                     <input
                       type="number"
-                      value={selectedItem.free_quantity ?? ''}
+                      value={getFreeQty(selectedItem) ?? ''}
                       onChange={(e) => handleItemChange(selectedItem.id, 'free_quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
                       placeholder="—"
                       className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
                     />
+                  </div>
+
+                  {/* Total Received Qty (read-only) */}
+                  <div className="col-span-2 space-y-1">
+                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Total Received Qty</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={getReceivedQty(selectedItem)}
+                      className="w-full bg-slate-100 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-600 font-semibold focus:outline-none"
+                    />
+                    <span className="text-[10px] text-gray-500 block mt-1">
+                      Free quantity is included in received stock but not billed amount.
+                    </span>
                   </div>
 
                   {/* MRP */}
@@ -1220,7 +1339,7 @@ export const InvoiceReviewPage: React.FC = () => {
                     <input
                       type="number"
                       step="any"
-                      value={getLineItemMRP(selectedItem) ?? ''}
+                      value={selectedItem.mrp ?? ''}
                       onChange={(e) => handleItemChange(selectedItem.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
                       placeholder="—"
                       className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
@@ -1271,7 +1390,7 @@ export const InvoiceReviewPage: React.FC = () => {
                     <input
                       type="number"
                       step="any"
-                      value={getLineItemAmount(selectedItem) ?? ''}
+                      value={getItemAmount(selectedItem) ?? ''}
                       onChange={(e) => handleItemChange(selectedItem.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
                       placeholder="—"
                       className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs font-semibold text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
@@ -1286,6 +1405,184 @@ export const InvoiceReviewPage: React.FC = () => {
 
         </div>
 
+      </div>
+
+      {/* Full-width Line Items Review table */}
+      <div className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden">
+        <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+              Line Items Review ({lineItems.length})
+            </h3>
+          </div>
+          <button
+            onClick={handleAddRow}
+            className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1.5 cursor-pointer"
+          >
+            <Plus size={14} />
+            <span>Add Row</span>
+          </button>
+        </div>
+
+        <div className="overflow-x-auto custom-scrollbar">
+          <div className="max-h-[560px] overflow-y-auto custom-scrollbar">
+            <table className="w-full min-w-[1160px] text-left text-xs border-collapse">
+              <thead className="bg-[#f8fafc] border-b border-[#e2e8f0] text-gray-500 font-semibold text-[10px] uppercase tracking-wider sticky top-0 z-10">
+                <tr>
+                  <th className="p-3 pl-5 text-center min-w-[64px]">Sr.</th>
+                  <th className="p-3 pl-5 min-w-[320px]">Product Name</th>
+                  <th className="p-3 min-w-[140px]">Batch No.</th>
+                  <th className="p-3 min-w-[110px]">HSN</th>
+                  <th className="p-3 text-right min-w-[135px]">Qty</th>
+                  <th className="p-3 text-right min-w-[115px]">MRP</th>
+                  <th className="p-3 text-right min-w-[130px]">Amount</th>
+                  <th className="p-3 text-center pr-5 min-w-[120px]">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#e2e8f0] bg-white">
+                {lineItems.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="text-center py-12 text-gray-400 font-medium">
+                      No line items found. Click "Add Row" to append items.
+                    </td>
+                  </tr>
+                ) : (
+                  lineItems.map((item, index) => {
+                    const billedQty = getBilledQty(item);
+                    const freeQty = getFreeQty(item);
+                    const hasFreeQty = freeQty !== null;
+                    const receivedQty = billedQty !== null ? billedQty + (freeQty ?? 0) : null;
+
+                    return (
+                      <tr
+                        key={item.id}
+                        className={`hover:bg-[#f8fafc]/70 transition-colors ${
+                          isCriticalItemMissing(item, 'product_name') ||
+                          isCriticalItemMissing(item, 'batch') ||
+                          isCriticalItemMissing(item, 'hsn') ||
+                          isCriticalItemMissing(item, 'quantity') ||
+                          isCriticalItemMissing(item, 'amount')
+                            ? 'bg-amber-50/20'
+                            : ''
+                        }`}
+                      >
+                        <td className="p-3 pl-5 align-top text-center">
+                          <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg bg-slate-50 px-2 text-xs font-bold text-gray-500">
+                            {index + 1}
+                          </span>
+                        </td>
+
+                        <td className="p-3 pl-5 align-top">
+                          <input
+                            id={`item-name-${item.id}`}
+                            type="text"
+                            value={item.product_name}
+                            placeholder="—"
+                            onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        </td>
+
+                        <td className="p-3 align-top">
+                          <input
+                            id={`item-batch-${item.id}`}
+                            type="text"
+                            value={item.batch}
+                            placeholder="—"
+                            onChange={(e) => handleItemChange(item.id, 'batch', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        </td>
+
+                        <td className="p-3 align-top">
+                          <input
+                            id={`item-hsn-${item.id}`}
+                            type="text"
+                            value={item.hsn}
+                            placeholder="—"
+                            onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        </td>
+
+                        <td className="p-3 align-top text-right">
+                          <div className="space-y-1">
+                            <div
+                              className={`text-sm ${
+                                billedQty === null ? 'text-amber-700 font-bold' : 'text-[#0f172a] font-extrabold'
+                              }`}
+                            >
+                              {hasFreeQty ? formatQuantityOrDash(receivedQty) : formatQuantityOrDash(billedQty)}
+                            </div>
+                            {hasFreeQty && (
+                              <div className="text-[10px] text-gray-500 whitespace-nowrap">
+                                {formatQuantityOrDash(billedQty)} billed + {formatQuantityOrDash(freeQty)} free
+                              </div>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="p-3 align-top text-right">
+                          <input
+                            id={`item-mrp-${item.id}`}
+                            type="number"
+                            step="any"
+                            value={item.mrp ?? ''}
+                            placeholder="—"
+                            onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
+                            className="w-full min-h-[38px] bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
+                          />
+                        </td>
+
+                        <td className="p-3 align-top text-right">
+                          <input
+                            id={`item-amount-${item.id}`}
+                            type="number"
+                            step="any"
+                            value={getItemAmount(item) ?? ''}
+                            placeholder="—"
+                            onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-bold ${
+                              isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                          {item.is_suggested_amount && (
+                            <div className="text-[10px] text-amber-600 mt-1 font-semibold">Suggested</div>
+                          )}
+                        </td>
+
+                        <td className="p-3 pr-5 align-top text-center">
+                          <div className="flex items-center justify-center space-x-1.5">
+                            <button
+                              onClick={() => setSelectedItemId(item.id)}
+                              className="px-3 py-2 bg-[#f4f5fa] hover:bg-[#e2e8f0] text-[#1b5dfc] rounded-lg transition-colors cursor-pointer text-xs font-semibold"
+                              title="View/Edit Secondary Fields"
+                            >
+                              Details
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRow(item.id)}
+                              className="p-2 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"
+                              title="Delete Row"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   );

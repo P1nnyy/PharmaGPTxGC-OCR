@@ -1,5 +1,5 @@
 import pytest
-from extraction.normalizers.azure_invoice_normalizer import normalize_azure_invoice
+from extraction.normalizers.azure_invoice_normalizer import normalize_azure_invoice, parse_split_quantity
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
 
 def test_detect_item_table_by_headers():
@@ -207,6 +207,48 @@ def test_footer_table_extraction():
     assert invoice.sgst == 2.50
     assert invoice.cgst == 2.50
     assert invoice.grand_total == 100.00
+
+def test_footer_discount_alias_dis_amt_extraction():
+    """Verify footer discount aliases like DIS AMT hydrate invoice.discount."""
+    raw_data = {
+        "modelId": "prebuilt-invoice",
+        "tables": [
+            {
+                "rowCount": 2,
+                "columnCount": 4,
+                "cells": [
+                    {"rowIndex": 0, "columnIndex": 0, "content": "Product"},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "Qty"},
+                    {"rowIndex": 0, "columnIndex": 2, "content": "Batch"},
+                    {"rowIndex": 0, "columnIndex": 3, "content": "Amount"},
+                    {"rowIndex": 1, "columnIndex": 0, "content": "RAMA MED"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "1"},
+                    {"rowIndex": 1, "columnIndex": 2, "content": "RM1"},
+                    {"rowIndex": 1, "columnIndex": 3, "content": "100.00"},
+                ],
+            },
+            {
+                "rowCount": 4,
+                "columnCount": 2,
+                "cells": [
+                    {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "100.00"},
+                    {"rowIndex": 1, "columnIndex": 0, "content": "DIS AMT"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "5.50"},
+                    {"rowIndex": 2, "columnIndex": 0, "content": "SGST"},
+                    {"rowIndex": 2, "columnIndex": 1, "content": "2.75"},
+                    {"rowIndex": 3, "columnIndex": 0, "content": "GRAND TOTAL"},
+                    {"rowIndex": 3, "columnIndex": 1, "content": "100.00"},
+                ],
+            },
+        ],
+    }
+
+    invoice = normalize_azure_invoice(raw_data)
+    assert invoice.subtotal == 100.0
+    assert invoice.discount == 5.5
+    assert invoice.sgst == 2.75
+    assert invoice.grand_total == 100.0
 
 def test_no_item_table_resilience():
     """Verify normalizer handles absence of valid item table gracefully."""
@@ -567,3 +609,122 @@ def test_mahajan_medical_agencies_format():
     assert item2.rate == 32.48
     assert item2.amount == 97.44
 
+def test_split_quantity_parsing():
+    """Verify that billed quantity and free quantity columns are mapped and parsed separately (with decimal and noise support)."""
+    raw_data = {
+        "modelId": "prebuilt-invoice",
+        "tables": [
+            {
+                "rowCount": 3,
+                "columnCount": 6,
+                "cells": [
+                    # Row 0 - Headers
+                    {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "Sale Qty"},
+                    {"rowIndex": 0, "columnIndex": 2, "content": "Free Qty"},
+                    {"rowIndex": 0, "columnIndex": 3, "content": "Total Qty"},
+                    {"rowIndex": 0, "columnIndex": 4, "content": "Rate"},
+                    {"rowIndex": 0, "columnIndex": 5, "content": "Amount"},
+
+                    # Row 1 - MEDICINE A (Split Quantity)
+                    {"rowIndex": 1, "columnIndex": 0, "content": "MEDICINE A"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "5.50"},
+                    {"rowIndex": 1, "columnIndex": 2, "content": "0.50"},
+                    {"rowIndex": 1, "columnIndex": 3, "content": "6,00"},
+                    {"rowIndex": 1, "columnIndex": 4, "content": "100.00"},
+                    {"rowIndex": 1, "columnIndex": 5, "content": "550.00"},
+
+                    # Row 2 - MEDICINE B (Billed Quantity only)
+                    {"rowIndex": 2, "columnIndex": 0, "content": "MEDICINE B"},
+                    {"rowIndex": 2, "columnIndex": 1, "content": "10"},
+                    {"rowIndex": 2, "columnIndex": 2, "content": ""},
+                    {"rowIndex": 2, "columnIndex": 3, "content": "10"},
+                    {"rowIndex": 2, "columnIndex": 4, "content": "20.00"},
+                    {"rowIndex": 2, "columnIndex": 5, "content": "200.00"},
+                ]
+            }
+        ]
+    }
+    invoice = normalize_azure_invoice(raw_data)
+    assert len(invoice.line_items) == 2
+
+    # MED A
+    item1 = invoice.line_items[0]
+    assert item1.name == "MEDICINE A"
+    assert item1.quantity == 5.5
+    assert item1.free_quantity == 0.5
+    assert item1.amount == 550.0
+
+    # MED B
+    item2 = invoice.line_items[1]
+    assert item2.name == "MEDICINE B"
+    assert item2.quantity == 10
+    assert item2.free_quantity is None
+    assert item2.amount == 200.0
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected_quantity", "expected_free_quantity"),
+    [
+        ("5.50 + 0.50", 5.5, 0.5),
+        ("2+.5", 2.0, 0.5),
+        ("5,50 + 0,50", 5.5, 0.5),
+        ("2\n+\n1", 2.0, 1.0),
+        ("2.75\n+ .25", 2.75, 0.25),
+    ],
+)
+def test_parse_split_quantity_helper(raw_value, expected_quantity, expected_free_quantity):
+    parsed = parse_split_quantity(raw_value)
+    assert parsed == {
+        "quantity": expected_quantity,
+        "free_quantity": expected_free_quantity,
+    }
+
+
+def test_parse_split_quantity_helper_does_not_split_plain_decimal():
+    assert parse_split_quantity("2.75") is None
+
+
+def test_same_cell_split_quantity_is_parsed_into_billed_and_free_quantity():
+    raw_data = {
+        "modelId": "prebuilt-invoice",
+        "tables": [
+            {
+                "rowCount": 2,
+                "columnCount": 8,
+                "cells": [
+                    # Row 0 - Headers
+                    {"rowIndex": 0, "columnIndex": 0, "content": "S."},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "Qty."},
+                    {"rowIndex": 0, "columnIndex": 2, "content": "Product Name"},
+                    {"rowIndex": 0, "columnIndex": 3, "content": "Batch"},
+                    {"rowIndex": 0, "columnIndex": 4, "content": "HSN"},
+                    {"rowIndex": 0, "columnIndex": 5, "content": "M.R.P"},
+                    {"rowIndex": 0, "columnIndex": 6, "content": "Rate"},
+                    {"rowIndex": 0, "columnIndex": 7, "content": "Amount"},
+
+                    # Row 1 - Same-cell split quantity
+                    {"rowIndex": 1, "columnIndex": 0, "content": "1"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "2.75 + .25"},
+                    {"rowIndex": 1, "columnIndex": 2, "content": "ARBITEL AM"},
+                    {"rowIndex": 1, "columnIndex": 3, "content": "ARHS0076"},
+                    {"rowIndex": 1, "columnIndex": 4, "content": "30049079"},
+                    {"rowIndex": 1, "columnIndex": 5, "content": "262.50"},
+                    {"rowIndex": 1, "columnIndex": 6, "content": "200.00"},
+                    {"rowIndex": 1, "columnIndex": 7, "content": "550.06"},
+                ],
+            }
+        ],
+    }
+
+    invoice = normalize_azure_invoice(raw_data)
+    assert len(invoice.line_items) == 1
+
+    item = invoice.line_items[0]
+    assert item.name == "ARBITEL AM"
+    assert item.quantity == 2.75
+    assert item.free_quantity == 0.25
+    assert item.quantity + item.free_quantity == 3.0
+    assert item.amount == 550.06
+    assert item.amount != item.rate * (item.quantity + item.free_quantity)
+    assert item.hsn == "30049079"
+    assert item.batch == "ARHS0076"

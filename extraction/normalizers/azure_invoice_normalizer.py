@@ -73,6 +73,53 @@ def try_parse_float(val: Any) -> Optional[float]:
     except ValueError:
         return None
 
+def parse_split_quantity(value: Any) -> Optional[Dict[str, float]]:
+    """
+    Parses same-cell billed/free quantity expressions such as "2.75 + .25".
+    Only accepts an explicit plus sign between two numeric values.
+    """
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text or "+" not in text:
+        return None
+
+    normalized = re.sub(r'\s+', ' ', text)
+    number_pattern = r'(?:\d+(?:[.,]\d+)?|[.,]\d+)'
+    match = re.match(
+        rf'^[^\d.,]*({number_pattern})\s*\+\s*({number_pattern})[^\d.,]*$',
+        normalized
+    )
+    if not match:
+        return None
+
+    billed_qty = try_parse_float(match.group(1))
+    free_qty = try_parse_float(match.group(2))
+    if billed_qty is None or free_qty is None:
+        return None
+
+    return {
+        "quantity": billed_qty,
+        "free_quantity": free_qty,
+    }
+
+def is_discount_label(label: str) -> bool:
+    """Detects footer/header discount aliases without treating unrelated text as discount."""
+    normalized = re.sub(r'[^a-z0-9]+', ' ', label.lower()).strip()
+    aliases = {
+        "dis amt",
+        "disc amt",
+        "discount",
+        "discount amt",
+        "scheme discount",
+        "sch discount",
+        "oth disc amt",
+    }
+    if normalized in aliases:
+        return True
+    return "discount" in normalized or normalized.startswith("disc ") or normalized.startswith("dis ")
+
 def normalize_header(header_text: str) -> Optional[str]:
     """
     Normalizes Azure table header text to canonical column keys.
@@ -103,11 +150,11 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "quantity_total"
     if t == "t'es":
         return "quantity_tes"
-    if t in ["qty", "qty.", "quantity", "quant", "pes", "pcs", "pieces"]:
+    if t in ["qty", "qty.", "quantity", "quant", "pes", "pcs", "pieces", "bill qty", "billed qty", "sale qty", "sold qty"]:
         return "quantity_pcs"
     
     # 5.5 Free Quantity column mapping
-    if t in ["free", "free qty", "free quantity", "free.qty", "free.quantity"]:
+    if t in ["free", "free qty", "free quantity", "free.qty", "free.quantity", "f.qty", "f qty", "scheme qty", "sch qty", "bonus qty", "fr", "foc"]:
         return "free_quantity"
     
     # 6. Batch column mapping
@@ -139,7 +186,7 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "sch_amt"
     if t == "dise amt":
         return "dise_amt"
-    if t in ["dis", "dis.", "disc", "disc.", "discount", "disc %", "discount %", "dis %", "disc amt", "discount amt"]:
+    if t in ["dis", "dis.", "disc", "disc.", "discount", "disc %", "discount %", "dis %", "dis amt", "disc amt", "discount amt", "scheme discount", "sch discount", "oth disc amt"]:
         return "discount"
     
     # 13. GST percent column mappings
@@ -185,6 +232,15 @@ def normalize_header_row(header_row: List[str]) -> List[Optional[str]]:
         full = re.sub(r'\s+', ' ', cell.lower().strip())
         cleaned_full.append(full)
         
+    # Determine if there is any free quantity column
+    has_free_column = False
+    for cell in header_row:
+        full = re.sub(r'\s+', ' ', cell.lower().strip())
+        norm = normalize_header(full)
+        if norm == "free_quantity":
+            has_free_column = True
+            break
+            
     # Determine if there is any explicit amount column
     has_explicit_amount = False
     for cell in header_row:
@@ -202,6 +258,14 @@ def normalize_header_row(header_row: List[str]) -> List[Optional[str]]:
         # 1. Batch header cleanup
         if "batch" in t or t.startswith("batch") or t.startswith("b.no") or "b.no" in t:
             col_names.append("batch")
+            continue
+            
+        # 1.5 Total Qty conditional mapping
+        if t in ["total qty", "total qty.", "total quantity"]:
+            if has_free_column:
+                col_names.append("quantity_total")
+            else:
+                col_names.append("quantity_pcs")
             continue
             
         # 2. Context-aware Value mapping
@@ -279,13 +343,13 @@ def score_footer_table(grid: List[List[str]]) -> int:
     Helps locate the totals section of the invoice.
     """
     score = 0
-    footer_keys = ["sub total", "subtotal", "grand total", "discount", "sgst", "cgst", "igst", "roundoff", "round off"]
+    footer_keys = ["sub total", "subtotal", "grand total", "discount", "disc amt", "dis amt", "sgst", "cgst", "igst", "roundoff", "round off"]
     for row in grid:
         if len(row) >= 2:
             lbl = row[0].lower().strip()
             val = row[1].strip()
             # If the first column contains a footer key and second column has content
-            if any(k in lbl for k in footer_keys) and val:
+            if (any(k in lbl for k in footer_keys) or is_discount_label(lbl)) and val:
                 score += 1
     return score
 
@@ -300,7 +364,7 @@ def parse_horizontal_summary_table(grid: List[List[str]]) -> Optional[Dict[str, 
         
     # Scan for a header row containing at least two core totals columns
     header_idx = None
-    target_terms = {"particulars", "gros ami", "gross amt", "sch amt", "trashle amt", "taxable amt", "net amt", "net payable"}
+    target_terms = {"particulars", "gros ami", "gross amt", "sch amt", "dis amt", "disc amt", "oth disc amt", "discount", "trashle amt", "taxable amt", "net amt", "net payable"}
     
     for r_idx, row in enumerate(grid):
         match_count = 0
@@ -347,7 +411,7 @@ def parse_horizontal_summary_table(grid: List[List[str]]) -> Optional[Dict[str, 
             
         if "gros" in c or "gross" in c:
             gross_vals.append(val)
-        elif "sch amt" in c or "oth disc" in c or "discount" in c or "disc amt" in c:
+        elif "sch amt" in c or "oth disc" in c or is_discount_label(c):
             disc_vals.append(val)
         elif "trashle" in c or "taxable" in c:
             taxable_vals.append(val)
@@ -515,7 +579,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                 val = try_parse_float(val_str)
                 if "sub total" in lbl or "subtotal" in lbl:
                     footer_data["subtotal"] = val
-                elif "discount" in lbl:
+                elif is_discount_label(lbl):
                     footer_data["discount"] = val
                 elif "sgst" in lbl:
                     footer_data["sgst"] = val
@@ -598,15 +662,41 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
             qty_raw = row_data.get("quantity")
             serial_raw = row_data.get("serial")
             
+            # Determine if free quantity column has value in row_data
+            has_free_in_row = "free_quantity" in row_data and row_data["free_quantity"] is not None and str(row_data["free_quantity"]).strip() != ""
+            
             quantity = None
-            if qty_total is not None and qty_total.strip():
-                quantity = extract_corrected_qty(qty_total, serial_raw)
-            elif qty_tes is not None and qty_tes.strip():
-                quantity = extract_corrected_qty(qty_tes, serial_raw)
-            elif qty_pcs is not None and qty_pcs.strip():
-                quantity = extract_corrected_qty(qty_pcs, serial_raw)
+            free_quantity = None
+            split_qty = None
+            for qty_candidate in [qty_pcs, qty_raw, qty_total, qty_tes]:
+                split_qty = parse_split_quantity(qty_candidate)
+                if split_qty:
+                    break
+
+            if split_qty:
+                quantity = split_qty["quantity"]
+                free_quantity = split_qty["free_quantity"]
             else:
-                quantity = extract_corrected_qty(qty_raw, serial_raw)
+                if has_free_in_row:
+                    # Prioritize standard billed/pcs qty column over combined/total qty column
+                    if qty_pcs is not None and qty_pcs.strip():
+                        quantity = extract_corrected_qty(qty_pcs, serial_raw)
+                    elif qty_raw is not None and qty_raw.strip():
+                        quantity = extract_corrected_qty(qty_raw, serial_raw)
+                    elif qty_total is not None and qty_total.strip():
+                        quantity = extract_corrected_qty(qty_total, serial_raw)
+                else:
+                    # Standard prioritization
+                    if qty_total is not None and qty_total.strip():
+                        quantity = extract_corrected_qty(qty_total, serial_raw)
+                    elif qty_tes is not None and qty_tes.strip():
+                        quantity = extract_corrected_qty(qty_tes, serial_raw)
+                    elif qty_pcs is not None and qty_pcs.strip():
+                        quantity = extract_corrected_qty(qty_pcs, serial_raw)
+                    else:
+                        quantity = extract_corrected_qty(qty_raw, serial_raw)
+
+                free_quantity = parse_decimal_safe(row_data.get("free_quantity"))
                 
             # Discount extraction adds SCH Amt and Dise Amt if both are present
             sch_val = try_parse_float(row_data.get("sch_amt"))
@@ -647,7 +737,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                 expiry=row_data.get("expiry") if row_data.get("expiry") else None,
                 hsn=row_data.get("hsn") if row_data.get("hsn") else None,
                 quantity=quantity,
-                free_quantity=parse_decimal_safe(row_data.get("free_quantity")),
+                free_quantity=free_quantity,
                 mrp=parse_decimal_safe(row_data.get("mrp")),
                 rate=parse_decimal_safe(row_data.get("rate")),
                 discount=discount_val,
