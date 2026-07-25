@@ -390,25 +390,34 @@ export const InvoiceReviewPage: React.FC = () => {
       setConfidence(Math.round((detail.confidence || 0.85) * 100));
       setRawEngineMetadata(detail.raw_engine_metadata || null);
 
+      const totalsObj = detail.invoice_totals || detail.metadata?.invoice_totals || detail.canonical_invoice?.totals || detail.metadata?.canonical_invoice?.totals || {};
+      const taxObj = detail.tax_summary || detail.metadata?.tax_summary || detail.tax || detail.metadata?.tax || {};
+      const canonicalHeader = detail.canonical_invoice?.header || detail.metadata?.canonical_invoice?.header || {};
+
       // Parse structured header fields without zero-defaulting
       setHeader({
-        invoice_number: parseOptionalString(detail.invoice_number || detail.metadata?.invoice_number),
-        invoice_date: parseOptionalString(detail.invoice_date || detail.metadata?.invoice_date),
-        seller_name: parseOptionalString(detail.seller_name || detail.metadata?.seller_name || detail.metadata?.supplier_name),
-        buyer_name: parseOptionalString(detail.buyer_name || detail.metadata?.buyer_name),
-        subtotal: parseOptionalFloat(detail.subtotal ?? detail.metadata?.subtotal),
-        discount: parseOptionalFloat(detail.discount ?? detail.metadata?.discount),
-        cgst: parseOptionalFloat(detail.cgst ?? detail.metadata?.tax?.cgst),
-        sgst: parseOptionalFloat(detail.sgst ?? detail.metadata?.tax?.sgst),
-        igst: parseOptionalFloat(detail.igst ?? detail.metadata?.tax?.igst),
-        grand_total: parseOptionalFloat(detail.grand_total ?? detail.metadata?.grand_total)
+        invoice_number: parseOptionalString(detail.invoice_number || detail.metadata?.invoice_number || totalsObj.invoice_number || canonicalHeader.invoice_number),
+        invoice_date: parseOptionalString(detail.invoice_date || detail.metadata?.invoice_date || totalsObj.invoice_date || canonicalHeader.invoice_date),
+        seller_name: parseOptionalString(detail.seller_name || detail.metadata?.seller_name || detail.metadata?.supplier_name || totalsObj.seller_name || canonicalHeader.supplier_name),
+        buyer_name: parseOptionalString(detail.buyer_name || detail.metadata?.buyer_name || totalsObj.buyer_name || canonicalHeader.buyer_name),
+        subtotal: parseOptionalFloat(detail.subtotal ?? detail.metadata?.subtotal ?? totalsObj.subtotal ?? canonicalHeader.subtotal),
+        discount: parseOptionalFloat(detail.discount ?? detail.metadata?.discount ?? totalsObj.discount ?? canonicalHeader.discount),
+        cgst: parseOptionalFloat(detail.cgst ?? detail.metadata?.tax?.cgst ?? taxObj.cgst ?? totalsObj.cgst ?? canonicalHeader.tax?.cgst),
+        sgst: parseOptionalFloat(detail.sgst ?? detail.metadata?.tax?.sgst ?? taxObj.sgst ?? totalsObj.sgst ?? canonicalHeader.tax?.sgst),
+        igst: parseOptionalFloat(detail.igst ?? detail.metadata?.tax?.igst ?? taxObj.igst ?? totalsObj.igst ?? canonicalHeader.tax?.igst),
+        grand_total: parseOptionalFloat(detail.grand_total ?? detail.metadata?.grand_total ?? totalsObj.grand_total ?? canonicalHeader.grand_total)
       });
 
-      // Parse structured line items (handling Azure DI & Legacy schemas)
+      // Parse structured line items (handling Azure DI, item_rows_clean, LLM & structured table schemas)
       let parsedItems: TableLineItem[] = [];
 
-      if (Array.isArray(detail.line_items) && detail.line_items.length > 0) {
-        parsedItems = detail.line_items.map((item: any, idx: number) => {
+      const rawLineItems = detail.line_items || detail.metadata?.line_items;
+      const rawLlmItems = detail.metadata?.llm_extraction?.items;
+      const cleanItemRows = detail.item_rows_clean || detail.metadata?.item_rows_clean;
+      const structTables = detail.structured_tables || detail.metadata?.structured_tables;
+
+      if (Array.isArray(rawLineItems) && rawLineItems.length > 0) {
+        parsedItems = rawLineItems.map((item: any, idx: number) => {
           const qty = toNumberOrNull(item.quantity !== undefined ? item.quantity : item.qty);
           const rate = toNumberOrNull(item.rate);
           const rawAmount = getAmountFromItem(item);
@@ -438,8 +447,7 @@ export const InvoiceReviewPage: React.FC = () => {
             is_suggested_amount: is_suggested_amount
           };
         });
-      } else if (detail.metadata?.llm_extraction?.items) {
-        const rawLlmItems = detail.metadata.llm_extraction.items;
+      } else if (Array.isArray(rawLlmItems) && rawLlmItems.length > 0) {
         parsedItems = rawLlmItems.map((item: any, idx: number) => {
           const qty = toNumberOrNull(item.qty !== undefined ? item.qty : item.quantity);
           const rate = toNumberOrNull(item.rate);
@@ -470,8 +478,39 @@ export const InvoiceReviewPage: React.FC = () => {
             is_suggested_amount: is_suggested_amount
           };
         });
-      } else if (Array.isArray(detail.structured_tables) && detail.structured_tables.length > 0) {
-        const mainTbl = selectMainTable(detail);
+      } else if (Array.isArray(cleanItemRows) && cleanItemRows.length > 0) {
+        parsedItems = cleanItemRows.map((item: any, idx: number) => {
+          const qty = toNumberOrNull(item.quantity !== undefined ? item.quantity : item.qty);
+          const rate = toNumberOrNull(item.rate);
+          const rawAmount = getAmountFromItem(item) ?? item.net_amt;
+          let amount = toNumberOrNull(rawAmount);
+          let is_suggested_amount = false;
+
+          if (amount === null && qty !== null && rate !== null) {
+            const disc = toNumberOrNull(item.discount) || 0;
+            amount = parseFloat((qty * rate - disc).toFixed(2));
+            is_suggested_amount = true;
+          }
+
+          return {
+            id: `item-${idx}`,
+            product_name: parseOptionalString(item.item_description || item.product_name || item.name || item.product || item.pcode),
+            batch: parseOptionalString(item.batch || item.batch_no),
+            expiry: parseOptionalString(item.expiry || item.expiry_date),
+            hsn: parseOptionalString(item.hsn || item.hsn_code),
+            pack: parseOptionalString(item.pack),
+            quantity: qty,
+            free_quantity: toNumberOrNull(item.free_quantity ?? item.free_qty),
+            mrp: toNumberOrNull(item.mrp),
+            rate: rate,
+            discount: toNumberOrNull(item.discount),
+            gst_percent: toNumberOrNull(item.gst_percent ?? item.gst),
+            amount: amount,
+            is_suggested_amount: is_suggested_amount
+          };
+        });
+      } else if (Array.isArray(structTables) && structTables.length > 0) {
+        const mainTbl = selectMainTable({ ...detail, structured_tables: structTables });
         if (mainTbl && Array.isArray(mainTbl.cells)) {
           const uniqueRows = Array.from(new Set(mainTbl.cells.map((c: any) => c.row_id || c.row_index || 0))).sort((a: any, b: any) => a - b);
           

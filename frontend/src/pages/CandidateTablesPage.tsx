@@ -38,8 +38,8 @@ export const CandidateTablesPage: React.FC = () => {
 	        const runData = await apiClient.getRun(activeId);
 	        setActiveRun(runData);
 	        const detail = getDetailsData(activeId);
-	        const unavailable = isSelectedTableUnavailable(detail) || runData.selected_table_available === false;
-	        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData.no_valid_table_candidate_reason || 'no_valid_table_candidate';
+	        const unavailable = isSelectedTableUnavailable(detail) || runData?.selected_table_available === false;
+	        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData?.no_valid_table_candidate_reason || 'no_valid_table_candidate';
 	        setSelectedUnavailableReason(
 	          unavailable
 	            ? (reason === 'no_valid_candidate' ? 'no_valid_table_candidate' : reason)

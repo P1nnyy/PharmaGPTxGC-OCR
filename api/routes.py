@@ -11,7 +11,6 @@ from core.logger import logger
 from models.schemas import HealthResponse, OCRResponse
 from services import cache_service, ocr_engine, spatial_reconstruction
 from services.error_handler import classify_error
-from services.llm_extractor import LLMExtractor
 
 from extraction.router import get_extraction_engine
 from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
@@ -121,11 +120,7 @@ async def upload_invoice(
                     )
                     logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
                     metadata.update(reconstruction_data)
-                    
-                if extract and "semantic_markdown" in metadata:
-                    extractor = LLMExtractor()
-                    extraction_json = extractor.extract(metadata["semantic_markdown"])
-                    metadata["llm_extraction"] = extraction_json
+
                     
                 return OCRResponse(
                     invoice_id=invoice_id,
@@ -158,11 +153,7 @@ async def upload_invoice(
                 )
                 logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
                 metadata.update(reconstruction_data)
-                
-            if extract and "semantic_markdown" in metadata:
-                extractor = LLMExtractor()
-                extraction_json = extractor.extract(metadata["semantic_markdown"])
-                metadata["llm_extraction"] = extraction_json
+
             
             return OCRResponse(
                 invoice_id=invoice_id,

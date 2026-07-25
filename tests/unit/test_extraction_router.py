@@ -5,10 +5,10 @@ from extraction.router import get_extraction_engine
 from extraction.engines.legacy_engine import LegacyExtractionEngine
 from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
 
-def test_router_defaults_to_legacy():
+def test_router_defaults_to_azure():
     with patch.dict(os.environ, {}, clear=True):
         engine = get_extraction_engine()
-        assert isinstance(engine, LegacyExtractionEngine)
+        assert isinstance(engine, AzureDocumentIntelligenceEngine)
 
 def test_router_respects_env_var():
     with patch.dict(os.environ, {"EXTRACTION_ENGINE": "legacy"}):

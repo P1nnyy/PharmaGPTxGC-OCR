@@ -96,8 +96,8 @@ export const SelectedTablePage: React.FC = () => {
           setSelectedRowIndex(0);
         }
 
-        const unavailable = isAzureRun ? false : (isSelectedTableUnavailable(detail) || runData.selected_table_available === false);
-        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData.no_valid_table_candidate_reason || 'no_valid_table_candidate';
+        const unavailable = isAzureRun ? false : (isSelectedTableUnavailable(detail) || runData?.selected_table_available === false);
+        const reason = detail?.fast_fail_reason || detail?.metadata?.fast_fail_reason || detail?.metrics?.table_sanity?.selected_reason || runData?.no_valid_table_candidate_reason || 'no_valid_table_candidate';
         setUnavailableReason(
           unavailable
             ? (reason === 'no_valid_candidate' ? 'no_valid_table_candidate' : reason)
