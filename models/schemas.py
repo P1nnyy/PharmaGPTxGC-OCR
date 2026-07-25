@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 
 class HealthResponse(BaseModel):
     status: str
-    gpu_available: bool
+    gpu_available: Optional[bool] = False
     gpu_name: Optional[str] = None
     cuda_version: Optional[str] = None
 

@@ -5,8 +5,6 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    # Configure settings behavior. We ignore extra variables in the .env file to allow
-    # the Azure-specific smoke test configuration variables to coexist peacefully.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     PROJECT_NAME: str = "PharmaGPT OCR API"
@@ -15,12 +13,12 @@ class Settings(BaseSettings):
     OCR_RESULTS_DIR: Optional[str] = None
     ENABLE_CACHE: bool = True
     PIPELINE_VERSION: str = "2.0"
-    ENABLE_PPSTRUCTURE: bool = False
-    TSR_PRIMARY_ENGINE: str = "heuristic_anchor"
-    ENABLE_PPSTRUCTURE_MULTI_ORIENTATION: bool = True
-    PPSTRUCTURE_CONFIDENCE_THRESHOLD: float = 0.40
+    
+    # Azure Document Intelligence Configuration
+    AZURE_DOCUMENT_ENDPOINT: str = ""
+    AZURE_DOCUMENT_KEY: str = ""
+
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
-    TOKEN_COVERAGE_THRESHOLD: float = 0.95
     IMAGE_MIN_SIDE_PX: int = 256
     IMAGE_MAX_SIDE_PX: int = 4096
     IMAGE_MIN_ASPECT_RATIO: float = 0.5
@@ -29,10 +27,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_ocr_results_dir(self):
-        # Derive the default OCR results directory if not explicitly provided
         if not self.OCR_RESULTS_DIR:
             self.OCR_RESULTS_DIR = os.path.join(self.DATASETS_DIR, "ocr_results")
         return self
 
 settings = Settings()
-

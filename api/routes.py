@@ -3,13 +3,12 @@ import os
 import tempfile
 from pathlib import Path
 from PIL import Image
-import torch
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from core.config import settings
 from core.logger import logger
 from models.schemas import HealthResponse, OCRResponse
-from services import cache_service, ocr_engine, spatial_reconstruction
+from services import cache_service, ocr_engine
 from services.error_handler import classify_error
 
 from extraction.router import get_extraction_engine
@@ -19,21 +18,12 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 def health_check():
-    gpu_available = torch.cuda.is_available()
-    response = HealthResponse(
-        status="ok",
-        gpu_available=gpu_available
-    )
-    if gpu_available:
-        response.gpu_name = torch.cuda.get_device_name(0)
-        response.cuda_version = torch.version.cuda
-    return response
+    return HealthResponse(status="ok")
 
 @router.post("/upload-invoice")
 async def upload_invoice(
     file: UploadFile = File(...),
     reconstruct: bool = False,
-    reconstruct_mode: str = settings.TSR_PRIMARY_ENGINE,
     extract: bool = False,
     benchmark_mode: bool = False,
     bypass_cache: bool = False
@@ -95,33 +85,17 @@ async def upload_invoice(
                     except Exception as clean_err:
                         logger.warning(f"Failed to remove temp file {temp_path}: {clean_err}")
                         
-        # 3. Branch logic for Legacy Extraction (OCR + spatial reconstruction)
+        # 3. Branch logic for OCR engine
         else:
-            logger.info("Routing extraction to Legacy OCR pipeline")
-            # Skip checking the cache if bypass_cache is explicitly requested (forces fresh OCR invocation)
+            logger.info("Routing extraction to OCR engine")
             cached_result = None if bypass_cache else cache_service.get_cached_result(invoice_id)
             if cached_result:
-                logger.info("OCR cache hit: reusing OCR blocks only")
+                logger.info("OCR cache hit: reusing cached result")
                 blocks = cached_result.get("blocks", [])
                 metadata = {
                     "blocks": blocks,
                     "image_validation": val_report
                 }
-                if reconstruct or extract:
-                    logger.info("Cached reconstruction response disabled")
-                    logger.info("Running fresh reconstruction with current code")
-                    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-                    reconstruction_data = spatial_reconstruction.reconstruct_layout(
-                        blocks, 
-                        debug=(not benchmark_mode), 
-                        reconstruct_mode=reconstruct_mode, 
-                        image=image, 
-                        benchmark_mode=benchmark_mode
-                    )
-                    logger.info(f"Reconstruction keys from cache path: {reconstruction_data.keys()}")
-                    metadata.update(reconstruction_data)
-
-                    
                 return OCRResponse(
                     invoice_id=invoice_id,
                     cached=True,
@@ -139,21 +113,9 @@ async def upload_invoice(
             metadata = {
                 **ocr_metadata,
                 "blocks": blocks,
+                "tables": ocr_result.get("tables", []),
                 "image_validation": val_report
             }
-            if reconstruct or extract:
-                logger.info("Cached reconstruction response disabled")
-                logger.info("Running fresh reconstruction with current code")
-                reconstruction_data = spatial_reconstruction.reconstruct_layout(
-                    blocks, 
-                    debug=(not benchmark_mode), 
-                    reconstruct_mode=reconstruct_mode, 
-                    image=image, 
-                    benchmark_mode=benchmark_mode
-                )
-                logger.info(f"Reconstruction keys from fresh path: {reconstruction_data.keys()}")
-                metadata.update(reconstruction_data)
-
             
             return OCRResponse(
                 invoice_id=invoice_id,
@@ -168,4 +130,3 @@ async def upload_invoice(
         classification = classify_error(e, stage="upload_invoice").to_dict()
         logger.error(f"Error processing upload: {e}", extra={"error_classification": classification})
         raise HTTPException(status_code=500, detail=str(e))
-
