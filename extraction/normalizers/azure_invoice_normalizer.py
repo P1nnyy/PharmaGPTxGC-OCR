@@ -162,7 +162,7 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "batch"
     
     # 7. Expiry column mapping
-    if t in ["exp", "expiry", "exp.", "exp date", "exp.date", "expiry date"]:
+    if t in ["exp", "expiry", "exp.", "exp date", "exp.date", "expiry date", "exp dt", "exp.dt", "exp dt.", "expdt", "exp dt/mfg dt"]:
         return "expiry"
     
     # 8. HSN column mapping
@@ -186,7 +186,7 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "sch_amt"
     if t == "dise amt":
         return "dise_amt"
-    if t in ["dis", "dis.", "disc", "disc.", "discount", "disc %", "discount %", "dis %", "dis amt", "disc amt", "discount amt", "scheme discount", "sch discount", "oth disc amt"]:
+    if t in ["dis", "dis.", "disc", "disc.", "dise", "discount", "disc %", "discount %", "dis %", "dis amt", "disc amt", "discount amt", "scheme discount", "sch discount", "oth disc amt"]:
         return "discount"
     
     # 13. GST percent column mappings
@@ -212,7 +212,7 @@ def normalize_header(header_text: str) -> Optional[str]:
         return "sgst_amount"
     
     # 15. Amount / Net Amount mapping
-    if t in ["net amt", "net amount", "amount", "amt", "amt.", "value", "total amount"]:
+    if t in ["net amt", "net amount", "amount", "amt", "amt.", "value", "total", "total amount"]:
         return "amount"
         
     # 16. Taxable amount mapping
@@ -255,8 +255,8 @@ def normalize_header_row(header_row: List[str]) -> List[Optional[str]]:
     for i, cell in enumerate(header_row):
         t = cleaned_full[i]
         
-        # 1. Batch header cleanup
-        if "batch" in t or t.startswith("batch") or t.startswith("b.no") or "b.no" in t:
+        # 1. Batch header cleanup (also matches "Hatch", a common OCR misread of "Batch")
+        if "batch" in t or t.startswith("batch") or t.startswith("b.no") or "b.no" in t or t == "hatch":
             col_names.append("batch")
             continue
             
@@ -291,7 +291,21 @@ def normalize_header_row(header_row: List[str]) -> List[Optional[str]]:
         # 3. Standard normalization using full cell content
         norm = normalize_header(cell)
         col_names.append(norm)
-        
+
+    # 4. Positional fallback for a garbled Qty header (e.g. OCR mangles "Qty"
+    # into something like "(1)"). On Indian pharma invoices the Qty column is
+    # reliably immediately left of MRP; if that slot has real (non-empty) but
+    # unrecognized header text and no quantity column was already found
+    # elsewhere, treat it as quantity.
+    qty_keys = {"quantity", "quantity_pcs", "quantity_total", "quantity_tes"}
+    if not any(name in qty_keys for name in col_names):
+        try:
+            mrp_idx = col_names.index("mrp")
+        except ValueError:
+            mrp_idx = -1
+        if mrp_idx > 0 and col_names[mrp_idx - 1] is None and cleaned_full[mrp_idx - 1].strip():
+            col_names[mrp_idx - 1] = "quantity_pcs"
+
     return col_names
 
 def extract_corrected_qty(qty_text: Optional[str], serial_text: Optional[str]) -> Optional[Any]:
@@ -497,36 +511,57 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     warnings = []
     tables = raw_result.get("tables", [])
     documents = raw_result.get("documents", [])
+    pages = raw_result.get("pages", [])
+    page_w = 1.0
+    page_h = 1.0
+    if pages:
+        p_obj = pages[0]
+        page_w = float(p_obj.get("width", 1.0) if isinstance(p_obj, dict) else getattr(p_obj, "width", 1.0)) or 1.0
+        page_h = float(p_obj.get("height", 1.0) if isinstance(p_obj, dict) else getattr(p_obj, "height", 1.0)) or 1.0
     
     # 1. Parse all tables into grids
     grids = [build_grid(table) for table in tables]
     
-    # 2. Select the item table
-    selected_item_table_idx = None
-    selected_header_row_idx = None
-    max_item_score = -1
-    
-    # Target headers criteria for item table detection (matches various typos / variations)
+    # 2. Select item tables (supports multi-page / multi-table split invoices)
+    item_table_candidates = []
     detection_target_headers = {
         "product", "batch", "expiry", "hsn", "mrp", "rate", "amount", 
         "quantity_total", "quantity_tes", "quantity_pcs", "quantity",
         "taxable_amount", "gross_amount"
     }
     
+    all_scored_tables = []
     for table_idx, grid in enumerate(grids):
-        # Scan each row in the grid as a candidate header row
-        for row_idx, row in enumerate(grid):
-            # Score this row based on matching core columns
-            score = sum(1 for cell in row if normalize_header(cell) in detection_target_headers)
-            if score > max_item_score:
-                max_item_score = score
-                selected_item_table_idx = table_idx
-                selected_header_row_idx = row_idx
+        best_row_idx = None
+        best_score = -1
+        best_headers = []
+        for row_idx, row in enumerate(grid[:3]):
+            headers = normalize_header_row(row)
+            score = sum(1 for norm in headers if norm in detection_target_headers)
+            if score > best_score:
+                best_score = score
+                best_row_idx = row_idx
+                best_headers = headers
                 
-    # We require a baseline matching score of at least 3 to confirm it's an item table
-    if selected_item_table_idx is None or max_item_score < 3:
-        selected_item_table_idx = None
-        selected_header_row_idx = None
+        if best_score >= 2 and best_row_idx is not None:
+            all_scored_tables.append((table_idx, best_row_idx, best_score, best_headers))
+            
+    if all_scored_tables:
+        all_scored_tables.sort(key=lambda x: x[2], reverse=True)
+        primary_idx, primary_row, primary_score, primary_headers = all_scored_tables[0]
+        primary_set = set(h for h in primary_headers if h)
+        item_table_candidates.append((primary_idx, primary_row, primary_score))
+        
+        for (tbl_idx, r_idx, score, headers) in all_scored_tables[1:]:
+            col_set = set(h for h in headers if h)
+            overlap = len(col_set & primary_set)
+            if score >= 2 and overlap >= 2 and abs(len(headers) - len(primary_headers)) <= 2:
+                item_table_candidates.append((tbl_idx, r_idx, score))
+            
+    selected_item_table_indices = [c[0] for c in item_table_candidates]
+    selected_item_table_idx = selected_item_table_indices[0] if selected_item_table_indices else None
+    
+    if not item_table_candidates:
         warnings.append("No valid line item table found based on column headers classification.")
         
     # 3. Select the footer table
@@ -536,8 +571,8 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     horizontal_footer_data = None
     
     for table_idx, grid in enumerate(grids):
-        # We don't want the same table to be both item and footer unless it's the only table
-        if table_idx == selected_item_table_idx and len(grids) > 1:
+        # We don't want the same table to be both item and footer unless no other tables exist
+        if table_idx in selected_item_table_indices and len(grids) > len(selected_item_table_indices):
             continue
             
         # Try parsing as horizontal summary table first (like CM Associates TABLE 2)
@@ -577,7 +612,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                             break
                 
                 val = try_parse_float(val_str)
-                if "sub total" in lbl or "subtotal" in lbl:
+                if any(k in lbl for k in ["sub total", "subtotal", "taxable amount", "taxable value", "taxable total", "net taxable", "gross total", "gross amount", "amount before tax", "total before tax", "basic amount", "basic value", "item total"]):
                     footer_data["subtotal"] = val
                 elif is_discount_label(lbl):
                     footer_data["discount"] = val
@@ -601,7 +636,52 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     seller_name = extract_field_value(fields, ["VendorName"])
     buyer_name = extract_field_value(fields, ["CustomerName"])
     
-    doc_subtotal = try_parse_float(extract_field_value(fields, ["SubTotal"]))
+    # Extended metadata fields: GST, address, phone, drug license
+    seller_gstin = extract_field_value(fields, ["VendorTaxId", "VendorGSTIN"])
+    buyer_gstin = extract_field_value(fields, ["CustomerTaxId", "CustomerGSTIN"])
+    seller_address = extract_field_value(fields, ["VendorAddress"])
+    buyer_address = extract_field_value(fields, ["CustomerAddress"])
+    seller_phone = extract_field_value(fields, ["VendorPhone", "VendorTelephone"])
+    drug_license = extract_field_value(fields, ["DrugLicenseNumber", "DrugLicense", "DLNumber"])
+    
+    # Stringify address objects (Azure may return structured dicts with city/state/etc.)
+    if isinstance(seller_address, dict):
+        parts = [seller_address.get(k, "") for k in ["streetAddress", "city", "state", "postalCode"] if seller_address.get(k)]
+        seller_address = ", ".join(parts) if parts else str(seller_address)
+    if isinstance(buyer_address, dict):
+        parts = [buyer_address.get(k, "") for k in ["streetAddress", "city", "state", "postalCode"] if buyer_address.get(k)]
+        buyer_address = ", ".join(parts) if parts else str(buyer_address)
+    
+    # Regex fallback against document content if standard Azure fields missed metadata
+    raw_content = raw_result.get("content", "")
+    if raw_content:
+        import re
+        if not seller_phone:
+            phone_match = re.search(r'(?:PHONE|Phone|Ph\.?|Mob\.?|Mobile|Contact)[\s\:\.\-]*([0-9\-\,\ ]{8,})', raw_content, re.IGNORECASE)
+            if phone_match:
+                seller_phone = phone_match.group(1).split('\n')[0].strip()
+        if not drug_license:
+            dl_match = re.search(r'(?:Licence\s*No\.?|D\.?L\.?\s*No\.?|20B|21B)[\s\:\.\-]*([0-9A-Z\-\,\/ ]+)', raw_content, re.IGNORECASE)
+            if dl_match:
+                drug_license = dl_match.group(1).split('\n')[0].strip()
+        if not seller_gstin or not buyer_gstin:
+            gstin_matches = re.findall(r'\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})\b', raw_content)
+            if gstin_matches:
+                if not seller_gstin and len(gstin_matches) > 0:
+                    seller_gstin = gstin_matches[0]
+                if not buyer_gstin and len(gstin_matches) > 1:
+                    buyer_gstin = gstin_matches[1]
+        if not buyer_address and buyer_name:
+            lines = [l.strip() for l in raw_content.split('\n') if l.strip()]
+            for idx, l in enumerate(lines):
+                if buyer_name.lower() in l.lower() and idx + 1 < len(lines):
+                    addr_lines = lines[idx+1:min(idx+4, len(lines))]
+                    clean_addr = [al for al in addr_lines if not any(kw in al.lower() for kw in ['gstin', 'licence', 'phone', 'ack no', 'date', 'invoice'])]
+                    if clean_addr:
+                        buyer_address = ", ".join(clean_addr)
+                    break
+    
+    doc_subtotal = try_parse_float(extract_field_value(fields, ["SubTotal", "TaxableAmount", "TotalTaxableValue", "AmountBeforeTax", "NetTaxable", "GrossTotal"]))
     doc_grand_total = try_parse_float(extract_field_value(fields, ["InvoiceTotal"]))
     doc_tax = try_parse_float(extract_field_value(fields, ["TotalTax", "Tax"]))
     
@@ -609,14 +689,15 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     item_table_cgst = None
     item_table_sgst = None
     
-    # 6. Parse line items from selected item table
+    # 6. Parse line items from all selected item tables (multi-page/multi-table support)
     line_items = []
-    if selected_item_table_idx is not None:
-        item_grid = grids[selected_item_table_idx]
-        header_row = item_grid[selected_header_row_idx]
+    for (tbl_idx, hdr_idx, _) in item_table_candidates:
+        item_grid = grids[tbl_idx]
+        header_row = item_grid[hdr_idx]
         col_names = normalize_header_row(header_row)
-        
-        for r_idx in range(selected_header_row_idx + 1, len(item_grid)):
+        table_items = []
+
+        for r_idx in range(hdr_idx + 1, len(item_grid)):
             row = item_grid[r_idx]
             
             # Check if this row is the Total row of the item table
@@ -730,6 +811,26 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
             # Clean up newlines in product name to standard spaces
             product_name = product_val.replace("\n", " ").strip() if product_val else None
             
+            # Calculate bounding box for the row from raw table cells
+            row_bbox = None
+            if tbl_idx < len(tables):
+                t_obj = tables[tbl_idx]
+                t_cells = t_obj.get("cells", []) if isinstance(t_obj, dict) else getattr(t_obj, "cells", [])
+                xs, ys = [], []
+                for cell in t_cells:
+                    c_row = cell.get("rowIndex") if isinstance(cell, dict) else getattr(cell, "rowIndex", -1)
+                    if c_row == r_idx:
+                        regions = cell.get("boundingRegions", []) if isinstance(cell, dict) else getattr(cell, "boundingRegions", [])
+                        for reg in regions:
+                            poly = reg.get("polygon", []) if isinstance(reg, dict) else getattr(reg, "polygon", [])
+                            if len(poly) >= 8:
+                                xs.extend(poly[0::2])
+                                ys.extend(poly[1::2])
+                if xs and ys:
+                    min_x, max_x = min(xs) / page_w, max(xs) / page_w
+                    min_y, max_y = min(ys) / page_h, max(ys) / page_h
+                    row_bbox = [round(min_x, 4), round(min_y, 4), round(max_x, 4), round(max_y, 4)]
+            
             item = CanonicalLineItem(
                 name=product_name,
                 pack=row_data.get("pack") if row_data.get("pack") else None,
@@ -743,20 +844,55 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                 discount=discount_val,
                 gst_percent=gst_percent,
                 amount=amount,
-                confidence=None
+                confidence=None,
+                bounding_box=row_bbox
             )
-            line_items.append(item)
-            
+            table_items.append(item)
+
+        # Azure occasionally assigns a stray footnote/formula fragment a rowIndex
+        # that lands it mid-table; re-sort this table's rows by actual vertical
+        # position so the review screen matches the printed invoice order.
+        if all(it.bounding_box for it in table_items):
+            table_items.sort(key=lambda it: it.bounding_box[1])
+        line_items.extend(table_items)
+
+    # Fallback to Azure prebuilt document Items if custom table parsing returned 0 line items
+    if not line_items and fields:
+        items_field = fields.get("Items", {})
+        items_arr = items_field.get("valueArray", []) if isinstance(items_field, dict) else []
+        for it in items_arr:
+            val_obj = it.get("valueObject", {}) if isinstance(it, dict) else {}
+            if not val_obj:
+                continue
+            desc_val = extract_field_value(val_obj, ["Description", "ProductCode"])
+            if desc_val:
+                line_items.append(CanonicalLineItem(
+                    name=str(desc_val),
+                    batch=extract_field_value(val_obj, ["Batch"]),
+                    hsn=extract_field_value(val_obj, ["TaxCode", "HSNCode"]),
+                    quantity=try_parse_float(extract_field_value(val_obj, ["Quantity"])),
+                    mrp=parse_decimal_safe(extract_field_value(val_obj, ["UnitPrice"])),
+                    rate=parse_decimal_safe(extract_field_value(val_obj, ["UnitPrice"])),
+                    amount=parse_decimal_safe(extract_field_value(val_obj, ["Amount"])),
+                    confidence=None
+                ))
+
     # 7. Merge header fields (footer data takes precedence for totals)
     subtotal = footer_data.get("subtotal") if footer_data.get("subtotal") is not None else doc_subtotal
     discount = footer_data.get("discount")
-    if discount is None:
-        discount = footer_data.get("discount")
-        
     cgst = footer_data.get("cgst")
     sgst = footer_data.get("sgst")
     igst = footer_data.get("igst")
     grand_total = footer_data.get("grand_total") if footer_data.get("grand_total") is not None else doc_grand_total
+    
+    # Smart fallback for subtotal if not explicitly extracted by OCR
+    if subtotal is None:
+        line_amounts = [item.amount for item in line_items if item.amount is not None]
+        if line_amounts:
+            subtotal = round(sum(line_amounts), 2)
+        elif grand_total is not None:
+            tax_sum = (cgst or 0.0) + (sgst or 0.0) + (igst or 0.0)
+            subtotal = round(grand_total + (discount or 0.0) - tax_sum, 2)
     
     # Fallback to item table total row tax amounts if summary totals did not provide CGST/SGST explicitly
     if cgst is None and item_table_cgst is not None:
@@ -783,6 +919,17 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     else:
         confidence = 0.40
         
+    # 8.5 Extract page rotation angle from Azure's pages array
+    # Azure returns pages[].angle in degrees (counter-clockwise from horizontal)
+    page_angle = None
+    if pages:
+        raw_angle = pages[0].get("angle") if isinstance(pages[0], dict) else getattr(pages[0], "angle", None)
+        if raw_angle is not None:
+            try:
+                page_angle = float(raw_angle)
+            except (ValueError, TypeError):
+                pass
+    
     # 9. Populate metadata
     raw_engine_metadata = {
         "model_id": raw_result.get("modelId"),
@@ -793,7 +940,8 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         "item_table_row_count": len(grids[selected_item_table_idx]) if selected_item_table_idx is not None else 0,
         "item_table_column_count": len(grids[selected_item_table_idx][0]) if selected_item_table_idx is not None and len(grids[selected_item_table_idx]) > 0 else 0,
         "warnings": warnings,
-        "doc_fields_tax": doc_tax
+        "doc_fields_tax": doc_tax,
+        "page_angle": page_angle
     }
     
     # Add optional keys if horizontal table parsed them
@@ -809,6 +957,12 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         invoice_date=invoice_date,
         seller_name=seller_name,
         buyer_name=buyer_name,
+        seller_gstin=str(seller_gstin) if seller_gstin else None,
+        buyer_gstin=str(buyer_gstin) if buyer_gstin else None,
+        seller_address=str(seller_address) if seller_address else None,
+        buyer_address=str(buyer_address) if buyer_address else None,
+        seller_phone=str(seller_phone) if seller_phone else None,
+        drug_license=str(drug_license) if drug_license else None,
         subtotal=subtotal,
         discount=discount,
         cgst=cgst,
@@ -818,5 +972,6 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         line_items=line_items,
         confidence=confidence,
         extraction_engine="azure_document_intelligence",
-        raw_engine_metadata=raw_engine_metadata
+        raw_engine_metadata=raw_engine_metadata,
+        page_angle=page_angle
     )

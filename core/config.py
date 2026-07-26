@@ -18,6 +18,23 @@ class Settings(BaseSettings):
     AZURE_DOCUMENT_ENDPOINT: str = ""
     AZURE_DOCUMENT_KEY: str = ""
 
+    # Neo4j Aura Configuration
+    NEO4J_URI: str = ""
+    NEO4J_USERNAME: str = ""
+    NEO4J_PASSWORD: str = ""
+
+    # Cloudflare R2 Configuration
+    R2_ACCOUNT_ID: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = ""
+
+    # Bootstrap tenant used until real multi-user auth exists
+    DEFAULT_PHARMACY_ID: str = "default-pharmacy"
+    DEFAULT_PHARMACY_NAME: str = "My Pharmacy"
+    DEFAULT_USER_ID: str = "default-user"
+    DEFAULT_USER_EMAIL: str = "admin@pharmaflow.local"
+
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
     IMAGE_MIN_SIDE_PX: int = 256
     IMAGE_MAX_SIDE_PX: int = 4096

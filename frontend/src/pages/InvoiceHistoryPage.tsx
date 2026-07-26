@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { getDetailsData } from '../api/client';
+import { apiClient } from '../api/client';
 import {
   Search,
   Download,
@@ -16,8 +16,9 @@ import {
 } from 'lucide-react';
 
 export const InvoiceHistoryPage: React.FC = () => {
-  const { runs } = useRun();
+  const { runs, refreshRuns } = useRun();
   const navigate = useNavigate();
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Search & Filter State
   const [searchTerm, setSearchTerm] = useState('');
@@ -33,13 +34,7 @@ export const InvoiceHistoryPage: React.FC = () => {
   const getSellers = () => {
     const sellers = new Set<string>();
     runs.forEach((r) => {
-      const detail = getDetailsData(r.run_id);
-      if (detail?.seller_name) {
-        sellers.add(detail.seller_name);
-      } else {
-        const isGenome = r.filename.toLowerCase().includes('genome');
-        sellers.add(isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House');
-      }
+      if (r.seller_name) sellers.add(r.seller_name);
     });
     return Array.from(sellers);
   };
@@ -66,10 +61,8 @@ export const InvoiceHistoryPage: React.FC = () => {
 
   // Filtered invoices
   const filteredRuns = runs.filter((run) => {
-    const detail = getDetailsData(run.run_id);
-    const isGenome = run.filename.toLowerCase().includes('genome');
-    const seller = detail?.seller_name || (isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House');
-    const invoiceNum = detail?.invoice_number || run.filename;
+    const seller = run.seller_name || '';
+    const invoiceNum = run.invoice_number || run.filename;
     const matchesSearch =
       invoiceNum.toLowerCase().includes(searchTerm.toLowerCase()) ||
       seller.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -96,10 +89,7 @@ export const InvoiceHistoryPage: React.FC = () => {
   // Compute metrics totals
   const totalSpend = runs
     .filter((r) => r.status === 'verified')
-    .reduce((sum, r) => {
-      const detail = getDetailsData(r.run_id);
-      return sum + (detail?.grand_total || 0);
-    }, 0);
+    .reduce((sum, r) => sum + (r.grand_total || 0), 0);
 
   const totalSKUsCount = (() => {
     try {
@@ -116,12 +106,10 @@ export const InvoiceHistoryPage: React.FC = () => {
     let csvContent = 'data:text/csv;charset=utf-8,';
     csvContent += 'Date,Invoice #,Seller,Amount,Status\n';
     filteredRuns.forEach((r) => {
-      const detail = getDetailsData(r.run_id);
       const date = new Date(r.timestamp).toLocaleDateString();
-      const isGenome = r.filename.toLowerCase().includes('genome');
-      const seller = detail?.seller_name || (isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House');
-      const amount = detail?.grand_total || (r.confidence ? r.confidence * 1500 : 0);
-      const invoiceNum = detail?.invoice_number || r.filename;
+      const seller = r.seller_name || '';
+      const amount = r.grand_total || (r.confidence ? r.confidence * 1500 : 0);
+      const invoiceNum = r.invoice_number || r.filename;
       const row = [date, `"${invoiceNum.replace(/"/g, '""')}"`, `"${seller.replace(/"/g, '""')}"`, amount.toFixed(2), r.status].join(',');
       csvContent += row + '\n';
     });
@@ -141,33 +129,24 @@ export const InvoiceHistoryPage: React.FC = () => {
   };
 
   // Safe confirm handler for bulk deletion
-  const confirmBulkDelete = () => {
+  const confirmBulkDelete = async () => {
+    setIsDeleting(true);
     try {
-      const storedRuns = localStorage.getItem('ocr_workbench_runs');
-      if (storedRuns) {
-        const parsed = JSON.parse(storedRuns);
-        const remaining = parsed.filter((r: any) => !selectedInvoices.includes(r.run_id));
-        localStorage.setItem('ocr_workbench_runs', JSON.stringify(remaining));
+      const deletedCount = selectedInvoices.length;
+      await Promise.all(selectedInvoices.map((id) => apiClient.deleteInvoice(id)));
+      await refreshRuns();
 
-        // Clean up individual detail blocks too
-        selectedInvoices.forEach((id) => {
-          localStorage.removeItem(`ocr_workbench_run_detail_${id}`);
-        });
-
-        const deletedCount = selectedInvoices.length;
-        setSelectedInvoices([]);
-        setShowDeleteConfirm(false);
-        setToastText(`Successfully deleted ${deletedCount} invoice run(s).`);
-
-        // Trigger reload after a short delay for visual success toast
-        setTimeout(() => {
-          setToastText(null);
-          window.location.reload();
-        }, 1200);
-      }
-    } catch (e) {
+      setSelectedInvoices([]);
+      setShowDeleteConfirm(false);
+      setToastText(`Successfully deleted ${deletedCount} invoice(s).`);
+      setTimeout(() => setToastText(null), 2000);
+    } catch (e: any) {
       console.error(e);
       setShowDeleteConfirm(false);
+      setToastText(`Failed to delete: ${e.message || String(e)}`);
+      setTimeout(() => setToastText(null), 3000);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -206,9 +185,10 @@ export const InvoiceHistoryPage: React.FC = () => {
               </button>
               <button
                 onClick={confirmBulkDelete}
-                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer"
+                disabled={isDeleting}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Delete Invoices
+                {isDeleting ? 'Deleting…' : 'Delete Invoices'}
               </button>
             </div>
           </div>
@@ -345,14 +325,12 @@ export const InvoiceHistoryPage: React.FC = () => {
                 </tr>
               ) : (
                 paginatedRuns.map((r) => {
-              const detail = getDetailsData(r.run_id);
-              const isGenome = r.filename.toLowerCase().includes('genome');
-              const seller = detail?.seller_name || (isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House');
+              const seller = r.seller_name || '—';
               const isSelected = selectedInvoices.includes(r.run_id);
-              const amount = detail?.grand_total 
-                ? `₹${detail.grand_total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
+              const amount = r.grand_total
+                ? `₹${r.grand_total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                 : (r.confidence ? `₹${(r.confidence * 1500).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—');
-              const dispInvoiceNumber = detail?.invoice_number ? `#${detail.invoice_number}` : `#${r.filename.substring(0, 15) || r.run_id.substring(4, 12)}`;
+              const dispInvoiceNumber = r.invoice_number ? `#${r.invoice_number}` : `#${r.run_id.substring(0, 8)}`;
 
               return (
                 <tr key={r.run_id} className={`hover:bg-[#f8fafc] transition-colors ${isSelected ? 'bg-blue-50/20' : ''}`}>

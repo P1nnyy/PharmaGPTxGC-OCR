@@ -1,20 +1,14 @@
 import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact } from './types';
 import {
-  cacheImageLocal,
-  cacheProcessedImageLocal,
-  getStoredRuns,
-  saveStoredRuns,
-  buildTrimmedRunDetail,
-  sanitizeForLocalStorage,
   clearWorkbenchRunStorage,
   getDetailsData,
   getInvoiceImageUrl,
   getProcessedInvoiceImageUrl
 } from './storage';
-import { normalizeBackendDiagnostics, normalizeInvoiceConfidence } from './normalizer';
-import { isSelectedTableUnavailable, selectMainTable, noValidTableReason, tableRows, tableCols } from './table_selection';
+import { normalizeBackendDiagnostics } from './normalizer';
+import { isSelectedTableUnavailable, selectMainTable, noValidTableReason } from './table_selection';
 import {
-  getRun,
+  getRun as getLegacyRun,
   getOCRBlocks,
   getCandidateTables,
   getSelectedTable,
@@ -40,7 +34,7 @@ export {
   isSelectedTableUnavailable,
   noValidTableReason,
   normalizeBackendDiagnostics,
-  getRun,
+  getLegacyRun,
   getOCRBlocks,
   getCandidateTables,
   getSelectedTable,
@@ -53,6 +47,32 @@ export {
   downloadArtifactBundle,
   copyDebugSummary
 };
+
+// Maps a backend Invoice record (from GET/PATCH /invoices) into the RunSummary
+// shape the list-view pages (Dashboard, Invoice History) already render.
+function mapInvoiceToRunSummary(inv: any): RunSummary {
+  return {
+    run_id: inv.id,
+    filename: inv.invoice_number || inv.id,
+    timestamp: inv.created_at || new Date().toISOString(),
+    status: inv.status === 'verified' ? 'verified' : 'needs_review',
+    confidence: inv.confidence ?? 0,
+    token_coverage: 1.0,
+    representability_score: 1.0,
+    selected_table_id: 'AZURE_TABLE',
+    selected_table_shape: '—',
+    missing_fields: [],
+    row_math_status: 'pass',
+    is_demo: false,
+    backend_invoice_id: inv.id,
+    extraction_engine: inv.extraction_engine,
+    seller_name: inv.seller_name ?? null,
+    grand_total: inv.grand_total ?? null,
+    invoice_number: inv.invoice_number ?? null,
+    invoice_date: inv.invoice_date ?? null,
+    image_url: inv.image_url ?? null
+  };
+}
 
 export const apiClient = {
   async checkHealth(): Promise<{ status: string; gpu_available?: boolean; gpu_name?: string; cuda_version?: string }> {
@@ -71,7 +91,6 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('file', file);
 
-    let backendData: any;
     const response = await fetch('/upload-invoice?reconstruct=true&extract=true', {
       method: 'POST',
       body: formData
@@ -82,76 +101,26 @@ export const apiClient = {
       throw new Error(err.detail || 'Upload failed');
     }
 
-    backendData = await response.json();
+    const backendData = await response.json();
 
-    const normalizedDetail = normalizeBackendDiagnostics(backendData);
-    const backendInvoiceId = backendData?.invoice_id || normalizedDetail?.invoice_id;
-    const diagnostics =
-      normalizedDetail.metadata?.diagnostics ||
-      normalizedDetail.diagnostics ||
-      {};
-    const diagnosticsRunId =
-      normalizedDetail.metadata?.diagnostics_run_id ||
-      diagnostics.diagnostics_run_id ||
-      diagnostics.run_id ||
-      backendInvoiceId;
-
-    normalizedDetail.backend_invoice_id = backendInvoiceId;
-    normalizedDetail.diagnostics_run_id = diagnosticsRunId;
-
-    const runs = getStoredRuns();
-    const newRunId = `RUN_${Date.now()}`;
-    
-    const isAzure = normalizedDetail?.extraction_engine === 'azure_document_intelligence';
-    const tableUnavailable = isAzure ? false : isSelectedTableUnavailable(normalizedDetail);
-    const conf = normalizeInvoiceConfidence(normalizedDetail);
-    const isSafe = isAzure ? (conf >= 0.85) : (!tableUnavailable && normalizedDetail.quality_gate?.safe_for_erp);
-    
-    const newRun: RunSummary = {
-      run_id: newRunId,
-      filename: file.name,
-      timestamp: new Date().toISOString(),
-      status: isSafe ? 'safe_for_erp' : 'needs_review',
-      confidence: conf,
-      token_coverage: isAzure ? 1.0 : (normalizedDetail.metadata?.token_coverage ?? 0.920),
-      representability_score: isAzure ? 1.0 : (normalizedDetail.metadata?.reconstruction_score ?? 0.850),
-      selected_table_id: isAzure ? 'AZURE_TABLE' : (selectMainTable(normalizedDetail)?.table_id || '—'),
-      selected_table_shape: isAzure
-        ? `${normalizedDetail.line_items?.length || 0} Items`
-        : `${tableRows(selectMainTable(normalizedDetail))} Rows x ${tableCols(selectMainTable(normalizedDetail))} Columns`,
-      missing_fields: normalizedDetail.quality_gate?.missing_fields || [],
-      row_math_status: normalizedDetail.quality_gate?.row_math_status || 'pass',
-      is_demo: false,
-      backend_invoice_id: backendInvoiceId,
-      diagnostics_run_id: diagnosticsRunId,
-      selected_table_available: !tableUnavailable,
-      extraction_engine: normalizedDetail?.extraction_engine
-    };
-
-    await cacheImageLocal(newRunId, file);
-    cacheProcessedImageLocal(newRunId, normalizedDetail.metadata?.processed_image?.processed_image_data_url);
-
-    try {
-      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(normalizedDetail));
-    } catch (error) {
-      const warning = `Run completed, but payload was trimmed: ${error instanceof Error ? error.message : String(error)}`;
-      const trimmed = buildTrimmedRunDetail(normalizedDetail, warning);
-      localStorage.setItem(`ocr_workbench_run_detail_${newRunId}`, JSON.stringify(trimmed));
+    if (!backendData.persisted || !backendData.graph_invoice_id) {
+      throw new Error(
+        backendData.persist_error ||
+        'Invoice was extracted but could not be saved. Check server storage configuration.'
+      );
     }
 
-    try {
-      localStorage.setItem(`ocr_workbench_raw_backend_${newRunId}`, JSON.stringify(sanitizeForLocalStorage(backendData)));
-    } catch {}
-
-    runs.unshift(newRun);
-    saveStoredRuns(runs);
-
-    return newRun;
+    // Build the result directly from this response instead of re-fetching —
+    // Neo4j Aura can have a brief replication lag right after a write, where an
+    // immediate GET for the same id 404s even though the save succeeded. The
+    // upload response already carries everything the caller needs (it's only
+    // used for run_id/navigation; the review page does its own fresh fetch).
+    return mapInvoiceToRunSummary({ ...backendData, id: backendData.graph_invoice_id });
   },
 
   async runOCR(fileOrRunId: File | string): Promise<RunSummary> {
     if (typeof fileOrRunId === 'string') {
-      const existing = this.getRun(fileOrRunId);
+      const existing = await this.getRun(fileOrRunId);
       if (existing) return existing;
       throw new Error(`Run ${fileOrRunId} not found.`);
     }
@@ -163,11 +132,60 @@ export const apiClient = {
   },
 
   async getRuns(): Promise<RunSummary[]> {
-    return getStoredRuns();
+    const response = await fetch('/invoices');
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.map(mapInvoiceToRunSummary);
   },
 
-  getRun(runId: string): RunSummary | null {
-    return getRun(runId);
+  async getRun(runId: string): Promise<RunSummary | null> {
+    try {
+      return await this.getInvoiceDetail(runId);
+    } catch {
+      return null;
+    }
+  },
+
+  // Full invoice detail (header + line_items + seller + presigned image_url),
+  // mapped into RunSummary shape. Used by the review page and by getRun().
+  //
+  // Retries a couple of times on 404: Neo4j Aura can have a brief replication
+  // lag right after a write (e.g. just-navigated-here from an upload), where a
+  // read for the same id 404s for a few hundred ms even though the write
+  // already succeeded. A genuinely missing/deleted invoice still 404s for good
+  // after these few short retries.
+  async getInvoiceDetail(invoiceId: string, attempt = 0): Promise<RunSummary> {
+    const response = await fetch(`/invoices/${invoiceId}`);
+    if (!response.ok) {
+      if (response.status === 404 && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+        return this.getInvoiceDetail(invoiceId, attempt + 1);
+      }
+      throw new Error(`Invoice ${invoiceId} not found.`);
+    }
+    const data = await response.json();
+    return { ...mapInvoiceToRunSummary(data), ...data, run_id: data.id };
+  },
+
+  async updateInvoice(invoiceId: string, payload: Record<string, any>): Promise<any> {
+    const response = await fetch(`/invoices/${invoiceId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to update invoice.');
+    }
+    return response.json();
+  },
+
+  async deleteInvoice(invoiceId: string): Promise<void> {
+    const response = await fetch(`/invoices/${invoiceId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to delete invoice.');
+    }
   },
 
   getOCRBlocks(runId: string): OCRBlock[] {

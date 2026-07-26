@@ -51,6 +51,7 @@ interface RunContextType {
   error: string | null;
   
   // OCR Workbench Actions
+  refreshRuns: () => Promise<void>;
   uploadInvoiceFile: (file: File) => Promise<RunSummary>;
   triggerOCR: () => Promise<void>;
   triggerReconstruction: () => Promise<void>;
@@ -143,6 +144,11 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const compareRun = runs.find(r => r.run_id === compareRunId) || null;
 
   // Actions
+  const refreshRuns = async () => {
+    const data = await apiClient.getRuns();
+    setRuns(data);
+  };
+
   const uploadInvoiceFile = async (file: File): Promise<RunSummary> => {
     setIsLoading(true);
     try {
@@ -220,6 +226,7 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isBackendActive,
         isLoading,
         error,
+        refreshRuns,
         uploadInvoiceFile,
         triggerOCR,
         triggerReconstruction,

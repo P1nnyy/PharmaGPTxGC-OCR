@@ -27,16 +27,11 @@ class ErrorClassifier:
     """Classify OCR pipeline failures into actionable reliability categories."""
 
     TRANSIENT_RULES = (
-        (("cuda out of memory", "out of memory", "gpu memory"), "reduce_batch_size"),
         (("timeout", "timed out", "connection timeout"), "retry_with_timeout"),
         (("temporarily unavailable", "connection reset"), "retry_with_timeout"),
     )
     RECOVERABLE_RULES = (
-        (("ppstructure returned 0 cells", "pp-structure returned 0 cells", "ppstructure 0 cells"), "use_heuristic_tsr"),
-        (("tsr returned 0 cells", "0 cells", "zero cells"), "use_heuristic_tsr"),
-        (("ocr confidence too low", "low ocr confidence"), "upscale_and_retry"),
-        (("token mapping failed", "token coverage failure", "token coverage failed"), "use_graph_fallback"),
-        (("topology validation failed",), "use_graph_fallback"),
+        (("ocr confidence too low", "low ocr confidence"), "retry_with_high_dpi"),
         (("semantic classification failed",), "continue_with_unknown_semantics"),
     )
     FATAL_RULES = (

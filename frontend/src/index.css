@@ -61,3 +61,14 @@ body {
   cursor: grabbing;
 }
 
+/* Hide the increment/decrement spinner arrows on numeric inputs */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+

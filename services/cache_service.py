@@ -87,6 +87,24 @@ def check_cache_status(log_status: bool = True) -> bool:
 
     return writable
 
+def clear_cache() -> int:
+    """Deletes all cached OCR result JSON files. Returns the number of files removed."""
+    path = settings.OCR_RESULTS_DIR
+    if not os.path.isdir(path):
+        return 0
+
+    cleared = 0
+    for name in os.listdir(path):
+        if name.endswith(".json"):
+            try:
+                os.remove(os.path.join(path, name))
+                cleared += 1
+            except OSError as e:
+                logger.warning(f"Failed to remove cache file {name}: {e}")
+
+    logger.info(f"[CACHE CLEARED] removed {cleared} cached result(s) from {path}")
+    return cleared
+
 def compute_md5(file_bytes: bytes) -> str:
     try:
         return hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()

@@ -18,6 +18,13 @@ export interface RunSummary {
   diagnostics_run_id?: string;
   storage_warning?: string;
   extraction_engine?: string;
+  // Denormalized display fields sourced directly from the backend Invoice
+  // record, so list views don't need a per-row detail fetch.
+  seller_name?: string | null;
+  grand_total?: number | null;
+  invoice_number?: string | null;
+  invoice_date?: string | null;
+  image_url?: string | null;
 }
 
 export interface OCRBlock {

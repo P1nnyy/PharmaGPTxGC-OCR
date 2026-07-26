@@ -1,7 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
-import { getDetailsData } from '../api/client';
 import {
   Upload,
   FileText,
@@ -150,14 +149,11 @@ export const DashboardPage: React.FC = () => {
                     </tr>
                   ) : (
                     recentInvoices.map((inv) => {
-                      // Lookup amount: check if grand_total exists in detail or fallback
-                      const detail = getDetailsData(inv.run_id);
-                      const isGenome = inv.filename.toLowerCase().includes('genome');
-                      const seller = detail?.seller_name || (isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House');
-                      const amount = detail?.grand_total 
-                        ? `₹${detail.grand_total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
+                      const seller = inv.seller_name || '—';
+                      const amount = inv.grand_total
+                        ? `₹${inv.grand_total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                         : (inv.confidence ? `₹${(inv.confidence * 1500).toFixed(2)}` : '—');
-                      const dispInvoiceNumber = detail?.invoice_number ? `#${detail.invoice_number}` : `#${inv.filename.substring(0, 10) || inv.run_id.substring(4, 12)}`;
+                      const dispInvoiceNumber = inv.invoice_number ? `#${inv.invoice_number}` : `#${inv.run_id.substring(0, 8)}`;
 
                       return (
                         <tr key={inv.run_id} className="hover:bg-[#f8fafc] transition-colors">

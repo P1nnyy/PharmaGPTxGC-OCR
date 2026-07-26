@@ -23,9 +23,11 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
         # Automatically load environment variables from local .env file
         load_dotenv(".env")
         
-        # 1. Read Azure configuration settings from the environment
-        self.endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT")
-        self.api_key = os.environ.get("DOCUMENTINTELLIGENCE_API_KEY")
+        # 1. Read Azure configuration settings from the environment.
+        # DOCUMENTINTELLIGENCE_* is the primary name; AZURE_DOCUMENT_* (used by
+        # core/config.py Settings) is accepted as a fallback for consistency.
+        self.endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT") or os.environ.get("AZURE_DOCUMENT_ENDPOINT")
+        self.api_key = os.environ.get("DOCUMENTINTELLIGENCE_API_KEY") or os.environ.get("AZURE_DOCUMENT_KEY")
         self.model_id = os.environ.get("AZURE_DI_MODEL_ID", "prebuilt-invoice")
         
         # 2. Determine whether raw response JSON caching is requested

@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { apiClient } from '../api/client';
 import { useRun } from '../context/RunContext';
-import { selectMainTable, getInvoiceImageUrl } from '../api/client';
 import {
   ZoomIn,
   ZoomOut,
@@ -11,9 +11,14 @@ import {
   CheckCircle,
   FileSpreadsheet,
   AlertTriangle,
-  Info,
   RefreshCw,
-  X // Used for closing the details side drawer
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  Maximize2,
+  X,
+  Lock,
+  Pencil
 } from 'lucide-react';
 
 // Type definition for parsed invoice header attributes
@@ -28,6 +33,11 @@ interface InvoiceHeader {
   sgst: number | null;
   igst: number | null;
   grand_total: number | null;
+  seller_gstin?: string;
+  seller_address?: string;
+  seller_phone?: string;
+  drug_license?: string;
+  buyer_gstin?: string;
 }
 
 // Type definition for spreadsheet row attributes (allowing nulls for clean validation)
@@ -46,6 +56,7 @@ interface TableLineItem {
   gst_percent: number | null;
   amount: number | null;
   is_suggested_amount?: boolean;
+  bounding_box?: number[];
 }
 
 // Helper: Check if a value is present (non-empty string, non-null, non-undefined)
@@ -113,16 +124,12 @@ const parseOptionalString = (val: any): string => {
   return String(val).trim();
 };
 
-// Legacy helper compatibility mappings
-const parseOptionalFloat = toNumberOrNull;
+// (parseOptionalFloat was removed; use toNumberOrNull directly)
 
 export const InvoiceReviewPage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
-  const { runs } = useRun();
-
-  // Selected Run Summary metadata
-  const runSummary = runs.find((r) => r.run_id === runId) || null;
+  const { refreshRuns } = useRun();
 
   // Zoom & Rotation Preview State for the original scan
   const [zoom, setZoom] = useState(1);
@@ -134,8 +141,46 @@ export const InvoiceReviewPage: React.FC = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
+  // Track actual rendered image size for correct clamp math
+  // These are updated on image load and viewport resize via ResizeObserver
+  const [imgRenderedW, setImgRenderedW] = useState(0);
+  const [imgRenderedH, setImgRenderedH] = useState(0);
+
   // Raw engine metadata state
   const [rawEngineMetadata, setRawEngineMetadata] = useState<any>(null);
+
+  // Ref for scanner viewport element (overflow:hidden container)
+  const viewportRef = useRef<HTMLDivElement>(null);
+  // Ref for the actual <img> tag to read rendered dimensions
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  // Full-screen Image Lightbox Modal Overlay state
+  const [isFullscreenLightboxOpen, setIsFullscreenLightboxOpen] = useState(false);
+
+  // Lightbox has its own independent zoom/pan (separate from the inline preview)
+  const [lightboxZoom, setLightboxZoom] = useState(1);
+  const [lightboxPanX, setLightboxPanX] = useState(0);
+  const [lightboxPanY, setLightboxPanY] = useState(0);
+  const [isLightboxDragging, setIsLightboxDragging] = useState(false);
+  const [lightboxDragStart, setLightboxDragStart] = useState({ x: 0, y: 0 });
+  const lightboxContainerRef = useRef<HTMLDivElement>(null);
+  const lightboxImgRef = useRef<HTMLImageElement>(null);
+  const lightboxZoomRef = useRef(1);
+  useEffect(() => { lightboxZoomRef.current = lightboxZoom; }, [lightboxZoom]);
+
+  const openLightbox = () => {
+    setLightboxZoom(1);
+    setLightboxPanX(0);
+    setLightboxPanY(0);
+    setIsFullscreenLightboxOpen(true);
+  };
+
+  // Expandable Metadata toggle state
+  const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
+
+  // Track active line item row for Human-like Scan Zooming & Highlighting
+  const [activeRowId, setActiveRowId] = useState<string | null>(null);
+  const [highlightedRowId, setHighlightedRowId] = useState<string | null>(null);
 
   // Editor states
   const [header, setHeader] = useState<InvoiceHeader>({
@@ -148,18 +193,146 @@ export const InvoiceReviewPage: React.FC = () => {
     cgst: null,
     sgst: null,
     igst: null,
-    grand_total: null
+    grand_total: null,
+    seller_gstin: '',
+    seller_address: '',
+    seller_phone: '',
+    drug_license: '',
+    buyer_gstin: ''
   });
 
   const [lineItems, setLineItems] = useState<TableLineItem[]>([]);
   const [confidence, setConfidence] = useState(85);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [invoiceStatus, setInvoiceStatus] = useState<'needs_review' | 'verified'>('needs_review');
+  const [imageUrl, setImageUrl] = useState<string>('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Verified invoices load locked — editing them (add/delete/edit line items,
+  // header fields) requires an explicit unlock click so a saved record can't
+  // be casually altered just by opening it from history.
+  const [isLocked, setIsLocked] = useState(false);
+  const isReadOnly = isLocked;
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
 
   // ID of the line item currently active in the details side drawer
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
-  // Mouse handlers for click-drag panning scan image
+  // -------------------------------------------------------------------
+  // ZOOM MATH: clamp pan using layout dimensions (clientWidth/clientHeight)
+  // to avoid exponential scaling bugs from getBoundingClientRect().
+  // When rotated 90° or 270°, width and height swap.
+  // -------------------------------------------------------------------
+  const getClampLimits = useCallback(
+    (currentZoom: number) => {
+      const vW = viewportRef.current?.clientWidth || 700;
+      const vH = viewportRef.current?.clientHeight || 340;
+      const natW = imgRef.current?.clientWidth || imgRenderedW || vW;
+      const natH = imgRef.current?.clientHeight || imgRenderedH || vH;
+      
+      const normRot = ((Math.round(rotation / 90) * 90) % 360 + 360) % 360;
+      const effW = (normRot === 90 || normRot === 270) ? natH : natW;
+      const effH = (normRot === 90 || normRot === 270) ? natW : natH;
+      
+      const maxPanX = Math.max(0, (effW * currentZoom - vW) / 2);
+      const maxPanY = Math.max(0, (effH * currentZoom - vH) / 2);
+      return { maxPanX, maxPanY };
+    },
+    [imgRenderedW, imgRenderedH, rotation]
+  );
+
+  const clampPan = useCallback(
+    (rawX: number, rawY: number, currentZoom: number) => {
+      if (currentZoom <= 1.0) return { panX: 0, panY: 0 };
+      const { maxPanX, maxPanY } = getClampLimits(currentZoom);
+      return {
+        panX: Math.max(-maxPanX, Math.min(maxPanX, rawX)),
+        panY: Math.max(-maxPanY, Math.min(maxPanY, rawY)),
+      };
+    },
+    [getClampLimits]
+  );
+
+  // Capture layout image dimensions on load and on viewport resize
+  const captureImgDimensions = useCallback(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.clientWidth > 0) {
+      setImgRenderedW(img.clientWidth);
+      setImgRenderedH(img.clientHeight);
+    }
+  }, []);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const ro = new ResizeObserver(captureImgDimensions);
+    ro.observe(vp);
+    return () => ro.disconnect();
+  }, [captureImgDimensions]);
+
+  const headerStackRef = useRef<HTMLDivElement>(null);
+
+
+  // -------------------------------------------------------------------
+  // Mouse Wheel / Trackpad Gesture: any wheel scroll while hovered over the
+  // image always zooms in/out (panning is via click-drag once zoomed in).
+  // -------------------------------------------------------------------
+  const zoomRef = useRef(zoom);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+
+  const handleWheelReact = useCallback((e: React.WheelEvent<HTMLDivElement> | WheelEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.deltaY === 0) return;
+
+    const delta = -e.deltaY * 0.012;
+    setZoom((prev) => {
+      const next = Math.min(10.0, Math.max(0.5, prev + delta));
+      if (next <= 1.0) {
+        setPanX(0);
+        setPanY(0);
+      } else {
+        setPanX((px) => {
+          const { maxPanX } = getClampLimits(next);
+          return Math.max(-maxPanX, Math.min(maxPanX, px));
+        });
+        setPanY((py) => {
+          const { maxPanY } = getClampLimits(next);
+          return Math.max(-maxPanY, Math.min(maxPanY, py));
+        });
+      }
+      return next;
+    });
+  }, [getClampLimits]);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => handleWheelReact(e);
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, [isLoading, handleWheelReact]);
+
+  // ESC Key Listener for Full-screen Lightbox Modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsFullscreenLightboxOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+
+
+  // -------------------------------------------------------------------
+  // Mouse click-drag panning handlers
+  // -------------------------------------------------------------------
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (zoom <= 1) return;
     setIsDragging(true);
@@ -169,10 +342,11 @@ export const InvoiceReviewPage: React.FC = () => {
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isDragging || zoom <= 1) return;
-    const newPanX = e.clientX - dragStart.x;
-    const newPanY = e.clientY - dragStart.y;
-    setPanX(newPanX);
-    setPanY(newPanY);
+    const rawX = e.clientX - dragStart.x;
+    const rawY = e.clientY - dragStart.y;
+    const { panX: cx, panY: cy } = clampPan(rawX, rawY, zoom);
+    setPanX(cx);
+    setPanY(cy);
   };
 
   const handleMouseUp = () => {
@@ -184,7 +358,94 @@ export const InvoiceReviewPage: React.FC = () => {
     return isDragging ? 'cursor-grabbing' : 'cursor-grab';
   };
 
-  // Scroll to and focus the first missing critical field
+  // -------------------------------------------------------------------
+  // Lightbox zoom/pan — same wheel-always-zooms + drag-to-pan behavior as
+  // the inline preview, scoped to the fullscreen modal's own state.
+  // -------------------------------------------------------------------
+  const getLightboxClampLimits = useCallback(
+    (currentZoom: number) => {
+      const vW = lightboxContainerRef.current?.clientWidth || window.innerWidth;
+      const vH = lightboxContainerRef.current?.clientHeight || window.innerHeight;
+      const natW = lightboxImgRef.current?.clientWidth || vW;
+      const natH = lightboxImgRef.current?.clientHeight || vH;
+
+      const normRot = ((Math.round(rotation / 90) * 90) % 360 + 360) % 360;
+      const effW = (normRot === 90 || normRot === 270) ? natH : natW;
+      const effH = (normRot === 90 || normRot === 270) ? natW : natH;
+
+      const maxPanX = Math.max(0, (effW * currentZoom - vW) / 2);
+      const maxPanY = Math.max(0, (effH * currentZoom - vH) / 2);
+      return { maxPanX, maxPanY };
+    },
+    [rotation]
+  );
+
+  const handleLightboxWheel = useCallback((e: WheelEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.deltaY === 0) return;
+
+    const delta = -e.deltaY * 0.012;
+    setLightboxZoom((prev) => {
+      const next = Math.min(10.0, Math.max(1.0, prev + delta));
+      if (next <= 1.0) {
+        setLightboxPanX(0);
+        setLightboxPanY(0);
+      } else {
+        setLightboxPanX((px) => {
+          const { maxPanX } = getLightboxClampLimits(next);
+          return Math.max(-maxPanX, Math.min(maxPanX, px));
+        });
+        setLightboxPanY((py) => {
+          const { maxPanY } = getLightboxClampLimits(next);
+          return Math.max(-maxPanY, Math.min(maxPanY, py));
+        });
+      }
+      return next;
+    });
+  }, [getLightboxClampLimits]);
+
+  useEffect(() => {
+    if (!isFullscreenLightboxOpen) return;
+    const el = lightboxContainerRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => handleLightboxWheel(e);
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, [isFullscreenLightboxOpen, handleLightboxWheel]);
+
+  const handleLightboxMouseDown = (e: React.MouseEvent) => {
+    if (lightboxZoomRef.current <= 1) return;
+    setIsLightboxDragging(true);
+    setLightboxDragStart({ x: e.clientX - lightboxPanX, y: e.clientY - lightboxPanY });
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleLightboxMouseMove = (e: React.MouseEvent) => {
+    if (!isLightboxDragging || lightboxZoomRef.current <= 1) return;
+    const rawX = e.clientX - lightboxDragStart.x;
+    const rawY = e.clientY - lightboxDragStart.y;
+    const { maxPanX, maxPanY } = getLightboxClampLimits(lightboxZoomRef.current);
+    setLightboxPanX(Math.max(-maxPanX, Math.min(maxPanX, rawX)));
+    setLightboxPanY(Math.max(-maxPanY, Math.min(maxPanY, rawY)));
+  };
+
+  const handleLightboxMouseUp = () => setIsLightboxDragging(false);
+
+  const getLightboxCursorClass = () => {
+    if (lightboxZoom <= 1) return 'cursor-zoom-in';
+    return isLightboxDragging ? 'cursor-grabbing' : 'cursor-grab';
+  };
+
+  // -------------------------------------------------------------------
+  // Row click: set active row (auto-zoom disabled as requested)
+  // -------------------------------------------------------------------
+  const handleRowClick = (itemId: string, _rowIndex?: number) => {
+    setActiveRowId(itemId);
+  };
+
+  // Missing Fields Anchor Routing (Offset-Aware)
   const handleScrollToFirstMissing = () => {
     const headerFields: (keyof InvoiceHeader)[] = ['invoice_date', 'invoice_number', 'seller_name', 'grand_total'];
     for (const field of headerFields) {
@@ -199,46 +460,30 @@ export const InvoiceReviewPage: React.FC = () => {
     }
 
     for (const item of lineItems) {
-      if (isCriticalItemMissing(item, 'product_name')) {
-        const el = document.getElementById(`item-name-${item.id}`);
-        if (el) {
-          el.focus();
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
-      }
-      if (isCriticalItemMissing(item, 'batch')) {
-        const el = document.getElementById(`item-batch-${item.id}`);
-        if (el) {
-          el.focus();
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
-      }
-      if (isCriticalItemMissing(item, 'hsn')) {
-        const el = document.getElementById(`item-hsn-${item.id}`);
-        if (el) {
-          el.focus();
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
-      }
-      if (isCriticalItemMissing(item, 'quantity')) {
-        setSelectedItemId(item.id);
-        window.setTimeout(() => {
-          const el = document.getElementById(`item-quantity-${item.id}`);
-          if (el) {
-            el.focus();
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const isMissingName = isCriticalItemMissing(item, 'product_name');
+      const isMissingBatch = isCriticalItemMissing(item, 'batch');
+      const isMissingHsn = isCriticalItemMissing(item, 'hsn');
+      const isMissingQty = isCriticalItemMissing(item, 'quantity');
+      const isMissingAmount = isCriticalItemMissing(item, 'amount');
+
+      if (isMissingName || isMissingBatch || isMissingHsn || isMissingQty || isMissingAmount) {
+        const rowEl = document.getElementById(`item-row-${item.id}`);
+        if (rowEl) {
+          rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+          setHighlightedRowId(item.id);
+          window.setTimeout(() => setHighlightedRowId(null), 2500);
+
+          const targetInputId = isMissingName ? `item-name-${item.id}`
+            : isMissingBatch ? `item-batch-${item.id}`
+            : isMissingHsn ? `item-hsn-${item.id}`
+            : isMissingQty ? `item-quantity-${item.id}`
+            : `item-amount-${item.id}`;
+
+          const inputEl = document.getElementById(targetInputId);
+          if (inputEl) {
+            inputEl.focus();
           }
-        }, 0);
-        return;
-      }
-      if (isCriticalItemMissing(item, 'amount')) {
-        const el = document.getElementById(`item-amount-${item.id}`);
-        if (el) {
-          el.focus();
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           return;
         }
       }
@@ -269,7 +514,7 @@ export const InvoiceReviewPage: React.FC = () => {
     if (isCriticalHeaderMissing('invoice_date')) count++;
     if (isCriticalHeaderMissing('seller_name')) count++;
     if (isCriticalHeaderMissing('grand_total')) count++;
-    
+
     lineItems.forEach((item) => {
       if (isCriticalItemMissing(item, 'product_name')) count++;
       if (isCriticalItemMissing(item, 'batch')) count++;
@@ -277,13 +522,15 @@ export const InvoiceReviewPage: React.FC = () => {
       if (isCriticalItemMissing(item, 'quantity')) count++;
       if (isCriticalItemMissing(item, 'amount')) count++;
     });
-    
+
     return count;
   };
 
-  // Load and Map details on mount
+  // Load invoice details from the backend (Neo4j is the source of truth —
+  // every tab/device fetches the same record, so nothing goes stale across tabs).
   useEffect(() => {
     if (!runId) return;
+    let cancelled = false;
     setIsLoading(true);
     setError(null);
     setZoom(1);
@@ -292,149 +539,70 @@ export const InvoiceReviewPage: React.FC = () => {
     setPanY(0);
     setIsDragging(false);
 
-    try {
-      const storedRuns = localStorage.getItem('ocr_workbench_runs');
-      const parsedRuns = storedRuns ? JSON.parse(storedRuns) : [];
-      const matchingSummary = parsedRuns.find((r: any) => r.run_id === runId);
+    (async () => {
+      try {
+        const detail: any = await apiClient.getInvoiceDetail(runId);
+        if (cancelled) return;
 
-      const rawDetailStr = localStorage.getItem(`ocr_workbench_run_detail_${runId}`);
-      
-      // Handle fallback mockup calculations for demo run if cache is missing
-      if (!rawDetailStr) {
-        if (matchingSummary?.is_demo) {
-          const isGenome = matchingSummary.filename.toLowerCase().includes('genome');
-          setHeader({
-            invoice_number: isGenome ? 'INV-GEN-9921' : 'TBL_UUID_99120-X',
-            invoice_date: '2026-06-03',
-            seller_name: isGenome ? 'Genome Pharmaceuticals' : 'Shivam Drugs House',
-            buyer_name: 'My Pharmacy Central',
-            subtotal: 1524.50,
-            discount: 121.96,
-            cgst: 121.96,
-            sgst: 121.96,
-            igst: 0,
-            grand_total: 1646.46
-          });
+        setRawEngineMetadata(detail);
+        setInvoiceStatus(detail.status === 'verified' ? 'verified' : 'needs_review');
+        setIsLocked(detail.status === 'verified');
+        setImageUrl(detail.image_url || '');
 
-          setLineItems([
-            {
-              id: 'item-1',
-              product_name: 'Amoxicillin 500mg Cap (100)',
-              batch: 'BN-99212',
-              expiry: '12/2028',
-              hsn: '3004',
-              pack: '10x10',
-              quantity: 12,
-              free_quantity: 0,
-              mrp: 54.00,
-              rate: 42.00,
-              discount: 0,
-              gst_percent: 18,
-              amount: 504.00
-            },
-            {
-              id: 'item-2',
-              product_name: 'Ciprofloxacin 250mg Tab (20)',
-              batch: '',
-              expiry: '05/2027',
-              hsn: '3004',
-              pack: '15x10',
-              quantity: 5,
-              free_quantity: 0,
-              mrp: 140.00,
-              rate: 125.50,
-              discount: 0,
-              gst_percent: 18,
-              amount: 627.50
-            },
-            {
-              id: 'item-3',
-              product_name: 'Ibuprofen 400mg (50)',
-              batch: 'BN-8812',
-              expiry: '08/2028',
-              hsn: '3004',
-              pack: '3x10',
-              quantity: 20,
-              free_quantity: 0,
-              mrp: 18.00,
-              rate: 15.20,
-              discount: 0,
-              gst_percent: 12,
-              amount: 304.00
-            },
-            {
-              id: 'item-4',
-              product_name: 'Omeprazole 20mg (30)',
-              batch: 'BN-4451',
-              expiry: '11/2026',
-              hsn: '3004',
-              pack: '100ml',
-              quantity: 10,
-              free_quantity: 0,
-              mrp: 12.00,
-              rate: 8.90,
-              discount: 0,
-              gst_percent: 12,
-              amount: 89.00
-            }
-          ]);
-          setConfidence(Math.round((matchingSummary.confidence || 0.88) * 100));
-          setIsLoading(false);
-          return;
-        } else {
-          throw new Error('Invoice extraction details not found in local cache.');
+        setHeader({
+          invoice_number: detail.invoice_number || '',
+          invoice_date: detail.invoice_date || '',
+          seller_name: detail.seller_name || detail.seller?.name || '',
+          buyer_name: detail.buyer_name || '',
+          subtotal: detail.subtotal ?? null,
+          discount: detail.discount ?? null,
+          cgst: detail.cgst ?? null,
+          sgst: detail.sgst ?? null,
+          igst: detail.igst ?? null,
+          grand_total: detail.grand_total ?? null,
+          seller_gstin: detail.seller_gstin || detail.seller?.gstin || '',
+          seller_address: detail.seller_address || detail.seller?.address || '',
+          seller_phone: detail.seller_phone || detail.seller?.phone || '',
+          drug_license: detail.drug_license || detail.seller?.drug_license || '',
+          buyer_gstin: detail.buyer_gstin || '',
+        });
+
+        // ---- Auto Rotation from Azure Page Angle ----
+        const angleCandidate = detail.page_angle;
+        if (angleCandidate !== undefined && angleCandidate !== null) {
+          const parsedAngle = parseFloat(String(angleCandidate));
+          if (!isNaN(parsedAngle)) {
+            // Convert Azure counter-clockwise page angle to CSS clockwise rotation
+            const normAngle = ((-parsedAngle % 360) + 360) % 360;
+            const roundedAngle = Math.round(normAngle / 90) * 90 % 360;
+            setRotation(roundedAngle);
+          }
         }
-      }
 
-      const detail = JSON.parse(rawDetailStr);
-      setConfidence(Math.round((detail.confidence || 0.85) * 100));
-      setRawEngineMetadata(detail.raw_engine_metadata || null);
+        if (detail.confidence !== undefined && detail.confidence !== null) {
+          setConfidence(Math.round((toNumberOrNull(detail.confidence) ?? 0.85) * 100));
+        }
 
-      const totalsObj = detail.invoice_totals || detail.metadata?.invoice_totals || detail.canonical_invoice?.totals || detail.metadata?.canonical_invoice?.totals || {};
-      const taxObj = detail.tax_summary || detail.metadata?.tax_summary || detail.tax || detail.metadata?.tax || {};
-      const canonicalHeader = detail.canonical_invoice?.header || detail.metadata?.canonical_invoice?.header || {};
-
-      // Parse structured header fields without zero-defaulting
-      setHeader({
-        invoice_number: parseOptionalString(detail.invoice_number || detail.metadata?.invoice_number || totalsObj.invoice_number || canonicalHeader.invoice_number),
-        invoice_date: parseOptionalString(detail.invoice_date || detail.metadata?.invoice_date || totalsObj.invoice_date || canonicalHeader.invoice_date),
-        seller_name: parseOptionalString(detail.seller_name || detail.metadata?.seller_name || detail.metadata?.supplier_name || totalsObj.seller_name || canonicalHeader.supplier_name),
-        buyer_name: parseOptionalString(detail.buyer_name || detail.metadata?.buyer_name || totalsObj.buyer_name || canonicalHeader.buyer_name),
-        subtotal: parseOptionalFloat(detail.subtotal ?? detail.metadata?.subtotal ?? totalsObj.subtotal ?? canonicalHeader.subtotal),
-        discount: parseOptionalFloat(detail.discount ?? detail.metadata?.discount ?? totalsObj.discount ?? canonicalHeader.discount),
-        cgst: parseOptionalFloat(detail.cgst ?? detail.metadata?.tax?.cgst ?? taxObj.cgst ?? totalsObj.cgst ?? canonicalHeader.tax?.cgst),
-        sgst: parseOptionalFloat(detail.sgst ?? detail.metadata?.tax?.sgst ?? taxObj.sgst ?? totalsObj.sgst ?? canonicalHeader.tax?.sgst),
-        igst: parseOptionalFloat(detail.igst ?? detail.metadata?.tax?.igst ?? taxObj.igst ?? totalsObj.igst ?? canonicalHeader.tax?.igst),
-        grand_total: parseOptionalFloat(detail.grand_total ?? detail.metadata?.grand_total ?? totalsObj.grand_total ?? canonicalHeader.grand_total)
-      });
-
-      // Parse structured line items (handling Azure DI, item_rows_clean, LLM & structured table schemas)
-      let parsedItems: TableLineItem[] = [];
-
-      const rawLineItems = detail.line_items || detail.metadata?.line_items;
-      const rawLlmItems = detail.metadata?.llm_extraction?.items;
-      const cleanItemRows = detail.item_rows_clean || detail.metadata?.item_rows_clean;
-      const structTables = detail.structured_tables || detail.metadata?.structured_tables;
-
-      if (Array.isArray(rawLineItems) && rawLineItems.length > 0) {
-        parsedItems = rawLineItems.map((item: any, idx: number) => {
-          const qty = toNumberOrNull(item.quantity !== undefined ? item.quantity : item.qty);
+        // ---- Line Items ----
+        const itemsArr: any[] = detail.line_items || [];
+        const parsedItems: TableLineItem[] = itemsArr.map((item: any, idx: number) => {
+          const amount = toNumberOrNull(getAmountFromItem(item));
           const rate = toNumberOrNull(item.rate);
-          const rawAmount = getAmountFromItem(item);
-          let amount = toNumberOrNull(rawAmount);
-          let is_suggested_amount = false;
+          const qty = toNumberOrNull(item.quantity);
 
-          if (amount === null && qty !== null && rate !== null) {
+          let is_suggested_amount = false;
+          let finalAmount = amount;
+          if (finalAmount === null && qty !== null && rate !== null) {
             const disc = toNumberOrNull(item.discount) || 0;
-            amount = parseFloat((qty * rate - disc).toFixed(2));
+            finalAmount = parseFloat((qty * rate - disc).toFixed(2));
             is_suggested_amount = true;
           }
 
           return {
-            id: `item-${idx}`,
-            product_name: parseOptionalString(item.name || item.product_name || item.product),
-            batch: parseOptionalString(item.batch),
-            expiry: parseOptionalString(item.expiry),
+            id: item.id ?? `item-${idx + 1}`,
+            product_name: parseOptionalString(item.product_name),
+            batch: parseOptionalString(item.batch_number ?? item.batch),
+            expiry: parseOptionalString(item.expiry_date ?? item.expiry),
             hsn: parseOptionalString(item.hsn),
             pack: parseOptionalString(item.pack),
             quantity: qty,
@@ -443,131 +611,33 @@ export const InvoiceReviewPage: React.FC = () => {
             rate: rate,
             discount: toNumberOrNull(item.discount),
             gst_percent: toNumberOrNull(item.gst_percent),
-            amount: amount,
-            is_suggested_amount: is_suggested_amount
+            amount: finalAmount,
+            is_suggested_amount: is_suggested_amount,
+            bounding_box: Array.isArray(item.bounding_box) ? item.bounding_box : undefined,
           };
         });
-      } else if (Array.isArray(rawLlmItems) && rawLlmItems.length > 0) {
-        parsedItems = rawLlmItems.map((item: any, idx: number) => {
-          const qty = toNumberOrNull(item.qty !== undefined ? item.qty : item.quantity);
-          const rate = toNumberOrNull(item.rate);
-          const rawAmount = getAmountFromItem(item);
-          let amount = toNumberOrNull(rawAmount);
-          let is_suggested_amount = false;
 
-          if (amount === null && qty !== null && rate !== null) {
-            const disc = toNumberOrNull(item.discount) || 0;
-            amount = parseFloat((qty * rate - disc).toFixed(2));
-            is_suggested_amount = true;
+        setLineItems(parsedItems);
+        setHeader((prev) => {
+          if (!isPresent(prev.subtotal) && parsedItems.length > 0) {
+            const sum = parsedItems.reduce((acc, it) => acc + (it.amount || 0), 0);
+            return { ...prev, subtotal: sum > 0 ? parseFloat(sum.toFixed(2)) : null };
           }
-
-          return {
-            id: `item-${idx}`,
-            product_name: parseOptionalString(item.product_name || item.name),
-            batch: parseOptionalString(item.batch),
-            expiry: parseOptionalString(item.expiry),
-            hsn: parseOptionalString(item.hsn_code || item.hsn),
-            pack: parseOptionalString(item.pack),
-            quantity: qty,
-            free_quantity: toNumberOrNull(item.free_quantity),
-            mrp: toNumberOrNull(item.mrp),
-            rate: rate,
-            discount: toNumberOrNull(item.discount),
-            gst_percent: toNumberOrNull(item.gst_percent),
-            amount: amount,
-            is_suggested_amount: is_suggested_amount
-          };
+          return prev;
         });
-      } else if (Array.isArray(cleanItemRows) && cleanItemRows.length > 0) {
-        parsedItems = cleanItemRows.map((item: any, idx: number) => {
-          const qty = toNumberOrNull(item.quantity !== undefined ? item.quantity : item.qty);
-          const rate = toNumberOrNull(item.rate);
-          const rawAmount = getAmountFromItem(item) ?? item.net_amt;
-          let amount = toNumberOrNull(rawAmount);
-          let is_suggested_amount = false;
-
-          if (amount === null && qty !== null && rate !== null) {
-            const disc = toNumberOrNull(item.discount) || 0;
-            amount = parseFloat((qty * rate - disc).toFixed(2));
-            is_suggested_amount = true;
-          }
-
-          return {
-            id: `item-${idx}`,
-            product_name: parseOptionalString(item.item_description || item.product_name || item.name || item.product || item.pcode),
-            batch: parseOptionalString(item.batch || item.batch_no),
-            expiry: parseOptionalString(item.expiry || item.expiry_date),
-            hsn: parseOptionalString(item.hsn || item.hsn_code),
-            pack: parseOptionalString(item.pack),
-            quantity: qty,
-            free_quantity: toNumberOrNull(item.free_quantity ?? item.free_qty),
-            mrp: toNumberOrNull(item.mrp),
-            rate: rate,
-            discount: toNumberOrNull(item.discount),
-            gst_percent: toNumberOrNull(item.gst_percent ?? item.gst),
-            amount: amount,
-            is_suggested_amount: is_suggested_amount
-          };
-        });
-      } else if (Array.isArray(structTables) && structTables.length > 0) {
-        const mainTbl = selectMainTable({ ...detail, structured_tables: structTables });
-        if (mainTbl && Array.isArray(mainTbl.cells)) {
-          const uniqueRows = Array.from(new Set(mainTbl.cells.map((c: any) => c.row_id || c.row_index || 0))).sort((a: any, b: any) => a - b);
-          
-          parsedItems = uniqueRows.slice(1).map((rowId: any, idx: number) => {
-            const rowCells = mainTbl.cells.filter((c: any) => (c.row_id ?? c.row_index) === rowId);
-            
-            const cellTextFor = (label: string) => {
-              const cell = rowCells.find((c: any) => c.semantic_label === label || c.label === label);
-              return cell ? cell.text : '';
-            };
-
-            const qtyText = cellTextFor('quantity') || cellTextFor('quantity_pcs');
-            const rateText = cellTextFor('unit_price') || cellTextFor('rate');
-            const amountText = cellTextFor('row_total') || cellTextFor('amount') || cellTextFor('value');
-            const mrpText = cellTextFor('mrp');
-            const discountText = cellTextFor('discount');
-            const gstText = cellTextFor('gst_percent');
-            const freeQtyText = cellTextFor('free_quantity');
-
-            const qty = toNumberOrNull(qtyText);
-            const rate = toNumberOrNull(rateText);
-            let amount = toNumberOrNull(amountText);
-            let is_suggested_amount = false;
-
-            if (amount === null && qty !== null && rate !== null) {
-              const disc = toNumberOrNull(discountText) || 0;
-              amount = parseFloat((qty * rate - disc).toFixed(2));
-              is_suggested_amount = true;
-            }
-
-            return {
-              id: `item-${idx}`,
-              product_name: parseOptionalString(cellTextFor('product_name') || cellTextFor('product')),
-              batch: parseOptionalString(cellTextFor('batch_no') || cellTextFor('batch')),
-              expiry: parseOptionalString(cellTextFor('expiry_date') || cellTextFor('expiry')),
-              hsn: parseOptionalString(cellTextFor('hsn_code') || cellTextFor('hsn')),
-              pack: parseOptionalString(cellTextFor('pack')),
-              quantity: qty,
-              free_quantity: toNumberOrNull(freeQtyText),
-              mrp: toNumberOrNull(mrpText),
-              rate: rate,
-              discount: toNumberOrNull(discountText),
-              gst_percent: toNumberOrNull(gstText),
-              amount: amount,
-              is_suggested_amount: is_suggested_amount
-            };
-          });
+      } catch (err: any) {
+        if (!cancelled) {
+          console.error(err);
+          setError(err.message || 'Failed to load invoice details.');
         }
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
+    })();
 
-      setLineItems(parsedItems);
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Failed to parse invoice details.');
-    } finally {
-      setIsLoading(false);
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [runId]);
 
   // Handle header field edits
@@ -591,7 +661,7 @@ export const InvoiceReviewPage: React.FC = () => {
           const qty = key === 'quantity' ? toNumberOrNull(value) : item.quantity;
           const rate = key === 'rate' ? toNumberOrNull(value) : item.rate;
           const disc = key === 'discount' ? toNumberOrNull(value) : item.discount;
-          
+
           if (item.amount === null || item.is_suggested_amount) {
             if (qty !== null && rate !== null) {
               updatedItem.amount = parseFloat((qty * rate - (disc || 0)).toFixed(2));
@@ -671,7 +741,8 @@ export const InvoiceReviewPage: React.FC = () => {
   const isSuggestedAmtPresent = lineItems.some(item => item.is_suggested_amount);
   const isAnyAmountMissing = lineItems.some(item => !isPresent(getItemAmount(item)));
   const hasMissingGrandTotal = !isPresent(header.grand_total);
-  const hasMissingSubtotal = !isPresent(header.subtotal);
+  const effectiveSubtotal = isPresent(header.subtotal) ? toNumberOrNull(header.subtotal) : computedSubtotal;
+  const hasMissingSubtotal = !isPresent(effectiveSubtotal);
 
   let mathStatus: 'matched' | 'mismatch' | 'missing_fields';
   let mathStatusMessage: string;
@@ -683,13 +754,12 @@ export const InvoiceReviewPage: React.FC = () => {
     mathStatus = 'missing_fields';
     mathStatusMessage = 'Needs manual review';
   } else {
-    const subVal = toNumberOrNull(header.subtotal);
+    const subVal = effectiveSubtotal;
     const discVal = discountVal !== null ? discountVal : 0;
     const gstTotal = computedGstTotal !== null ? computedGstTotal : 0;
     const rOff = roundoff !== null ? roundoff : 0;
     const grandVal = toNumberOrNull(header.grand_total) || 0;
 
-    // Check 1: Vendor Formula (Subtotal - Discount + GST Total + Roundoff = Grand Total)
     let isFormulaMatched = true;
     if (subVal !== null) {
       const calculatedGrand = subVal - discVal + gstTotal + rOff;
@@ -698,7 +768,6 @@ export const InvoiceReviewPage: React.FC = () => {
       }
     }
 
-    // Check 2: Line Total comparison with Subtotal
     let isLineTotalMatched = true;
     if (subVal !== null && computedSubtotal !== null) {
       const diffWithSubtotal = Math.abs(computedSubtotal - subVal);
@@ -725,87 +794,66 @@ export const InvoiceReviewPage: React.FC = () => {
     }
   }
 
-  // Save changes to localStorage (Draft)
-  const handleSaveDraft = () => {
+  // Builds the PATCH payload shared by Save Draft / Mark as Verified — the
+  // backend is the single source of truth, so both actions just persist the
+  // current edited state there instead of to this browser's localStorage.
+  const buildUpdatePayload = (status?: 'needs_review' | 'verified') => ({
+    invoice_number: header.invoice_number || null,
+    invoice_date: header.invoice_date || null,
+    seller_name: header.seller_name || null,
+    seller_gstin: header.seller_gstin || null,
+    seller_address: header.seller_address || null,
+    seller_phone: header.seller_phone || null,
+    drug_license: header.drug_license || null,
+    subtotal: effectiveSubtotal,
+    discount: header.discount,
+    cgst: header.cgst,
+    sgst: header.sgst,
+    igst: header.igst,
+    grand_total: header.grand_total,
+    ...(status ? { status } : {}),
+    line_items: lineItems.map((item) => ({
+      name: item.product_name || null,
+      pack: item.pack || null,
+      batch: item.batch || null,
+      expiry: item.expiry || null,
+      hsn: item.hsn || null,
+      quantity: item.quantity,
+      free_quantity: item.free_quantity,
+      mrp: item.mrp,
+      rate: item.rate,
+      discount: item.discount,
+      gst_percent: item.gst_percent,
+      amount: item.amount,
+      bounding_box: item.bounding_box ?? null,
+    })),
+  });
+
+  // Save changes without changing verification status
+  const handleSaveDraft = async () => {
+    if (!runId) return;
+    setIsSaving(true);
     try {
-      const rawDetailStr = localStorage.getItem(`ocr_workbench_run_detail_${runId}`);
-      if (rawDetailStr) {
-        const detail = JSON.parse(rawDetailStr);
-        detail.invoice_number = header.invoice_number;
-        detail.invoice_date = header.invoice_date;
-        detail.seller_name = header.seller_name;
-        detail.buyer_name = header.buyer_name;
-        detail.subtotal = header.subtotal;
-        detail.discount = header.discount;
-        detail.grand_total = header.grand_total;
-        detail.line_items = lineItems;
-        detail.cgst = header.cgst;
-        detail.sgst = header.sgst;
-        detail.igst = header.igst;
-        localStorage.setItem(`ocr_workbench_run_detail_${runId}`, JSON.stringify(detail));
-      }
-
-      // Update the Runs summary status to match draft state
-      const storedRuns = localStorage.getItem('ocr_workbench_runs');
-      if (storedRuns) {
-        const parsedRuns = JSON.parse(storedRuns);
-        const updatedRuns = parsedRuns.map((r: any) => {
-          if (r.run_id === runId) {
-            return {
-              ...r,
-              confidence: confidence / 100,
-              status: 'needs_review'
-            };
-          }
-          return r;
-        });
-        localStorage.setItem('ocr_workbench_runs', JSON.stringify(updatedRuns));
-      }
-
+      await apiClient.updateInvoice(runId, buildUpdatePayload());
+      await refreshRuns();
       alert('Draft saved successfully.');
-    } catch (e) {
-      alert('Failed to save draft: ' + String(e));
+    } catch (e: any) {
+      alert('Failed to save draft: ' + (e.message || String(e)));
+    } finally {
+      setIsSaving(false);
     }
   };
 
   // Mark invoice as Verified
-  const handleMarkAsVerified = () => {
+  const handleMarkAsVerified = async () => {
+    if (!runId) return;
+    setIsSaving(true);
     try {
-      // 1. Update run details
-      const rawDetailStr = localStorage.getItem(`ocr_workbench_run_detail_${runId}`);
-      if (rawDetailStr) {
-        const detail = JSON.parse(rawDetailStr);
-        detail.invoice_number = header.invoice_number;
-        detail.invoice_date = header.invoice_date;
-        detail.seller_name = header.seller_name;
-        detail.buyer_name = header.buyer_name;
-        detail.subtotal = header.subtotal;
-        detail.discount = header.discount;
-        detail.grand_total = header.grand_total;
-        detail.line_items = lineItems;
-        detail.cgst = header.cgst;
-        detail.sgst = header.sgst;
-        detail.igst = header.igst;
-        localStorage.setItem(`ocr_workbench_run_detail_${runId}`, JSON.stringify(detail));
-      }
+      await apiClient.updateInvoice(runId, buildUpdatePayload('verified'));
+      setInvoiceStatus('verified');
 
-      // 2. Set Runs summary status to 'verified'
-      const storedRuns = localStorage.getItem('ocr_workbench_runs');
-      if (storedRuns) {
-        const parsedRuns = JSON.parse(storedRuns);
-        const updatedRuns = parsedRuns.map((r: any) => {
-          if (r.run_id === runId) {
-            return {
-              ...r,
-              status: 'verified'
-            };
-          }
-          return r;
-        });
-        localStorage.setItem('ocr_workbench_runs', JSON.stringify(updatedRuns));
-      }
-
-      // 3. Save SKUs to local Inventory database (safe conversion to avoid NaNs)
+      // Keep the local inventory rollup (not yet migrated to the backend)
+      // in sync with the verified line items.
       const storedInventory = localStorage.getItem('pharmaflow_inventory');
       const inventory = storedInventory ? JSON.parse(storedInventory) : [];
 
@@ -816,7 +864,6 @@ export const InvoiceReviewPage: React.FC = () => {
         const mrp = item.mrp || 0;
         const gst = item.gst_percent || 0;
 
-        // Check if matching SKU is already in inventory
         const existingIdx = inventory.findIndex(
           (inv: any) =>
             inv.product.toLowerCase().trim() === item.product_name.toLowerCase().trim() &&
@@ -841,11 +888,27 @@ export const InvoiceReviewPage: React.FC = () => {
       });
 
       localStorage.setItem('pharmaflow_inventory', JSON.stringify(inventory));
-
-      // 4. Redirect to history
+      await refreshRuns();
       navigate('/history');
-    } catch (e) {
-      alert('Failed to verify invoice: ' + String(e));
+    } catch (e: any) {
+      alert('Failed to verify invoice: ' + (e.message || String(e)));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Permanently delete this invoice from the backend
+  const handleDeleteInvoice = async () => {
+    if (!runId) return;
+    setIsDeleting(true);
+    try {
+      await apiClient.deleteInvoice(runId);
+      await refreshRuns();
+      navigate('/history');
+    } catch (e: any) {
+      alert('Failed to delete invoice: ' + (e.message || String(e)));
+      setIsDeleting(false);
+      setShowDeleteConfirm(false);
     }
   };
 
@@ -881,14 +944,10 @@ export const InvoiceReviewPage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  // Get source image
+  // Get source image — a presigned R2 URL from the backend, refreshed on every load
   const getSourceImage = () => {
-    if (!runId) return '';
-    return getInvoiceImageUrl(runId, runSummary?.filename || 'invoice.jpg');
+    return imageUrl;
   };
-
-  // Find currently active item in side drawer details form
-  const selectedItem = lineItems.find(item => item.id === selectedItemId) || null;
 
   if (isLoading) {
     return (
@@ -916,25 +975,40 @@ export const InvoiceReviewPage: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Top action header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-200 pb-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-xl font-bold text-[#0f172a]">
+    <div className="space-y-3">
+
+      {/* ===================================================================
+          SCROLLABLE TITLE ROW — not sticky, scrolls away to reclaim space
+          ================================================================ */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-1">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <h2 className="text-lg font-bold text-[#0f172a]">
             Reviewing Invoice {header.invoice_number ? `#${header.invoice_number}` : ''}
           </h2>
-          
-          {/* Badge: Extraction Confidence */}
-          <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold border ${
+
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
             confidence >= 85
               ? 'bg-green-50 text-green-700 border-green-200'
               : 'bg-amber-50 text-amber-700 border-amber-200'
           }`}>
             Confidence: {confidence}%
           </span>
-          
-          {/* Badge: Math Validation Status */}
-          <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold border ${
+
+          {invoiceStatus === 'verified' && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-green-50 text-green-700 border-green-200 flex items-center space-x-1">
+              <CheckCircle size={10} />
+              <span>Verified</span>
+            </span>
+          )}
+
+          {isLocked && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200 flex items-center space-x-1">
+              <Lock size={10} />
+              <span>Locked</span>
+            </span>
+          )}
+
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
             mathStatus === 'matched'
               ? 'bg-green-50 text-green-700 border-green-200'
               : mathStatus === 'missing_fields'
@@ -943,686 +1017,693 @@ export const InvoiceReviewPage: React.FC = () => {
           }`}>
             Math: {mathStatusMessage}
           </span>
-          
-          {/* Badge: Critical Missing Fields Count */}
+
           {getMissingFieldsCount() > 0 && (
             <span
               onClick={handleScrollToFirstMissing}
-              className="px-2.5 py-1 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 animate-pulse flex items-center space-x-1 cursor-pointer hover:bg-red-100 transition-colors"
+              className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 animate-pulse flex items-center space-x-1 cursor-pointer hover:bg-red-100 transition-colors"
+              title="Click to jump to first missing field"
             >
               <AlertTriangle size={10} />
               <span>Missing Fields: {getMissingFieldsCount()}</span>
             </span>
           )}
         </div>
-        
-        <div className="flex items-center space-x-3">
+
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            title="Delete this invoice"
+            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
+          >
+            <Trash2 size={15} />
+          </button>
           <button
             onClick={handleExportExcel}
-            className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 flex items-center space-x-1.5 shadow-sm transition-colors cursor-pointer"
+            className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-3 py-1.5 rounded-xl text-xs border border-gray-200 flex items-center space-x-1.5 shadow-xs transition-colors cursor-pointer"
           >
-            <FileSpreadsheet size={14} className="text-green-600" />
+            <FileSpreadsheet size={13} className="text-green-600" />
             <span>Export Excel</span>
           </button>
-          <button
-            onClick={handleSaveDraft}
-            className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
-          >
-            Save Draft
-          </button>
-          <button
-            onClick={handleMarkAsVerified}
-            className="bg-[#1b5dfc] hover:bg-[#154ecb] text-white font-semibold px-4 py-2 rounded-xl text-xs flex items-center space-x-1.5 shadow-md shadow-blue-500/10 transition-colors cursor-pointer"
-          >
-            <CheckCircle size={14} />
-            <span>Mark as Verified</span>
-          </button>
+          {isLocked ? (
+            <button
+              onClick={() => setShowUnlockConfirm(true)}
+              className="bg-white hover:bg-amber-50 text-amber-700 font-semibold px-3 py-1.5 rounded-xl text-xs border border-amber-200 flex items-center space-x-1.5 shadow-xs transition-colors cursor-pointer"
+            >
+              <Pencil size={13} />
+              <span>Edit Invoice</span>
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={handleSaveDraft}
+                disabled={isSaving}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-3 py-1.5 rounded-xl text-xs border border-gray-200 shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSaving ? 'Saving…' : 'Save Draft'}
+              </button>
+              <button
+                onClick={handleMarkAsVerified}
+                disabled={isSaving || invoiceStatus === 'verified'}
+                className={`font-semibold px-3.5 py-1.5 rounded-xl text-xs flex items-center space-x-1.5 shadow-md transition-colors ${
+                  invoiceStatus === 'verified'
+                    ? 'bg-green-50 text-green-700 border border-green-200 cursor-default shadow-none'
+                    : 'bg-[#1b5dfc] hover:bg-[#154ecb] text-white shadow-blue-500/10 cursor-pointer disabled:opacity-50'
+                }`}
+              >
+                <CheckCircle size={13} />
+                <span>{invoiceStatus === 'verified' ? 'Verified' : isSaving ? 'Saving…' : 'Mark as Verified'}</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Two Panel Layout Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        
-        {/* Left Scan Preview Panel (Col Span 5) */}
-        <div className="lg:col-span-5 bg-white rounded-2xl border border-[#e2e8f0] p-4 shadow-sm flex flex-col justify-between space-y-4">
-          <div className="flex items-center justify-between pb-2 border-b border-gray-100">
-            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Original Scan</span>
-            <div className="flex items-center space-x-2 bg-slate-50 p-1 rounded-lg border border-gray-200">
+      {/* Unlock Confirmation Dialog — editing a verified invoice takes a
+          deliberate extra step so it can't happen by accident */}
+      {showUnlockConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 max-w-md w-full mx-4 shadow-xl space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="p-2 bg-amber-50 text-amber-600 rounded-xl shrink-0">
+                <Lock size={22} />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-[#0f172a]">Edit this verified invoice?</h3>
+                <p className="text-xs text-gray-500 leading-normal">
+                  This invoice was already verified. Unlocking lets you add, remove, or change line items and header
+                  fields. Only do this if you're sure the correction is needed.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-gray-100">
               <button
-                onClick={() => setZoom((z) => Math.min(3, z + 0.15))}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
-                title="Zoom In"
+                onClick={() => setShowUnlockConfirm(false)}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
               >
-                <ZoomIn size={14} />
+                Cancel
               </button>
               <button
                 onClick={() => {
-                  setZoom((z) => {
-                    const newZoom = Math.max(0.5, z - 0.15);
-                    if (newZoom <= 1) {
-                      setPanX(0);
-                      setPanY(0);
-                    }
-                    return newZoom;
-                  });
+                  setIsLocked(false);
+                  setShowUnlockConfirm(false);
                 }}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
-                title="Zoom Out"
+                className="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-amber-500/10 transition-colors cursor-pointer"
               >
-                <ZoomOut size={14} />
-              </button>
-              <button
-                onClick={() => {
-                  setZoom(1);
-                  setPanX(0);
-                  setPanY(0);
-                }}
-                className="text-[10px] font-bold text-gray-500 px-1 hover:text-gray-800 cursor-pointer"
-                title="Reset Zoom"
-              >
-                100%
-              </button>
-              <div className="w-px h-3 bg-gray-200" />
-              <button
-                onClick={() => {
-                  setRotation((r) => (r + 90) % 360);
-                  setPanX(0);
-                  setPanY(0);
-                }}
-                className="p-1 hover:bg-white text-gray-600 hover:text-gray-900 rounded transition-colors cursor-pointer"
-                title="Rotate 90°"
-              >
-                <RotateCw size={14} />
+                Unlock & Edit
               </button>
             </div>
-          </div>
-
-          {/* Scanner Viewport */}
-          <div 
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseUp}
-            className={`bg-[#f8fafc] border border-slate-100 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center p-4 relative custom-scrollbar ${getCursorClass()}`}
-          >
-            <div 
-              className={`flex items-center justify-center origin-center ${isDragging ? '' : 'transition-transform duration-200'}`}
-              style={{
-                transform: `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`
-              }}
-            >
-              <img
-                src={getSourceImage()}
-                alt="Invoice Scan"
-                className="max-h-[500px] object-contain shadow-md rounded"
-                onError={(e) => {
-                  console.error('Image source loading issue:', e);
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="text-[10px] text-gray-400 flex items-center space-x-1">
-            <Info size={12} className="text-gray-400" />
-            <span>Zoom in to drag/pan the invoice. Use toolbar buttons to zoom/rotate.</span>
           </div>
         </div>
+      )}
 
-        {/* Right Invoice Details and Totals Panel */}
-        <div className="lg:col-span-7 bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden relative">
-          <div className="p-6 space-y-6">
-            
-            {/* 1. Header Metadata Section */}
-            <div className="space-y-4">
-              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider border-b border-gray-100 pb-2">
-                Invoice Details
-              </h3>
-              
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
-                {/* Invoice Date */}
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold text-gray-400 block">Invoice Date *</span>
-                  <input
-                    id="header-invoice_date"
-                    type="text"
-                    value={header.invoice_date}
-                    placeholder="—"
-                    onChange={(e) => handleHeaderChange('invoice_date', e.target.value)}
-                    className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-1.5 text-xs text-[#0f172a] font-medium focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                      isCriticalHeaderMissing('invoice_date') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                    }`}
-                  />
-                </div>
+      {/* ===================================================================
+          STICKY HEADER BLOCK — sticks when it reaches top of <main>
+          Contains: scan preview + quick summary side-by-side
+          The SaaSLayout <main> has overflow-y-auto so sticky:top-0 works
+          inside that scroll container.
+          ================================================================ */}
+      <div
+        ref={headerStackRef}
+        className="sticky top-0 z-30 bg-[#f4f5fa] pt-1 pb-3 flex flex-col gap-3 border-b border-slate-200 shadow-sm"
+        style={{
+          marginLeft: '-1.5rem',
+          marginRight: '-1.5rem',
+          paddingLeft: '1.5rem',
+          paddingRight: '1.5rem',
+          maxHeight: 'calc(100vh - 88px)',
+        }}
+      >
+        {/* Two Panel Layout Grid */}
+        <div className="shrink-0 grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
 
-                {/* Invoice Number */}
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold text-gray-400 block">Invoice Number *</span>
-                  <input
-                    id="header-invoice_number"
-                    type="text"
-                    value={header.invoice_number}
-                    placeholder="—"
-                    onChange={(e) => handleHeaderChange('invoice_number', e.target.value)}
-                    className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-1.5 text-xs text-[#0f172a] font-medium focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                      isCriticalHeaderMissing('invoice_number') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                    }`}
-                  />
-                </div>
-
-                {/* Seller Name */}
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold text-gray-400 block">Seller *</span>
-                  <input
-                    id="header-seller_name"
-                    type="text"
-                    value={header.seller_name}
-                    placeholder="—"
-                    onChange={(e) => handleHeaderChange('seller_name', e.target.value)}
-                    className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-1.5 text-xs text-[#0f172a] font-medium focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                      isCriticalHeaderMissing('seller_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                    }`}
-                  />
-                </div>
-
-                {/* Buyer Name */}
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold text-gray-400 block">Buyer</span>
-                  <input
-                    id="header-buyer_name"
-                    type="text"
-                    value={header.buyer_name}
-                    placeholder="—"
-                    onChange={(e) => handleHeaderChange('buyer_name', e.target.value)}
-                    className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-[#0f172a] font-medium focus:outline-none focus:bg-white focus:border-blue-500"
-                  />
-                </div>
-
-                {/* Grand Total */}
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold text-gray-400 block">Grand Total *</span>
-                  <input
-                    id="header-grand_total"
-                    type="number"
-                    step="any"
-                    value={header.grand_total ?? ''}
-                    placeholder="—"
-                    onChange={(e) => handleHeaderChange('grand_total', e.target.value === '' ? null : parseFloat(e.target.value))}
-                    className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-1.5 text-xs text-[#0f172a] font-medium focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                      isCriticalHeaderMissing('grand_total') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                    }`}
-                  />
-                </div>
+          {/* Left Scan Preview Panel (8 of 12 columns) */}
+          <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs flex flex-col">
+            {/* Dark Header bar */}
+            <div className="bg-slate-900 text-white px-3.5 py-2 flex items-center justify-between shrink-0">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">ORIGINAL SCAN</span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setZoom((z) => Math.min(10.0, z + 0.25))}
+                  className="p-1 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors cursor-pointer"
+                  title="Zoom In"
+                >
+                  <ZoomIn size={14} />
+                </button>
+                <button
+                  onClick={() => {
+                    setZoom((z) => {
+                      const newZoom = Math.max(0.5, z - 0.25);
+                      if (newZoom <= 1) { setPanX(0); setPanY(0); }
+                      return newZoom;
+                    });
+                  }}
+                  className="p-1 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors cursor-pointer"
+                  title="Zoom Out"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <button
+                  onClick={() => { setZoom(1); setPanX(0); setPanY(0); }}
+                  className="text-[10px] font-bold text-slate-400 px-1 hover:text-white cursor-pointer"
+                  title="Reset Zoom"
+                >
+                  100%
+                </button>
+                <div className="w-px h-3 bg-slate-700" />
+                <button
+                  onClick={() => {
+                    setRotation((r) => (r + 90) % 360);
+                    setPanX(0);
+                    setPanY(0);
+                  }}
+                  className="p-1 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors cursor-pointer"
+                  title="Rotate 90°"
+                >
+                  <RotateCw size={14} />
+                </button>
+                <div className="w-px h-3 bg-slate-700" />
+                <button
+                  onClick={openLightbox}
+                  className="p-1 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors cursor-pointer"
+                  title="Expand Full Image"
+                >
+                  <Maximize2 size={14} />
+                </button>
               </div>
             </div>
 
-            {/* 2. Standardized Totals Breakdown Card */}
-            <div className="space-y-3">
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 mt-6">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                    Totals Breakdown
-                  </h4>
-                  <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">
-                    Standardized Formula
+            {/* Viewport Box */}
+            <div
+              ref={viewportRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              onDoubleClick={openLightbox}
+              className={`bg-slate-100 overflow-hidden flex-1 flex items-center justify-center relative select-none ${getCursorClass()}`}
+              style={{ minHeight: '340px', maxHeight: '460px' }}
+            >
+              <div
+                style={{
+                  transform: `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`,
+                  transformOrigin: 'center center',
+                  transition: 'transform 0.15s ease-out',
+                  willChange: 'transform',
+                }}
+              >
+                <img
+                  ref={imgRef}
+                  src={getSourceImage()}
+                  alt="Invoice Scan"
+                  onLoad={captureImgDimensions}
+                  draggable={false}
+                  style={{
+                    maxHeight: '440px',
+                    maxWidth: '100%',
+                    objectFit: 'contain',
+                    display: 'block',
+                    borderRadius: '4px',
+                    boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
+                    userSelect: 'none',
+                    pointerEvents: 'none',
+                  }}
+                  onError={(e) => {
+                    console.error('Image source loading issue:', e);
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Right Quick Summary Card (4 of 12 columns) */}
+          <div className="lg:col-span-4 bg-[#f8fafc] rounded-2xl border border-slate-200/80 p-4 shadow-xs flex flex-col justify-between space-y-4">
+            <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200/60 pb-2">
+              Quick Summary
+            </h3>
+
+            {/* Metrics List */}
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Subtotal</span>
+                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(effectiveSubtotal)}</span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Tax ({header.cgst !== null || header.sgst !== null || header.igst !== null ? 'GST' : '12%'}) +</span>
+                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(computedGstTotal)}</span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500 font-medium">Discount -</span>
+                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(discountVal)}</span>
+              </div>
+
+              <div className="border-t border-slate-200/80 pt-2 flex items-center justify-between">
+                <span className="font-bold text-slate-900 text-sm">Grand Total</span>
+                <span className="font-extrabold text-[#1b5dfc] text-base">{formatCurrencyOrDash(header.grand_total)}</span>
+              </div>
+            </div>
+
+            {/* Summary Footer & Embedded View Invoice Details Button */}
+            <div className="border-t border-slate-200/80 pt-3 space-y-2">
+              <div className="space-y-1 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">DATE</span>
+                  <span className="font-semibold text-slate-700">{header.invoice_date || '—'}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">SELLER</span>
+                  <span className="font-semibold text-slate-700 truncate max-w-[140px] text-right" title={header.seller_name}>
+                    {header.seller_name || '—'}
                   </span>
                 </div>
-
-                {/* Formula Display */}
-                <div className="bg-white border border-slate-100 rounded-lg p-3 text-center shadow-sm">
-                  <span className="text-[10px] text-gray-400 font-semibold block mb-1.5 uppercase tracking-wider">Formula</span>
-                  <div className="text-xs sm:text-sm font-bold text-gray-700 flex flex-wrap items-center justify-center gap-1">
-                    <span>{formatCurrencyOrDash(header.subtotal)}</span>
-                    <span className="text-gray-400 font-normal text-[10px]">(Subtotal)</span>
-                    <span className="mx-1 text-gray-400">-</span>
-                    <span className={discountVal !== null && discountVal > 0 ? "text-red-500" : "text-gray-700"}>
-                      {formatCurrencyOrDash(discountVal)}
-                    </span>
-                    <span className="text-gray-400 font-normal text-[10px]">(Discount)</span>
-                    <span className="mx-1 text-gray-400">+</span>
-                    <span className="text-green-600">{formatCurrencyOrDash(computedGstTotal)}</span>
-                    <span className="text-gray-400 font-normal text-[10px]">(GST Total)</span>
-                    {roundoff !== null && roundoff !== 0 && (
-                      <>
-                        <span className="mx-1 text-gray-400">{roundoff >= 0 ? '+' : '-'}</span>
-                        <span className="text-gray-600">{formatCurrencyOrDash(Math.abs(roundoff))}</span>
-                        <span className="text-gray-400 font-normal text-[10px]">(Adjustment)</span>
-                      </>
-                    )}
-                    <span className="mx-2 text-gray-400">=</span>
-                    <span className="text-[#1b5dfc] font-extrabold text-base">{formatCurrencyOrDash(header.grand_total)}</span>
-                  </div>
-                </div>
-
-                {/* Totals Grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs pt-1">
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Subtotal</span>
-                    <span className="text-sm font-bold text-gray-900">{formatCurrencyOrDash(header.subtotal)}</span>
-                  </div>
-
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Discount</span>
-                    <span className="text-sm font-bold text-red-500">{formatCurrencyOrDash(discountVal)}</span>
-                  </div>
-
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">GST Total</span>
-                    <span className="text-sm font-bold text-gray-900">{formatCurrencyOrDash(computedGstTotal)}</span>
-                    {hasGstValues && (
-                      <div className="text-[9px] text-gray-400 leading-tight space-y-0.5 mt-1">
-                        {header.cgst !== null && <div>CGST: {formatCurrencyOrDash(header.cgst)}</div>}
-                        {header.sgst !== null && <div>SGST: {formatCurrencyOrDash(header.sgst)}</div>}
-                        {header.igst !== null && <div>IGST: {formatCurrencyOrDash(header.igst)}</div>}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Grand Total</span>
-                    <span className="text-sm font-extrabold text-[#1b5dfc]">{formatCurrencyOrDash(header.grand_total)}</span>
-                  </div>
-
-                  {/* Line Total (Separate) */}
-                  <div className="space-y-1 border-t border-slate-200 pt-3 col-span-2">
-                    <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Line Items Total</span>
-                    <span className="text-sm font-bold text-gray-600">{formatCurrencyOrDash(computedSubtotal)}</span>
-                    <span className="text-[9px] text-gray-400 block">Sum of item amounts listed in the table.</span>
-                  </div>
-
-                  {/* Roundoff / Adjustment (if present) */}
-                  {roundoff !== null && roundoff !== 0 && (
-                    <div className="space-y-1 border-t border-slate-200 pt-3 col-span-2">
-                      <span className="text-[10px] font-semibold text-gray-400 block uppercase tracking-wider">Adjustment / Roundoff</span>
-                      <span className="text-sm font-bold text-gray-600">{formatCurrencyOrDash(roundoff)}</span>
-                      <span className="text-[9px] text-gray-400 block">Extracted from raw engine metadata.</span>
-                    </div>
-                  )}
-                </div>
               </div>
-            </div>
 
-          </div>
-
-          {/* Slide-over Side Drawer details panel for secondary line-item attributes */}
-          <div className={`fixed top-0 right-0 h-screen w-full sm:w-[450px] bg-white border-l border-gray-200 shadow-2xl z-50 transition-transform duration-300 transform flex flex-col ${selectedItemId ? 'translate-x-0' : 'translate-x-full'}`}>
-            {/* Drawer Header */}
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <h4 className="font-bold text-sm text-[#0f172a]">Edit Line Item Details</h4>
-                <p className="text-[10px] text-gray-400">Configure secondary and primary fields for verification.</p>
-              </div>
+              {/* View Invoice Details Toggle Button */}
               <button
-                onClick={() => setSelectedItemId(null)}
-                className="text-gray-400 hover:text-gray-600 p-1.5 rounded hover:bg-gray-100 transition-colors cursor-pointer"
-                title="Close Drawer"
+                type="button"
+                onClick={() => setIsDetailsExpanded(!isDetailsExpanded)}
+                className="w-full mt-2 bg-[#eef2ff] hover:bg-[#e0e7ff] text-[#1b5dfc] font-semibold text-xs py-2 rounded-xl border border-blue-200/60 transition-colors shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer"
               >
-                <X size={16} />
+                <Eye size={13} />
+                <span>{isDetailsExpanded ? 'Hide Details' : 'View Invoice Details'}</span>
+                {isDetailsExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
               </button>
             </div>
-
-            {/* Drawer Body Form */}
-            {selectedItem && (
-              <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar text-xs">
-                {/* 2-Column form layout */}
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Product Name (Span 2) */}
-                  <div className="col-span-2 space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Product Name *</label>
-                    <input
-                      type="text"
-                      value={selectedItem.product_name || ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'product_name', e.target.value)}
-                      placeholder="—"
-                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
-                        isCriticalItemMissing(selectedItem, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                      }`}
-                    />
-                  </div>
-
-                  {/* HSN */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">HSN Code *</label>
-                    <input
-                      type="text"
-                      value={selectedItem.hsn || ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'hsn', e.target.value)}
-                      placeholder="—"
-                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
-                        isCriticalItemMissing(selectedItem, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Pack */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Pack Size</label>
-                    <input
-                      type="text"
-                      value={selectedItem.pack || ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'pack', e.target.value)}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Batch */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Batch Number *</label>
-                    <input
-                      type="text"
-                      value={selectedItem.batch || ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'batch', e.target.value)}
-                      placeholder="—"
-                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                        isCriticalItemMissing(selectedItem, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Expiry */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Expiry Date</label>
-                    <input
-                      type="text"
-                      value={selectedItem.expiry || ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'expiry', e.target.value)}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Billed Qty */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Billed Qty *</label>
-                    <input
-                      id={`item-quantity-${selectedItem.id}`}
-                      type="number"
-                      value={getBilledQty(selectedItem) ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
-                        isCriticalItemMissing(selectedItem, 'quantity') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                      }`}
-                    />
-                  </div>
-
-                  {/* Free Qty */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Free Qty</label>
-                    <input
-                      type="number"
-                      value={getFreeQty(selectedItem) ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'free_quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Total Received Qty (read-only) */}
-                  <div className="col-span-2 space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Total Received Qty</label>
-                    <input
-                      type="text"
-                      readOnly
-                      value={getReceivedQty(selectedItem)}
-                      className="w-full bg-slate-100 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-600 font-semibold focus:outline-none"
-                    />
-                    <span className="text-[10px] text-gray-500 block mt-1">
-                      Free quantity is included in received stock but not billed amount.
-                    </span>
-                  </div>
-
-                  {/* MRP */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">MRP (Rs)</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={selectedItem.mrp ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Rate */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Purchase Rate</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={selectedItem.rate ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'rate', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Discount */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Row Discount</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={selectedItem.discount ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'discount', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* GST % */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">GST %</label>
-                    <input
-                      type="number"
-                      value={selectedItem.gst_percent ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'gst_percent', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-xs text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500"
-                    />
-                  </div>
-
-                  {/* Amount */}
-                  <div className="col-span-2 space-y-1">
-                    <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Total Amount *</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={getItemAmount(selectedItem) ?? ''}
-                      onChange={(e) => handleItemChange(selectedItem.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
-                      placeholder="—"
-                      className={`w-full bg-[#f8fafc] border rounded-lg px-3 py-2 text-xs font-semibold text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 ${
-                        isCriticalItemMissing(selectedItem, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                      }`}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
-
         </div>
 
-      </div>
+        {/* Full-width Expandable Invoice Details Metadata Panel */}
+        <div className={`shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${
+          isDetailsExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'
+        }`}>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
+            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2">
+              All Invoice Metadata
+            </h4>
 
-      {/* Full-width Line Items Review table */}
-      <div className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              {/* Invoice Date */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">INVOICE DATE</span>
+                <input
+                  id="header-invoice_date"
+                  type="text"
+                  value={header.invoice_date}
+                  onChange={(e) => handleHeaderChange('invoice_date', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    isCriticalHeaderMissing('invoice_date') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+
+              {/* Invoice Number */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">INVOICE NUMBER</span>
+                <input
+                  id="header-invoice_number"
+                  type="text"
+                  value={header.invoice_number}
+                  onChange={(e) => handleHeaderChange('invoice_number', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#1b5dfc] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    isCriticalHeaderMissing('invoice_number') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+
+              {/* Seller Name */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">SELLER NAME</span>
+                <input
+                  id="header-seller_name"
+                  type="text"
+                  value={header.seller_name}
+                  onChange={(e) => handleHeaderChange('seller_name', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    isCriticalHeaderMissing('seller_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+
+              {/* Seller Phone */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">SELLER PHONE</span>
+                <input
+                  type="text"
+                  value={header.seller_phone || ''}
+                  onChange={(e) => handleHeaderChange('seller_phone', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className="w-full bg-[#f8fafc] border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed"
+                />
+              </div>
+
+              {/* GST No. */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">GST NO.</span>
+                <input
+                  type="text"
+                  value={header.seller_gstin || ''}
+                  onChange={(e) => handleHeaderChange('seller_gstin', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    !header.seller_gstin ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+
+              {/* Drug Lic. Number */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">DRUG LIC. NUMBER</span>
+                <input
+                  type="text"
+                  value={header.drug_license || ''}
+                  onChange={(e) => handleHeaderChange('drug_license', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    !header.drug_license ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+
+              {/* Address */}
+              <div className="col-span-2 space-y-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">ADDRESS</span>
+                <input
+                  type="text"
+                  value={header.seller_address || ''}
+                  onChange={(e) => handleHeaderChange('seller_address', e.target.value)}
+                  placeholder="—"
+                  disabled={isLocked}
+                  className={`w-full bg-[#f8fafc] border rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] disabled:opacity-60 disabled:cursor-not-allowed ${
+                    !header.seller_address ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                  }`}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ===================================================================
+            LINE ITEMS CARD — title bar + table merged into one seamless,
+            flex-1 card so it fills whatever space remains under the sticky
+            scan/summary section, with only the row body scrolling internally.
+            ================================================================ */}
+        <div className="flex-1 min-h-0 flex flex-col bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden mb-8">
+          <div className="shrink-0 p-4 flex items-center justify-between border-b border-[#e2e8f0]">
             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
               Line Items Review ({lineItems.length})
             </h3>
+            <button
+              onClick={handleAddRow}
+              disabled={isLocked}
+              className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[#1b5dfc]"
+            >
+              <Plus size={14} />
+              <span>Add Row</span>
+            </button>
           </div>
-          <button
-            onClick={handleAddRow}
-            className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1.5 cursor-pointer"
-          >
-            <Plus size={14} />
-            <span>Add Row</span>
-          </button>
-        </div>
-
-        <div className="overflow-x-auto custom-scrollbar">
-          <div className="max-h-[560px] overflow-y-auto custom-scrollbar">
-            <table className="w-full min-w-[1160px] text-left text-xs border-collapse">
-              <thead className="bg-[#f8fafc] border-b border-[#e2e8f0] text-gray-500 font-semibold text-[10px] uppercase tracking-wider sticky top-0 z-10">
+          <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
+          <table className="w-full min-w-[1160px] text-left text-xs border-collapse">
+            <thead
+              className="sticky top-0 z-20 bg-[#f8fafc] text-gray-500 font-semibold text-[10px] uppercase tracking-wider shadow-xs border-b border-[#e2e8f0]"
+            >
+              <tr>
+                <th className="p-3 pl-5 text-center min-w-[64px]">Sr.</th>
+                <th className="p-3 pl-5 min-w-[320px]">Product Name</th>
+                <th className="p-3 min-w-[140px]">Batch No.</th>
+                <th className="p-3 min-w-[110px]">HSN</th>
+                <th className="p-3 text-right min-w-[135px]">Qty</th>
+                <th className="p-3 text-right min-w-[115px]">MRP</th>
+                <th className="p-3 text-right min-w-[130px]">Amount</th>
+                <th className="p-3 text-center pr-5 min-w-[120px]">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#e2e8f0] bg-white">
+              {lineItems.length === 0 ? (
                 <tr>
-                  <th className="p-3 pl-5 text-center min-w-[64px]">Sr.</th>
-                  <th className="p-3 pl-5 min-w-[320px]">Product Name</th>
-                  <th className="p-3 min-w-[140px]">Batch No.</th>
-                  <th className="p-3 min-w-[110px]">HSN</th>
-                  <th className="p-3 text-right min-w-[135px]">Qty</th>
-                  <th className="p-3 text-right min-w-[115px]">MRP</th>
-                  <th className="p-3 text-right min-w-[130px]">Amount</th>
-                  <th className="p-3 text-center pr-5 min-w-[120px]">Action</th>
+                  <td colSpan={8} className="text-center py-12 text-gray-400 font-medium">
+                    No line items found. Click "Add Row" to append items.
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-[#e2e8f0] bg-white">
-                {lineItems.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="text-center py-12 text-gray-400 font-medium">
-                      No line items found. Click "Add Row" to append items.
-                    </td>
-                  </tr>
-                ) : (
-                  lineItems.map((item, index) => {
-                    const billedQty = getBilledQty(item);
-                    const freeQty = getFreeQty(item);
-                    const hasFreeQty = freeQty !== null;
-                    const receivedQty = billedQty !== null ? billedQty + (freeQty ?? 0) : null;
+              ) : (
+                lineItems.map((item, index) => {
+                  const billedQty = getBilledQty(item);
+                  const freeQty = getFreeQty(item);
+                  const hasFreeQty = freeQty !== null;
+                  const receivedQty = billedQty !== null ? billedQty + (freeQty ?? 0) : null;
 
-                    return (
-                      <tr
-                        key={item.id}
-                        className={`hover:bg-[#f8fafc]/70 transition-colors ${
-                          isCriticalItemMissing(item, 'product_name') ||
-                          isCriticalItemMissing(item, 'batch') ||
-                          isCriticalItemMissing(item, 'hsn') ||
-                          isCriticalItemMissing(item, 'quantity') ||
-                          isCriticalItemMissing(item, 'amount')
-                            ? 'bg-amber-50/20'
-                            : ''
-                        }`}
-                      >
-                        <td className="p-3 pl-5 align-top text-center">
-                          <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg bg-slate-50 px-2 text-xs font-bold text-gray-500">
-                            {index + 1}
-                          </span>
-                        </td>
+                  // Row has any missing critical field → amber tint
+                  const hasMissing =
+                    isCriticalItemMissing(item, 'product_name') ||
+                    isCriticalItemMissing(item, 'batch') ||
+                    isCriticalItemMissing(item, 'hsn') ||
+                    isCriticalItemMissing(item, 'quantity') ||
+                    isCriticalItemMissing(item, 'amount');
 
-                        <td className="p-3 pl-5 align-top">
+                  return (
+                    <tr
+                      key={item.id}
+                      id={`item-row-${item.id}`}
+                      onClick={() => handleRowClick(item.id, index)}
+                      className={`cursor-pointer transition-all duration-200 ${
+                        item.id === activeRowId
+                          ? 'bg-blue-50/70 shadow-[inset_3px_0_0_#3b82f6]'
+                          : item.id === highlightedRowId
+                            ? 'bg-amber-100/90 shadow-[inset_3px_0_0_#f59e0b] animate-pulse'
+                            : hasMissing
+                              ? 'bg-amber-50/40 shadow-[inset_3px_0_0_#fbbf24] hover:bg-amber-50/70'
+                              : 'hover:bg-[#f8fafc]/90'
+                      }`}
+                    >
+                      <td className="p-3 pl-5 align-top text-center">
+                        <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg bg-slate-50 px-2 text-xs font-bold text-gray-500">
+                          {index + 1}
+                        </span>
+                      </td>
+
+                      <td className="p-3 pl-5 align-top">
+                        <input
+                          id={`item-name-${item.id}`}
+                          type="text"
+                          value={item.product_name}
+                          placeholder={hasMissing && !item.product_name ? 'Enter product name...' : '—'}
+                          onFocus={() => handleRowClick(item.id, index)}
+                          onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
+                          disabled={isLocked}
+                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+                            isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                          }`}
+                        />
+                      </td>
+
+                      <td className="p-3 align-top">
+                        <input
+                          id={`item-batch-${item.id}`}
+                          type="text"
+                          value={item.batch}
+                          placeholder="—"
+                          onFocus={() => handleRowClick(item.id, index)}
+                          onChange={(e) => handleItemChange(item.id, 'batch', e.target.value)}
+                          disabled={isLocked}
+                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+                            isCriticalItemMissing(item, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                          }`}
+                        />
+                      </td>
+
+                      <td className="p-3 align-top">
+                        <input
+                          id={`item-hsn-${item.id}`}
+                          type="text"
+                          value={item.hsn}
+                          placeholder="—"
+                          onFocus={() => handleRowClick(item.id, index)}
+                          onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
+                          disabled={isLocked}
+                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+                            isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                          }`}
+                        />
+                      </td>
+
+                      <td className="p-3 align-top text-right">
+                        <div className="space-y-1">
                           <input
-                            id={`item-name-${item.id}`}
-                            type="text"
-                            value={item.product_name}
+                            id={`item-quantity-${item.id}`}
+                            type="number"
+                            step="any"
+                            value={item.quantity ?? ''}
                             placeholder="—"
-                            onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                              isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
+                            disabled={isLocked}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right font-extrabold focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+                              isCriticalItemMissing(item, 'quantity') ? 'border-amber-300 bg-amber-50/50 text-amber-700' : 'border-gray-200 text-[#0f172a]'
                             }`}
                           />
-                        </td>
-
-                        <td className="p-3 align-top">
-                          <input
-                            id={`item-batch-${item.id}`}
-                            type="text"
-                            value={item.batch}
-                            placeholder="—"
-                            onChange={(e) => handleItemChange(item.id, 'batch', e.target.value)}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                              isCriticalItemMissing(item, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                            }`}
-                          />
-                        </td>
-
-                        <td className="p-3 align-top">
-                          <input
-                            id={`item-hsn-${item.id}`}
-                            type="text"
-                            value={item.hsn}
-                            placeholder="—"
-                            onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                              isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                            }`}
-                          />
-                        </td>
-
-                        <td className="p-3 align-top text-right">
-                          <div className="space-y-1">
-                            <div
-                              className={`text-sm ${
-                                billedQty === null ? 'text-amber-700 font-bold' : 'text-[#0f172a] font-extrabold'
-                              }`}
-                            >
-                              {hasFreeQty ? formatQuantityOrDash(receivedQty) : formatQuantityOrDash(billedQty)}
+                          {hasFreeQty && (
+                            <div className="text-[10px] text-gray-500 whitespace-nowrap text-right">
+                              {formatQuantityOrDash(billedQty)} billed + {formatQuantityOrDash(freeQty)} free = {formatQuantityOrDash(receivedQty)}
                             </div>
-                            {hasFreeQty && (
-                              <div className="text-[10px] text-gray-500 whitespace-nowrap">
-                                {formatQuantityOrDash(billedQty)} billed + {formatQuantityOrDash(freeQty)} free
-                              </div>
-                            )}
-                          </div>
-                        </td>
-
-                        <td className="p-3 align-top text-right">
-                          <input
-                            id={`item-mrp-${item.id}`}
-                            type="number"
-                            step="any"
-                            value={item.mrp ?? ''}
-                            placeholder="—"
-                            onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
-                            className="w-full min-h-[38px] bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
-                          />
-                        </td>
-
-                        <td className="p-3 align-top text-right">
-                          <input
-                            id={`item-amount-${item.id}`}
-                            type="number"
-                            step="any"
-                            value={getItemAmount(item) ?? ''}
-                            placeholder="—"
-                            onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-bold ${
-                              isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                            }`}
-                          />
-                          {item.is_suggested_amount && (
-                            <div className="text-[10px] text-amber-600 mt-1 font-semibold">Suggested</div>
                           )}
-                        </td>
+                        </div>
+                      </td>
 
-                        <td className="p-3 pr-5 align-top text-center">
-                          <div className="flex items-center justify-center space-x-1.5">
-                            <button
-                              onClick={() => setSelectedItemId(item.id)}
-                              className="px-3 py-2 bg-[#f4f5fa] hover:bg-[#e2e8f0] text-[#1b5dfc] rounded-lg transition-colors cursor-pointer text-xs font-semibold"
-                              title="View/Edit Secondary Fields"
-                            >
-                              Details
-                            </button>
-                            <button
-                              onClick={() => handleDeleteRow(item.id)}
-                              className="p-2 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"
-                              title="Delete Row"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                      <td className="p-3 align-top text-right">
+                        <input
+                          id={`item-mrp-${item.id}`}
+                          type="number"
+                          step="any"
+                          value={item.mrp ?? ''}
+                          placeholder="—"
+                          onFocus={() => handleRowClick(item.id, index)}
+                          onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
+                          disabled={isLocked}
+                          className="w-full min-h-[38px] bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                      </td>
+
+                      <td className="p-3 align-top text-right">
+                        <input
+                          id={`item-amount-${item.id}`}
+                          type="number"
+                          step="any"
+                          value={getItemAmount(item) ?? ''}
+                          placeholder="—"
+                          onFocus={() => handleRowClick(item.id, index)}
+                          onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
+                          disabled={isLocked}
+                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-bold disabled:opacity-60 disabled:cursor-not-allowed ${
+                            isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                          }`}
+                        />
+                        {item.is_suggested_amount && (
+                          <div className="text-[10px] text-amber-600 mt-1 font-semibold">Suggested</div>
+                        )}
+                      </td>
+
+                      <td className="p-3 pr-5 align-top text-center">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteRow(item.id);
+                          }}
+                          disabled={isLocked}
+                          className="p-2 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-400"
+                          title="Delete Row"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
+      </div>
+      {/* END STICKY HEADER BLOCK */}
+
+      {/* Delete Invoice Confirmation Dialog */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 max-w-md w-full mx-4 shadow-xl space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="p-2 bg-red-50 text-red-600 rounded-xl shrink-0">
+                <Trash2 size={22} />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-[#0f172a]">Delete this invoice?</h3>
+                <p className="text-xs text-gray-500 leading-normal">
+                  This permanently removes invoice {header.invoice_number ? `#${header.invoice_number}` : ''} and its scanned image. This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-gray-100">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={isDeleting}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteInvoice}
+                disabled={isDeleting}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete Invoice'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          FULLSCREEN LIGHTBOX MODAL
+          - Applies current rotation to the full-res image
+          - Wheel always zooms; drag pans once zoomed in
+          - Backdrop click closes; image click does not
+          ================================================================ */}
+      {isFullscreenLightboxOpen && (
+        <div
+          ref={lightboxContainerRef}
+          onClick={() => setIsFullscreenLightboxOpen(false)}
+          onMouseDown={handleLightboxMouseDown}
+          onMouseMove={handleLightboxMouseMove}
+          onMouseUp={handleLightboxMouseUp}
+          onMouseLeave={handleLightboxMouseUp}
+          className={`fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 select-none ${getLightboxCursorClass()}`}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-7xl max-h-[92vh] w-full flex flex-col items-center justify-center space-y-3 overflow-hidden"
+          >
+            <button
+              onClick={() => setIsFullscreenLightboxOpen(false)}
+              className="absolute -top-2 right-2 text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700 p-2.5 rounded-full cursor-pointer transition-colors shadow-lg border border-slate-700 z-10"
+              title="Close Fullscreen View (Esc)"
+            >
+              <X size={18} />
+            </button>
+            <img
+              ref={lightboxImgRef}
+              src={getSourceImage()}
+              alt="Full Resolution Invoice Scan"
+              draggable={false}
+              style={{
+                transform: `translate(${lightboxPanX}px, ${lightboxPanY}px) scale(${lightboxZoom}) rotate(${rotation}deg)`,
+                transformOrigin: 'center center',
+                transition: isLightboxDragging ? 'none' : 'transform 0.1s ease-out',
+              }}
+              className="max-h-[86vh] max-w-full object-contain rounded-lg shadow-2xl border border-slate-800"
+            />
+            <div className="text-xs text-slate-300 bg-slate-900/80 px-4 py-1.5 rounded-full border border-slate-700 flex items-center space-x-2">
+              {rotation !== 0 && (
+                <>
+                  <span className="text-slate-400">Rotated {rotation}°</span>
+                  <span className="text-slate-500">•</span>
+                </>
+              )}
+              <span className="text-slate-400">Scroll to zoom, drag to pan</span>
+              <span className="text-slate-500">•</span>
+              <span className="text-slate-400">Press ESC or click backdrop to close</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

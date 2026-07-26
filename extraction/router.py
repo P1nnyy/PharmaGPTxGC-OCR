@@ -9,13 +9,14 @@ from extraction.engines.azure_document_intelligence_engine import AzureDocumentI
 ENGINES: Dict[str, Type[DocumentExtractionEngine]] = {
     "legacy": LegacyExtractionEngine,
     "azure": AzureDocumentIntelligenceEngine,
+    "azure_shadow": AzureDocumentIntelligenceEngine,
 }
 
 def get_extraction_engine() -> DocumentExtractionEngine:
     """
     Resolves and returns the configured extraction engine instance.
     
-    Reads from the EXTRACTION_ENGINE environment variable, defaulting to 'legacy'.
+    Reads from the EXTRACTION_ENGINE environment variable, defaulting to 'azure'.
     Raises ValueError for unsupported engine requests.
     """
     engine_name = os.environ.get("EXTRACTION_ENGINE", "azure").lower().strip()

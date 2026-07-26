@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
+import { apiClient } from '../api/client';
 import {
   LayoutDashboard,
   Upload,
@@ -19,12 +20,13 @@ import {
 export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { isBackendActive } = useRun();
+  const { isBackendActive, runs, refreshRuns } = useRun();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // States to control Clear Bench workflow
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [toastText, setToastText] = useState<string | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
 
   const menuItems = [
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
@@ -43,34 +45,16 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
     return location.pathname.startsWith(path);
   };
 
-  // Safe check if any bench data exists to be cleared
+  // Safe check if any bench data exists to be cleared (backend invoices are
+  // the primary source now; leftover local drafts/inventory still count too)
   const hasData = () => {
-    const runs = localStorage.getItem('ocr_workbench_runs');
-    let parsedRuns = [];
-    if (runs) {
-      try { parsedRuns = JSON.parse(runs); } catch {}
-    }
-    
     const inventory = localStorage.getItem('pharmaflow_inventory');
     let parsedInventory = [];
     if (inventory) {
       try { parsedInventory = JSON.parse(inventory); } catch {}
     }
-    
-    let hasDetail = false;
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (
-        key.startsWith('ocr_workbench_run_detail_') || 
-        key.startsWith('ocr_workbench_image_') || 
-        key.startsWith('ocr_workbench_processed_image_')
-      )) {
-        hasDetail = true;
-        break;
-      }
-    }
-    
-    return parsedRuns.length > 0 || parsedInventory.length > 0 || hasDetail || sessionStorage.length > 0;
+
+    return runs.length > 0 || parsedInventory.length > 0 || sessionStorage.length > 0;
   };
 
   // Action: Trigger confirmation dialog or show baseline clear state
@@ -93,8 +77,17 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
     };
   }, []);
 
-  // Action: Confirm cleanup of local storage entries
-  const confirmClearBench = () => {
+  // Action: Confirm cleanup — deletes every invoice from the backend (Neo4j + R2),
+  // then clears whatever local drafts/inventory are left in this browser.
+  const confirmClearBench = async () => {
+    setIsClearing(true);
+    try {
+      await Promise.all(runs.map((r) => apiClient.deleteInvoice(r.run_id).catch(() => {})));
+      await refreshRuns();
+    } catch (e) {
+      console.error('Failed to delete some invoices during Clear Bench:', e);
+    }
+
     const keysToRemove: string[] = [];
     const settingsSubstrings = ['setting', 'preference', 'threshold', 'theme'];
 
@@ -131,9 +124,10 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
     keysToRemove.forEach(key => localStorage.removeItem(key));
     sessionStorage.clear();
 
+    setIsClearing(false);
     setShowClearConfirm(false);
-    setToastText("Bench cleared. Ready for fresh invoice testing.");
-    
+    setToastText("Bench cleared — all invoices deleted from the database.");
+
     // Redirect to Dashboard and hard reload context state
     setTimeout(() => {
       setToastText(null);
@@ -161,9 +155,9 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
                 <Trash2 size={22} />
               </div>
               <div className="space-y-1">
-                <h3 className="text-base font-bold text-[#0f172a]">Clear all local invoice test data?</h3>
+                <h3 className="text-base font-bold text-[#0f172a]">Delete every invoice? This cannot be undone.</h3>
                 <p className="text-xs text-gray-500 leading-normal">
-                  This will remove uploaded invoice history, review drafts, and generated inventory from this browser only. Backend files and extraction settings will not be affected.
+                  This permanently deletes all {runs.length} invoice{runs.length === 1 ? '' : 's'} for this pharmacy from the database and their scanned images from storage, plus any local drafts and inventory in this browser. Shared vendor/product records are not affected.
                 </p>
               </div>
             </div>
@@ -171,15 +165,17 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
             <div className="flex items-center justify-end space-x-2 pt-2 border-t border-gray-100">
               <button
                 onClick={() => setShowClearConfirm(false)}
-                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer"
+                disabled={isClearing}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmClearBench}
-                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer"
+                disabled={isClearing}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-red-500/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Clear Bench
+                {isClearing ? 'Deleting…' : 'Delete All Invoices'}
               </button>
             </div>
           </div>
@@ -314,7 +310,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
       {/* MAIN CONTAINER */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* GLOBAL TOP BAR */}
-        <header className="h-16 bg-white border-b border-[#e2e8f0] flex items-center justify-between px-6 shrink-0 z-10">
+        <header className="h-16 bg-white border-b border-[#e2e8f0] flex items-center justify-between px-6 shrink-0 z-40">
           {/* Search Bar */}
           <div className="flex items-center space-x-4 flex-1 max-w-md pl-12 md:pl-0">
             <div className="relative w-full">
@@ -363,8 +359,8 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
         </header>
 
         {/* MAIN ROUTE CONTENT */}
-        <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-[#f4f5fa] min-w-0">
-          <div className="max-w-7xl mx-auto space-y-8">
+        <main className="flex-1 overflow-y-auto px-4 py-3 md:px-6 md:py-4 bg-[#f4f5fa] min-w-0">
+          <div className="max-w-7xl mx-auto space-y-4">
             {children}
           </div>
         </main>
