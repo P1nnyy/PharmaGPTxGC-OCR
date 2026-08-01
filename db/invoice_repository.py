@@ -1,15 +1,11 @@
-import re
 import uuid
 from typing import Any, Optional
 
 from core.config import settings
 from core.logger import logger
+from db import product_repository
 from db.graph_db import get_driver
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
-
-
-def _normalize_product_name(name: str) -> str:
-    return re.sub(r"\s+", " ", name.strip().upper())
 
 
 def _serialize_node(node) -> dict:
@@ -258,21 +254,14 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
         is_estimated_amount=bool(item.get("is_estimated_amount")),
     )
 
-    product_id = None
-    if name and str(name).strip():
-        normalized = _normalize_product_name(str(name))
-        record = tx.run(
-            """
-            MERGE (p:Product {normalized_name: $normalized})
-            ON CREATE SET p.id = randomUUID(), p.canonical_name = $name, p.pack = $pack
-            RETURN p.id AS id
-            """,
-            normalized=normalized,
-            name=str(name).strip(),
-            pack=pack,
-        ).single()
-        product_id = record["id"]
+    # Catalogue resolution: the spelling this invoice used is recorded as a
+    # ProductAlias, and the alias points at the SKU it appears to describe.
+    # Keeping the two apart is what lets "MONTICOPE SUSP" and "MONTICOPE
+    # SUSPENSION 60 ML" become one item without hard-coding either spelling
+    # as the truth. See db/product_repository for why.
+    alias_id, product_id = product_repository.resolve_alias_and_product(tx, name, pack, hsn)
 
+    if product_id:
         tx.run(
             """
             MATCH (li:LineItem {id: $item_id})
@@ -282,6 +271,20 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
             item_id=item_id,
             product_id=product_id,
         )
+
+        # The line keeps a pointer to the exact spelling it arrived under, so
+        # a mis-merged product can later be split by moving just the rows that
+        # came in under one name.
+        if alias_id:
+            tx.run(
+                """
+                MATCH (li:LineItem {id: $item_id})
+                MATCH (a:ProductAlias {id: $alias_id})
+                CREATE (li)-[:OF_ALIAS]->(a)
+                """,
+                item_id=item_id,
+                alias_id=alias_id,
+            )
 
         if hsn and str(hsn).strip():
             tx.run(
@@ -449,15 +452,31 @@ def _delete_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
 
     product_ids = [pid for pid in record["product_ids"] if pid]
     if product_ids:
+        # A product left with no line items takes its spellings with it -
+        # an alias pointing at a deleted product would otherwise keep the
+        # name in the catalogue with nothing behind it, and would silently
+        # re-adopt the next product that happened to reuse the identity.
         tx.run(
             """
             UNWIND $product_ids AS pid
             MATCH (p:Product {id: pid})
             WHERE NOT (p)<-[:OF_PRODUCT]-(:LineItem)
-            DETACH DELETE p
+            OPTIONAL MATCH (p)<-[:RESOLVES_TO]-(a:ProductAlias)
+            WHERE NOT (a)<-[:OF_ALIAS]-(:LineItem)
+            DETACH DELETE p, a
             """,
             product_ids=product_ids,
         )
+
+    # Spellings whose observations are all gone, including any left dangling
+    # by an earlier partial delete.
+    tx.run(
+        """
+        MATCH (a:ProductAlias)
+        WHERE NOT (a)<-[:OF_ALIAS]-(:LineItem) AND NOT (a)-[:RESOLVES_TO]->(:Product)
+        DETACH DELETE a
+        """
+    )
 
     batch_ids = [bid for bid in record["batch_ids"] if bid]
     if batch_ids:
@@ -490,10 +509,11 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
         OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
         OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
+        OPTIONAL MATCH (li)-[:OF_ALIAS]->(al:ProductAlias)
         OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
-        WITH inv, v, li, p, b
+        WITH inv, v, li, p, al, b
         ORDER BY coalesce(li.row_index, 0)
-        RETURN inv, v, collect({item: li, product: p, batch: b}) AS rows
+        RETURN inv, v, collect({item: li, product: p, alias: al, batch: b}) AS rows
         """,
         invoice_id=invoice_id,
     ).single()
@@ -512,8 +532,18 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         if row["item"] is None:
             continue
         li = _serialize_node(row["item"])
-        li["product_name"] = row["product"].get("canonical_name") if row["product"] else None
-        li["pack"] = row["product"].get("pack") if row["product"] else li.get("pack")
+        product = row["product"] or {}
+        alias = row["alias"] or {}
+        # The review screen shows the invoice back to the person who scanned
+        # it, so the name is the spelling THIS bill printed - not the
+        # catalogue's canonical name, which may have been edited since or
+        # shared with a differently-worded sibling line.
+        li["product_name"] = alias.get("raw_name") or product.get("canonical_name")
+        li["pack"] = product.get("pack_size") or li.get("pack")
+        # Catalogue linkage, so the review page can jump to the product and
+        # show whether this item is still awaiting classification.
+        li["product_id"] = product.get("id")
+        li["product_review_status"] = product.get("review_status")
         # Batch/expiry: prefer the shared Batch node (canonical), fall back
         # to the LineItem's own denormalized copy if no Batch link exists.
         li["batch_number"] = row["batch"].get("batch_number") if row["batch"] else li.get("batch")

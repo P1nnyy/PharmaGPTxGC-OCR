@@ -274,7 +274,6 @@ export const InvoiceReviewPage: React.FC = () => {
   // header fields) requires an explicit unlock click so a saved record can't
   // be casually altered just by opening it from history.
   const [isLocked, setIsLocked] = useState(false);
-  const isReadOnly = isLocked;
   const [isDeleting, setIsDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);

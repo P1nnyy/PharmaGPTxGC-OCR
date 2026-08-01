@@ -46,3 +46,11 @@ item_rows_clean.json
 
 frontend/node_modules/
 frontend/dist/
+
+# The blanket *.json rule above is aimed at OCR result dumps, but it also
+# swallows the frontend's build configuration - which means a fresh clone
+# has src/ and no package.json, and the app cannot be installed or built at
+# all. Re-include the config files by name.
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig*.json

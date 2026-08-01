@@ -12,6 +12,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { UploadInvoicePage } from './pages/UploadInvoicePage';
 import { InvoiceReviewPage } from './pages/InvoiceReviewPage';
 import { InvoiceHistoryPage } from './pages/InvoiceHistoryPage';
+import { ProductsPage } from './pages/ProductsPage';
 import { InventoryPage } from './pages/InventoryPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
@@ -74,6 +75,19 @@ export const App: React.FC = () => {
               element={
                 <SaaSLayout>
                   <InvoiceHistoryPage />
+                </SaaSLayout>
+              }
+            />
+            {/* Page route is /catalogue, not /products: the backend already
+                owns /products, and both the dev proxy and the production
+                server would resolve a shared path to the API and hand the
+                browser raw JSON instead of the page. Page routes and API
+                paths are kept distinct throughout (/history vs /invoices). */}
+            <Route
+              path="/catalogue"
+              element={
+                <SaaSLayout>
+                  <ProductsPage />
                 </SaaSLayout>
               }
             />

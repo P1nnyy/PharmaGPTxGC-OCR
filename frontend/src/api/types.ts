@@ -154,6 +154,110 @@ export interface CanonicalLineItem {
   confidence: number | null;
 }
 
+// --- Catalogue -------------------------------------------------------------
+
+// One raw spelling an invoice printed. Several of these resolving to the same
+// Product is what a merge actually is.
+export interface ProductAlias {
+  id: string;
+  raw_name: string;
+  normalized_name: string;
+  status: 'new' | 'confirmed';
+  times_seen: number;
+  first_seen?: string;
+  last_seen?: string;
+}
+
+export interface ProductFlag {
+  code: string;
+  severity: 'high' | 'medium' | 'low';
+  field: string | null;
+  message: string;
+}
+
+// A single invoice line that fed this product — the evidence behind a merge.
+export interface ProductObservation {
+  id: string;
+  alias_name: string | null;
+  alias_id: string | null;
+  batch_number: string | null;
+  expiry_date: string | null;
+  quantity: number | null;
+  free_quantity: number | null;
+  mrp: number | null;
+  rate: number | null;
+  discount: number | null;
+  discount_percent: number | null;
+  gst_percent: number | null;
+  amount: number | null;
+  hsn: string | null;
+  invoice_id: string;
+  invoice_number: string | null;
+  invoice_date: string | null;
+  seller_name: string | null;
+}
+
+export interface Product {
+  id: string;
+  identity_key: string;
+  canonical_name: string | null;
+  // Catalogue level
+  brand: string | null;
+  strength: string | null;
+  form: string | null;
+  pack_size: string | null;
+  pack_multiplier: number | null;
+  base_unit: string | null;
+  manufacturer: string | null;
+  hsn: string | null;
+  schedule: string | null;
+  notes: string | null;
+  // Which fields a human actually approved, as opposed to the parser guessing.
+  confirmed_fields: string[];
+  review_status: 'needs_review' | 'confirmed';
+  // Parser confidence, kept per field so the UI can show what to double-check.
+  brand_confidence?: number;
+  strength_confidence?: number;
+  form_confidence?: number;
+  pack_size_confidence?: number;
+  pack_multiplier_confidence?: number;
+  base_unit_confidence?: number;
+  // Aggregated invoice evidence
+  aliases: ProductAlias[];
+  observed_mrps: number[];
+  observed_rates: number[];
+  observed_hsns: string[];
+  observed_gst: number[];
+  vendors: string[];
+  times_seen: number;
+  invoice_count: number;
+  batch_count: number;
+  total_quantity: number;
+  total_base_units: number | null;
+  first_seen?: string;
+  last_seen?: string;
+  // Derived
+  flags: ProductFlag[];
+  completeness: number;
+  needs_attention: boolean;
+  // Only present on the detail fetch.
+  observations?: ProductObservation[];
+}
+
+export interface ProductSummary {
+  total: number;
+  needs_review: number;
+  needs_attention: number;
+  missing_pack_multiplier: number;
+  missing_hsn: number;
+  price_conflicts: number;
+}
+
+export interface ProductListResponse {
+  products: Product[];
+  summary: ProductSummary;
+}
+
 export interface CanonicalInvoice {
   invoice_number: string | null;
   invoice_date: string | null;

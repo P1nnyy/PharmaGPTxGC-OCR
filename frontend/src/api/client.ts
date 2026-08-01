@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -239,6 +239,76 @@ export const apiClient = {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to delete invoice.');
     }
+  },
+
+  // --- Catalogue ----------------------------------------------------------
+
+  async getProducts(params?: { status?: string; search?: string }): Promise<ProductListResponse> {
+    const query = new URLSearchParams();
+    if (params?.status && params.status !== 'all') query.set('status', params.status);
+    if (params?.search) query.set('search', params.search);
+    const suffix = query.toString() ? `?${query}` : '';
+
+    const response = await fetch(`/products${suffix}`);
+    if (!response.ok) {
+      throw new Error('Failed to load products.');
+    }
+    return response.json();
+  },
+
+  async getProduct(productId: string): Promise<Product> {
+    const response = await fetch(`/products/${productId}`);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to load product.');
+    }
+    return response.json();
+  },
+
+  // Resolves to either the saved product or a duplicate the edit revealed.
+  // The conflict is returned rather than thrown because it is a decision for
+  // the user, not a failure: two records turned out to describe one item, and
+  // combining them is their call to make.
+  async updateProduct(
+    productId: string,
+    payload: Record<string, any>
+  ): Promise<{ status: 'ok' | 'conflict'; product: Product; conflict?: Product }> {
+    const response = await fetch(`/products/${productId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to save product.');
+    }
+    return response.json();
+  },
+
+  async mergeProducts(sourceIds: string[], targetId: string): Promise<Product> {
+    const response = await fetch('/products/merge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_ids: sourceIds, target_id: targetId })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to merge products.');
+    }
+    return (await response.json()).product;
+  },
+
+  async splitAlias(aliasId: string, overrides: Record<string, any>): Promise<Product> {
+    const response = await fetch(`/products/aliases/${aliasId}/split`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overrides)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to split product.');
+    }
+    return (await response.json()).product;
   },
 
   getOCRBlocks(runId: string): OCRBlock[] {

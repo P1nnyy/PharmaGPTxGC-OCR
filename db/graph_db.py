@@ -16,12 +16,25 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT vendor_id IF NOT EXISTS FOR (n:Vendor) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT vendor_gstin IF NOT EXISTS FOR (n:Vendor) REQUIRE n.gstin IS UNIQUE",
     "CREATE CONSTRAINT product_id IF NOT EXISTS FOR (n:Product) REQUIRE n.id IS UNIQUE",
-    "CREATE CONSTRAINT product_key IF NOT EXISTS FOR (n:Product) REQUIRE n.normalized_name IS UNIQUE",
+    # Product identity is the SKU (brand + strength + form + pack), not the
+    # spelling an invoice happened to print. The spelling lives on
+    # ProductAlias, which is what many-to-one merging hangs off.
+    "CREATE CONSTRAINT product_identity IF NOT EXISTS FOR (n:Product) REQUIRE n.identity_key IS UNIQUE",
+    "CREATE CONSTRAINT product_alias_id IF NOT EXISTS FOR (n:ProductAlias) REQUIRE n.id IS UNIQUE",
+    "CREATE CONSTRAINT product_alias_key IF NOT EXISTS FOR (n:ProductAlias) REQUIRE n.normalized_name IS UNIQUE",
     # Batch uniqueness is enforced at the application level via a deterministic
     # id (product_id + "::" + batch_number) rather than a composite NODE KEY,
     # since composite constraints require an Aura tier that may not be available.
     "CREATE CONSTRAINT batch_id IF NOT EXISTS FOR (n:Batch) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT hsn_code IF NOT EXISTS FOR (n:HSNCode) REQUIRE n.code IS UNIQUE",
+]
+
+# Constraints from an earlier schema that are actively wrong now. product_key
+# made the invoice's spelling of a name the product's identity, which is the
+# collision this catalogue layer exists to undo - two renderings of one SKU
+# could never merge while it stood.
+STALE_CONSTRAINTS = [
+    "DROP CONSTRAINT product_key IF EXISTS",
 ]
 
 
@@ -50,6 +63,8 @@ def close_driver():
 def ensure_constraints():
     driver = get_driver()
     with driver.session() as session:
+        for statement in STALE_CONSTRAINTS:
+            session.run(statement)
         for statement in CONSTRAINTS:
             session.run(statement)
     logger.info("[NEO4J] Constraints ensured.")
@@ -81,5 +96,10 @@ def init_graph_db():
     try:
         ensure_constraints()
         ensure_bootstrap_tenant()
+        # Imported here rather than at module scope: product_repository imports
+        # get_driver from this module, so a top-level import would be circular.
+        from db.product_repository import migrate_legacy_products
+
+        migrate_legacy_products()
     except Exception as e:
         logger.warning(f"[NEO4J] Startup initialization skipped: {type(e).__name__}: {e}")
