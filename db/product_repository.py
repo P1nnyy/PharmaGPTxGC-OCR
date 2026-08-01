@@ -387,8 +387,29 @@ RETURN p, alias_nodes, items, invoices, vendors, batches
 """
 
 
+# Every catalogue field the API promises to return, so a consumer can rely on
+# the shape. Neo4j does not store null properties at all - an unset form is an
+# absent key, not a null one - so without this the response silently drops
+# whichever fields happen to be empty, which is precisely the set a review
+# screen most needs to ask about.
+_DECLARED_FIELDS = (
+    *EDITABLE_FIELDS,
+    "identity_key",
+    "review_status",
+    "brand_confidence",
+    "strength_confidence",
+    "form_confidence",
+    "pack_size_confidence",
+    "pack_multiplier_confidence",
+    "base_unit_confidence",
+)
+
+
 def _shape_product(record) -> dict:
     product = _serialize(record["p"])
+    for field in _DECLARED_FIELDS:
+        product.setdefault(field, None)
+    product.setdefault("confirmed_fields", [])
     items = [_serialize(i) for i in record["items"] if i]
     invoices = [_serialize(i) for i in record["invoices"] if i]
     batches = [_serialize(b) for b in record["batches"] if b]
@@ -406,6 +427,14 @@ def _shape_product(record) -> dict:
     product["invoice_count"] = len(invoices)
     product["batch_count"] = len(batches)
     product["total_quantity"] = sum(_to_float(i.get("quantity")) or 0 for i in items)
+
+    # An HSN code printed on the invoice is read data, not a guess, so when
+    # every line that ever mentioned this product agreed on one code it stands
+    # as the product's code. Disagreement is left blank and raised as
+    # hsn_conflict instead, because picking a winner there would be inventing
+    # a tax classification.
+    if not product.get("hsn") and len(product["observed_hsns"]) == 1:
+        product["hsn"] = product["observed_hsns"][0]
 
     dates = sorted(d for d in (i.get("created_at") for i in invoices) if d)
     product["first_seen"] = dates[0] if dates else product.get("created_at")

@@ -100,8 +100,16 @@ _MEASURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# "1*10", "10 X 10", "5x1" - strips per pack by units per strip.
-_PACK_GRID_RE = re.compile(r"\b(?P<outer>\d+)\s*[*xX×]\s*(?P<inner>\d+)\b")
+# "1*10", "10 X 10", "5x1", "60X5ML" - a count of things by the size of each.
+# The trailing unit is captured because it changes the arithmetic: 10X10 is a
+# hundred tablets, but 60X5ML is sixty vials of 5ml, not three hundred of
+# anything. No \b after the digits - a boundary never occurs between "5" and
+# "ML", which silently dropped every unit-suffixed pack on the floor.
+_PACK_GRID_RE = re.compile(
+    r"(?<![\d.])(?P<outer>\d+)\s*[*xX×]\s*(?P<inner>\d+)\s*"
+    r"(?P<unit>ML|GM|GRAM|G|L|LTR)?(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 
 # "10'S", "10S", "15 'S" - a flat count per pack.
 _PACK_COUNT_RE = re.compile(r"\b(?P<count>\d+)\s*['’]?\s*S\b", re.IGNORECASE)
@@ -199,6 +207,14 @@ def _parse_pack_token(token: str) -> tuple[Optional[str], Optional[int], Optiona
     if grid:
         outer = int(grid.group("outer"))
         inner = int(grid.group("inner"))
+        unit = grid.group("unit")
+        if unit:
+            # "60X5ML" is sixty containers holding 5ml each. The dispensable
+            # item is the container, so the count is the outer number; the
+            # inner one describes what is inside it and must not be
+            # multiplied in.
+            unit = {"GRAM": "GM", "LTR": "L"}.get(unit.upper(), unit.upper())
+            return f"{outer}x{inner}{unit}", outer, grid.group(0)
         return f"{outer}*{inner}", outer * inner, grid.group(0)
 
     count = _PACK_COUNT_RE.search(text)

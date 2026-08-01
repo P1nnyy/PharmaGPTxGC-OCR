@@ -113,6 +113,26 @@ class TestPackAndMultiplier:
     def test_count_forms_agree(self, token):
         assert parse_product_name("SOMEDRUG", pack_column=token).pack_multiplier.value == 10
 
+    @pytest.mark.parametrize(
+        "token,display,multiplier",
+        [
+            ("60X5ML", "60x5ML", 60),
+            ("10X2ML", "10x2ML", 10),
+            ("5*10GM", "5x10GM", 5),
+        ],
+    )
+    def test_unit_suffixed_grid_counts_containers_not_contents(self, token, display, multiplier):
+        # 60X5ML is sixty vials holding 5ml each, so the count is sixty.
+        # Multiplying through would claim three hundred of something that
+        # does not exist. Seen on real invoices, and previously parsed to
+        # no multiplier at all because no word boundary sits between 5 and ML.
+        parsed = parse_product_name("SOMEDRUG", pack_column=token)
+        assert parsed.pack_size.value == display
+        assert parsed.pack_multiplier.value == multiplier
+
+    def test_plain_grid_still_multiplies_through(self):
+        assert parse_product_name("SOMEDRUG", pack_column="10*10").pack_multiplier.value == 100
+
     def test_volume_pack_is_one_dispensable_unit(self):
         parsed = parse_product_name("MONTICOPE SUSPENSION 60 ML")
         assert parsed.pack_size.value == "60ML"
