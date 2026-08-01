@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     IMAGE_MAX_ASPECT_RATIO: float = 2.0
     IMAGE_MIN_DPI_WARNING: float = 150
 
+    # Pre-flight content gate: rejects structurally empty images before the
+    # billable Azure call. Tuned strictly toward NOT rejecting real invoices -
+    # see services/validators/content_validator.py for the measured separation
+    # these sit between (real imagery coherence >= 0.93, noise <= 0.36).
+    # Upper bound on pages accepted as a single invoice. Each page is a
+    # separate billable extraction, so this caps the cost of one submission.
+    MAX_INVOICE_PAGES: int = 10
+
+    CONTENT_GATE_ENABLED: bool = True
+    CONTENT_MIN_DYNAMIC_RANGE: float = 28.0
+    CONTENT_MIN_STD_DEV: float = 6.0
+    CONTENT_MIN_COHERENCE: float = 0.60
+
     @model_validator(mode="after")
     def derive_ocr_results_dir(self):
         if not self.OCR_RESULTS_DIR:

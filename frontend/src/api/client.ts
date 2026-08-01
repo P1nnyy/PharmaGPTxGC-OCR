@@ -118,6 +118,59 @@ export const apiClient = {
     return mapInvoiceToRunSummary({ ...backendData, id: backendData.graph_invoice_id });
   },
 
+  /**
+   * Uploads several images as the pages of ONE invoice, in the given order.
+   *
+   * confirmedSingleOrder reflects the user having confirmed in the dialog that
+   * these pages belong to a single order. The backend independently checks the
+   * extracted pages against each other and answers 409 if they disagree, so a
+   * mistaken confirmation surfaces as a conflict rather than a merged invoice.
+   * Retrying with force=true accepts them anyway.
+   */
+  async uploadInvoicePages(
+    files: File[],
+    options: { force?: boolean } = {}
+  ): Promise<RunSummary> {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+
+    const params = new URLSearchParams({ confirmed_single_order: 'true' });
+    if (options.force) params.set('force', 'true');
+
+    const response = await fetch(`/upload-invoice-multipage?${params.toString()}`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      // A 409 carries the structured page-mismatch report; keep it attached so
+      // the caller can show which pages disagreed rather than a bare message.
+      const detail = err.detail;
+      if (response.status === 409 && detail && typeof detail === 'object') {
+        const conflictError: any = new Error(detail.message || 'These pages do not belong to the same invoice.');
+        conflictError.isPageMismatch = true;
+        conflictError.consistency = detail.consistency;
+        conflictError.pages = detail.pages;
+        throw conflictError;
+      }
+      throw new Error(
+        typeof detail === 'string' ? detail : detail?.message || 'Multi-page upload failed'
+      );
+    }
+
+    const backendData = await response.json();
+
+    if (!backendData.persisted || !backendData.graph_invoice_id) {
+      throw new Error(
+        backendData.persist_error ||
+        'Invoice was extracted but could not be saved. Check server storage configuration.'
+      );
+    }
+
+    return mapInvoiceToRunSummary({ ...backendData, id: backendData.graph_invoice_id });
+  },
+
   async runOCR(fileOrRunId: File | string): Promise<RunSummary> {
     if (typeof fileOrRunId === 'string') {
       const existing = await this.getRun(fileOrRunId);

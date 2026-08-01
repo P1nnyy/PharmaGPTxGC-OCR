@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import uuid
 from typing import Optional
 from core.config import settings
@@ -110,6 +111,106 @@ def compute_md5(file_bytes: bytes) -> str:
         return hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()
     except TypeError:
         return hashlib.md5(file_bytes).hexdigest()
+
+# --- Raw Azure Document Intelligence response cache -------------------------
+#
+# Kept deliberately separate from the OCR cache above. That one runs every
+# payload through _ocr_only_payload, which flattens to {text, blocks} and so
+# destroys the tables/documents structure the invoice normalizer needs.
+#
+# What's cached here is the *unmodified* Azure response - the part that costs
+# money. Normalization is re-run on every request against the cached raw
+# response, so fixing a normalizer bug (a mis-read header, a missed footer
+# label) re-applies to every previously-scanned invoice for free instead of
+# requiring a paid re-scan. That's the whole point of caching at this layer
+# rather than caching the finished CanonicalInvoice.
+
+AZURE_RAW_SUBDIR = "azure_raw"
+
+def _azure_cache_dir() -> str:
+    return os.path.join(settings.OCR_RESULTS_DIR, AZURE_RAW_SUBDIR)
+
+def azure_cache_key(file_bytes: bytes, model_id: str) -> str:
+    """Content hash + model id. The model id is part of the key because the
+    same bytes analyzed by a different DI model produce a different response,
+    so a model switch must miss rather than silently reuse."""
+    safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", str(model_id or "unknown"))
+    return f"{compute_md5(file_bytes)}_{safe_model}"
+
+def get_cached_azure_response(cache_key: str) -> Optional[dict]:
+    """Returns the cached raw Azure response, or None on miss/unreadable."""
+    if not settings.ENABLE_CACHE:
+        return None
+
+    cache_path = os.path.join(_azure_cache_dir(), f"{cache_key}.json")
+    if not os.path.exists(cache_path):
+        logger.info(f"[AZURE CACHE] miss key={cache_key}")
+        return None
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        # A corrupt/truncated entry must not wedge extraction - fall through
+        # to a live call, which will overwrite this entry on success.
+        logger.warning(f"[AZURE CACHE] unreadable entry key={cache_key}: {type(e).__name__}: {e}")
+        return None
+
+    if not isinstance(data, dict):
+        logger.warning(f"[AZURE CACHE] ignoring non-dict entry key={cache_key}")
+        return None
+
+    logger.info(f"[AZURE CACHE] HIT key={cache_key} (skipped a paid Azure call)")
+    return data
+
+def save_azure_response(cache_key: str, raw_response: dict) -> bool:
+    """Persists a raw Azure response. Returns True if it was written."""
+    global _SAVE_DISABLED_FOR_PROCESS, _CACHE_WRITABLE
+
+    if not settings.ENABLE_CACHE or _SAVE_DISABLED_FOR_PROCESS:
+        return False
+    if _CACHE_WRITABLE is not True and not check_cache_status(log_status=False):
+        return False
+    if not isinstance(raw_response, dict):
+        return False
+
+    cache_dir = _azure_cache_dir()
+    cache_path = os.path.join(cache_dir, f"{cache_key}.json")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        # Write to a temp file then move, so an interrupted write can't leave a
+        # half-written entry that later reads would treat as a usable response.
+        tmp_path = f"{cache_path}.{uuid.uuid4().hex}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(raw_response, f, ensure_ascii=False, default=str)
+        os.replace(tmp_path, cache_path)
+        logger.info(f"[AZURE CACHE] stored key={cache_key}")
+        return True
+    except (PermissionError, OSError) as e:
+        _log_cache_warning_once(cache_dir, f"azure_raw_write_failed:{e}")
+        return False
+    except Exception as e:
+        logger.warning(f"[AZURE CACHE] failed to store key={cache_key}: {type(e).__name__}: {e}")
+        return False
+
+def clear_azure_cache() -> int:
+    """Deletes cached raw Azure responses. Separate from clear_cache() because
+    every entry dropped here is one that has to be paid for again."""
+    path = _azure_cache_dir()
+    if not os.path.isdir(path):
+        return 0
+
+    cleared = 0
+    for name in os.listdir(path):
+        if name.endswith(".json"):
+            try:
+                os.remove(os.path.join(path, name))
+                cleared += 1
+            except OSError as e:
+                logger.warning(f"Failed to remove Azure cache file {name}: {e}")
+
+    logger.info(f"[AZURE CACHE CLEARED] removed {cleared} raw response(s) from {path}")
+    return cleared
 
 def _ocr_only_payload(data: dict) -> dict:
     """

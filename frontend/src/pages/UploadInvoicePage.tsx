@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import {
@@ -11,13 +11,19 @@ import {
   ShieldCheck,
   Zap,
   Boxes,
-  Trash2
+  Trash2,
+  Files,
+  X,
+  ArrowUp,
+  ArrowDown,
+  Layers
 } from 'lucide-react';
 
 export const UploadInvoicePage: React.FC = () => {
-  const { uploadInvoiceFile } = useRun();
+  const { uploadInvoiceFile, uploadInvoicePages } = useRun();
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const multiInputRef = useRef<HTMLInputElement>(null);
 
   // States
   const [dragActive, setDragActive] = useState(false);
@@ -25,6 +31,18 @@ export const UploadInvoicePage: React.FC = () => {
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'extracting' | 'success' | 'failed'>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+
+  // Multi-page invoice states
+  const [multiDragActive, setMultiDragActive] = useState(false);
+  const [pageFiles, setPageFiles] = useState<File[]>([]);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [multiStatus, setMultiStatus] = useState<'idle' | 'processing' | 'success' | 'failed'>('idle');
+  const [multiError, setMultiError] = useState<string | null>(null);
+  // Populated when the backend rejects the pages as belonging to different
+  // invoices; lets the user see exactly what disagreed before overriding.
+  const [pageMismatch, setPageMismatch] = useState<any>(null);
+  // Lightbox for inspecting a queued page at full size before committing.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // Helper check: does any bench data exist to clear
   const hasBenchData = () => {
@@ -129,6 +147,83 @@ export const UploadInvoicePage: React.FC = () => {
     }
   };
 
+  // --- Multi-page invoice handling ------------------------------------------
+
+  // Object URLs for the queued page previews. Filenames like
+  // "WhatsApp Image 2026-07-31 at 16.16.04.jpeg" tell the user nothing about
+  // which sheet is which, so the page itself has to be visible.
+  const pagePreviews = useMemo(
+    () => pageFiles.map((file) => URL.createObjectURL(file)),
+    [pageFiles]
+  );
+
+  // Revoke the previous batch of URLs whenever the list changes, and on
+  // unmount, so removed/reordered pages don't leak their blobs.
+  useEffect(() => {
+    return () => {
+      pagePreviews.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [pagePreviews]);
+
+  const addPageFiles = (incoming: FileList | File[]) => {
+    const accepted = Array.from(incoming).filter((f) => f.type.startsWith('image/'));
+    if (accepted.length === 0) return;
+    setMultiError(null);
+    setPageMismatch(null);
+    setMultiStatus('idle');
+    // Append rather than replace, so pages can be added in several drops.
+    setPageFiles((prev) => [...prev, ...accepted]);
+  };
+
+  const handleMultiDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') setMultiDragActive(true);
+    else if (e.type === 'dragleave') setMultiDragActive(false);
+  };
+
+  const handleMultiDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMultiDragActive(false);
+    if (e.dataTransfer.files?.length) addPageFiles(e.dataTransfer.files);
+  };
+
+  const movePage = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= pageFiles.length) return;
+    setPageFiles((prev) => {
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const removePage = (index: number) => {
+    setPageFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const submitPages = async (force = false) => {
+    setShowConfirm(false);
+    setMultiStatus('processing');
+    setMultiError(null);
+    setPageMismatch(null);
+
+    try {
+      const newRun = await uploadInvoicePages(pageFiles, { force });
+      setMultiStatus('success');
+      setTimeout(() => navigate(`/review/${newRun.run_id}`), 800);
+    } catch (err: any) {
+      setMultiStatus('failed');
+      if (err?.isPageMismatch) {
+        setPageMismatch({ consistency: err.consistency, pages: err.pages });
+        setMultiError(err.message);
+      } else {
+        setMultiError(err?.message || 'Multi-page invoice processing failed.');
+      }
+    }
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -185,6 +280,185 @@ export const UploadInvoicePage: React.FC = () => {
 
             {dragActive && (
               <div className="absolute inset-0 bg-blue-500/5 rounded-3xl pointer-events-none border-2 border-[#1b5dfc] transition-all duration-200" />
+            )}
+          </div>
+
+          {/* Multi-page invoice dropzone */}
+          <div className="bg-white rounded-3xl border border-[#e2e8f0] shadow-sm overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-[#e2e8f0] flex items-center space-x-2.5">
+              <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                <Layers size={15} />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-xs font-bold text-[#0f172a]">Multi-page invoice</h3>
+                <p className="text-[10px] text-gray-500 leading-normal">
+                  Drop every page of the <span className="font-semibold">same</span> invoice here — they'll be combined into one record.
+                </p>
+              </div>
+            </div>
+
+            <div
+              onDragEnter={handleMultiDrag}
+              onDragOver={handleMultiDrag}
+              onDragLeave={handleMultiDrag}
+              onDrop={handleMultiDrop}
+              onClick={() => multiInputRef.current?.click()}
+              className={`m-4 border-2 border-dashed rounded-2xl px-6 py-8 text-center cursor-pointer transition-all duration-300 ${
+                multiDragActive
+                  ? 'border-indigo-500 bg-indigo-50/40'
+                  : 'border-[#cbd5e1] hover:border-indigo-400 hover:bg-slate-50/60'
+              }`}
+            >
+              <input
+                type="file"
+                ref={multiInputRef}
+                accept="image/*"
+                multiple
+                onChange={(e) => {
+                  if (e.target.files?.length) addPageFiles(e.target.files);
+                  e.target.value = '';
+                }}
+                className="hidden"
+              />
+              <div className="w-11 h-11 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto mb-3">
+                <Files size={20} />
+              </div>
+              <p className="text-sm font-semibold text-[#0f172a]">
+                Drop pages here or <span className="text-indigo-600 hover:underline">browse</span>
+              </p>
+              <p className="text-[10px] text-gray-400 mt-1">
+                Select 2 or more images. You can add them in any order and reorder below.
+              </p>
+            </div>
+
+            {pageFiles.length > 0 && (
+              <div className="px-4 pb-4 space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                    {pageFiles.length} page{pageFiles.length === 1 ? '' : 's'} queued
+                  </span>
+                  <button
+                    onClick={() => { setPageFiles([]); setMultiError(null); setPageMismatch(null); setMultiStatus('idle'); }}
+                    className="text-[10px] font-semibold text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
+                  >
+                    Clear all
+                  </button>
+                </div>
+
+                {pageFiles.map((file, index) => (
+                  <div
+                    key={`${file.name}-${index}`}
+                    className="flex items-center gap-3 p-2.5 bg-slate-50 border border-slate-200/70 rounded-xl"
+                  >
+                    <span className="w-7 h-7 shrink-0 rounded-lg bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">
+                      {index + 1}
+                    </span>
+                    {/* The page itself — the only reliable way to tell which
+                        sheet is which, since camera filenames are opaque. */}
+                    <button
+                      type="button"
+                      onClick={() => setPreviewUrl(pagePreviews[index])}
+                      className="shrink-0 rounded-lg overflow-hidden border border-slate-300 bg-white hover:border-indigo-500 transition-colors cursor-zoom-in"
+                      title="Click to enlarge"
+                    >
+                      <img
+                        src={pagePreviews[index]}
+                        alt={`Page ${index + 1}`}
+                        className="w-24 h-28 object-cover object-top"
+                      />
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] font-semibold text-[#0f172a] truncate">{file.name}</p>
+                      <p className="text-[9px] text-gray-400 font-mono">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                      <p className="text-[9px] text-indigo-600 font-semibold mt-1">Click image to enlarge</p>
+                    </div>
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        onClick={() => movePage(index, -1)}
+                        disabled={index === 0}
+                        className="p-1 text-gray-400 hover:text-indigo-600 rounded transition-colors cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed"
+                        title="Move up"
+                      >
+                        <ArrowUp size={13} />
+                      </button>
+                      <button
+                        onClick={() => movePage(index, 1)}
+                        disabled={index === pageFiles.length - 1}
+                        className="p-1 text-gray-400 hover:text-indigo-600 rounded transition-colors cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed"
+                        title="Move down"
+                      >
+                        <ArrowDown size={13} />
+                      </button>
+                      <button
+                        onClick={() => removePage(index)}
+                        className="p-1 text-gray-400 hover:text-red-500 rounded transition-colors cursor-pointer"
+                        title="Remove page"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {multiStatus === 'failed' && multiError && (
+                  <div className="bg-red-50 border border-red-200/60 p-3 rounded-xl space-y-2">
+                    <div className="flex items-start space-x-2 text-[11px] text-red-700">
+                      <AlertTriangle size={13} className="text-red-600 shrink-0 mt-0.5" />
+                      <div className="space-y-1 min-w-0">
+                        <span className="font-bold block">{pageMismatch ? 'Pages may not match' : 'Processing failed'}</span>
+                        <p className="text-[10px] text-red-600/90 leading-normal">{multiError}</p>
+                      </div>
+                    </div>
+
+                    {pageMismatch && (
+                      <div className="space-y-1.5 pl-5">
+                        {(pageMismatch.consistency?.conflicts || []).map((c: any, i: number) => (
+                          <p key={i} className="text-[10px] text-red-600/90 leading-normal">• {c.message}</p>
+                        ))}
+                        <div className="pt-1 space-y-0.5">
+                          {(pageMismatch.pages || []).map((p: any) => (
+                            <p key={p.page} className="text-[9px] text-gray-500 font-mono">
+                              page {p.page}: {p.invoice_number || 'no invoice no.'} · {p.line_item_count} items
+                            </p>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => submitPages(true)}
+                          className="mt-1 text-[10px] font-bold text-red-700 underline hover:text-red-800 cursor-pointer"
+                        >
+                          They are the same invoice — combine anyway
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {multiStatus === 'success' && (
+                  <div className="bg-green-50 border border-green-200/60 p-2.5 rounded-xl flex items-center space-x-2 text-[11px] text-green-700">
+                    <CheckCircle2 size={13} className="text-green-600" />
+                    <span className="font-semibold">Pages combined — opening review…</span>
+                  </div>
+                )}
+
+                <button
+                  onClick={() => setShowConfirm(true)}
+                  disabled={pageFiles.length < 2 || multiStatus === 'processing' || multiStatus === 'success'}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
+                >
+                  {multiStatus === 'processing' ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      <span>Processing {pageFiles.length} pages…</span>
+                    </>
+                  ) : (
+                    <span>
+                      {pageFiles.length < 2
+                        ? 'Add at least 2 pages'
+                        : `Combine ${pageFiles.length} pages into one invoice`}
+                    </span>
+                  )}
+                </button>
+              </div>
             )}
           </div>
 
@@ -332,6 +606,91 @@ export const UploadInvoicePage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Full-size page preview, so the user can actually read the sheet
+          before deciding whether it belongs to this invoice. */}
+      {previewUrl && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-6 cursor-zoom-out"
+          onClick={() => setPreviewUrl(null)}
+        >
+          <img
+            src={previewUrl}
+            alt="Invoice page preview"
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+          />
+          <button
+            onClick={() => setPreviewUrl(null)}
+            className="absolute top-4 right-4 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors cursor-pointer"
+            title="Close preview"
+          >
+            <X size={20} />
+          </button>
+        </div>
+      )}
+
+      {/* Single-order confirmation — asked before spending an extraction call
+          per page, and before several pages are welded into one record. */}
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-gray-200 p-6 max-w-md w-full shadow-xl space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl shrink-0">
+                <Layers size={22} />
+              </div>
+              <div className="space-y-1 min-w-0">
+                <h3 className="text-base font-bold text-[#0f172a]">
+                  Are these {pageFiles.length} pages all the same invoice?
+                </h3>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  They'll be combined into a single invoice record, with the totals taken
+                  from the page carrying the final amount. Pages from different orders must
+                  be uploaded separately.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 max-h-72 overflow-y-auto">
+              <div className="flex gap-3 flex-wrap">
+                {pageFiles.map((file, index) => (
+                  <div key={`${file.name}-${index}`} className="space-y-1.5 w-[104px]">
+                    <div className="relative rounded-lg overflow-hidden border border-slate-300 bg-white">
+                      <img
+                        src={pagePreviews[index]}
+                        alt={`Page ${index + 1}`}
+                        className="w-full h-32 object-cover object-top"
+                      />
+                      <span className="absolute top-1 left-1 w-5 h-5 rounded bg-indigo-600 text-white text-[9px] font-bold flex items-center justify-center shadow">
+                        {index + 1}
+                      </span>
+                    </div>
+                    <p className="text-[9px] text-slate-500 truncate" title={file.name}>{file.name}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-[10px] text-gray-400 leading-relaxed">
+              Page order matters — page 1 should be the sheet carrying the invoice header.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-1">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => submitPages(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors cursor-pointer"
+              >
+                Yes, combine into one invoice
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

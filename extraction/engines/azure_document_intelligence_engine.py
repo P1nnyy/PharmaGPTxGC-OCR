@@ -8,9 +8,11 @@ from dotenv import load_dotenv
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
 
+from core.logger import logger
 from extraction.base import DocumentExtractionEngine
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
 from extraction.normalizers.azure_invoice_normalizer import normalize_azure_invoice
+from services import cache_service
 
 class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
     """
@@ -34,14 +36,20 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
         save_raw_str = os.environ.get("AZURE_DI_SAVE_RAW", "false").lower().strip()
         self.save_raw = save_raw_str in ("true", "1", "yes")
 
-    def extract(self, document_path: str, **kwargs) -> CanonicalInvoice:
+    def extract(self, document_path: str, bypass_cache: bool = False, **kwargs) -> CanonicalInvoice:
         """
         Submits the target document to Azure Document Intelligence and normalizes the response.
-        
+
+        The raw Azure response is cached by content hash, so re-analyzing the
+        same bytes is free. Normalization always re-runs against that raw
+        response rather than being cached itself - normalizer fixes then apply
+        to already-scanned documents without paying Azure again.
+
         Args:
             document_path: Path to the target invoice image file.
+            bypass_cache: Force a live Azure call, overwriting any cached response.
             **kwargs: Extra parameters (not utilized currently).
-            
+
         Returns:
             A normalized CanonicalInvoice representation of the extracted document.
         """
@@ -64,24 +72,49 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
         if not doc_path.exists():
             raise FileNotFoundError(f"Document file not found at: '{document_path}'")
             
-        # 3. Instantiate DocumentIntelligenceClient with Azure Key credentials
+        # 3. Read the document once, so the same bytes are used both for the
+        # cache key and for the request body.
+        with open(doc_path, "rb") as f:
+            document_bytes = f.read()
+
+        # 4. Try the raw-response cache before spending an API call. Any
+        # failure to derive a key (unreadable/oddly-typed bytes) just disables
+        # caching for this call - the cache is an optimization and must never
+        # be able to block an extraction.
+        cache_key = None
+        try:
+            cache_key = cache_service.azure_cache_key(document_bytes, self.model_id)
+        except Exception as e:
+            logger.warning(f"[AZURE CACHE] key derivation skipped: {type(e).__name__}: {e}")
+
+        if cache_key and not bypass_cache:
+            cached = cache_service.get_cached_azure_response(cache_key)
+            if cached is not None:
+                # Normalization intentionally re-runs on the cached response.
+                return normalize_azure_invoice(cached)
+
+        # 5. Cache miss (or forced bypass): instantiate the client and make the
+        # billable call.
         client = DocumentIntelligenceClient(
             endpoint=self.endpoint,
             credential=AzureKeyCredential(self.api_key)
         )
-        
-        # 4. Open document stream and call Azure analysis
-        with open(doc_path, "rb") as f:
-            poller = client.begin_analyze_document(
-                model_id=self.model_id,
-                body=f
-            )
-            result = poller.result()
-            
-        # 5. Convert response objects into a plain python dictionary
+
+        logger.info(f"[AZURE CACHE] calling Azure Document Intelligence (model={self.model_id})")
+        poller = client.begin_analyze_document(
+            model_id=self.model_id,
+            body=document_bytes
+        )
+        result = poller.result()
+
+        # 6. Convert response objects into a plain python dictionary
         result_dict = result.as_dict()
-        
-        # 6. Save raw JSON data locally if requested
+
+        if cache_key:
+            cache_service.save_azure_response(cache_key, result_dict)
+
+        # 7. Save raw JSON data locally if requested (debug aid, separate from
+        # the response cache above)
         if self.save_raw:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = Path("local_runs/azure_engine")
@@ -95,7 +128,7 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
                 # Silently catch disk write/permission warnings to prevent pipeline disruption
                 pass
                 
-        # 7. Normalize raw response payload to the CanonicalInvoice schema
+        # 8. Normalize raw response payload to the CanonicalInvoice schema
         canonical_invoice = normalize_azure_invoice(result_dict)
         return canonical_invoice
 

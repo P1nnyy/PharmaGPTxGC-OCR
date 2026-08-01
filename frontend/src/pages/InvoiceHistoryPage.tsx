@@ -9,7 +9,7 @@ import {
   Eye,
   ChevronLeft,
   ChevronRight,
-  DollarSign,
+  IndianRupee,
   AlertCircle,
   Package,
   MoreVertical
@@ -434,7 +434,7 @@ export const InvoiceHistoryPage: React.FC = () => {
         {/* Total Monthly Spend card */}
         <div className="bg-white p-5 rounded-2xl border border-[#e2e8f0] shadow-sm flex items-center space-x-4">
           <div className="p-3 bg-blue-50 text-[#1b5dfc] rounded-xl shrink-0">
-            <DollarSign size={22} />
+            <IndianRupee size={22} />
           </div>
           <div>
             <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block">Total Spend</span>

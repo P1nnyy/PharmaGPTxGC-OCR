@@ -32,27 +32,45 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+def _as_image_key_list(image_object_key: Any) -> list[str]:
+    """Accepts either a single object key or a list of them (one per page of a
+    multi-page invoice) and returns a clean list."""
+    if image_object_key is None:
+        return []
+    if isinstance(image_object_key, str):
+        return [image_object_key]
+    return [k for k in image_object_key if k]
+
+
 def save_invoice(
     invoice: CanonicalInvoice,
-    image_object_key: Optional[str] = None,
+    image_object_key: Any = None,
     pharmacy_id: Optional[str] = None,
     user_id: Optional[str] = None,
     invoice_id: Optional[str] = None,
 ) -> str:
-    """Persists a CanonicalInvoice into the graph and returns the Invoice id."""
+    """Persists a CanonicalInvoice into the graph and returns the Invoice id.
+
+    image_object_key may be a single key or a list of keys, one per page, in
+    page order.
+    """
     pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
     user_id = user_id or settings.DEFAULT_USER_ID
     invoice_id = invoice_id or str(uuid.uuid4())
+    image_keys = _as_image_key_list(image_object_key)
 
     driver = get_driver()
     with driver.session() as session:
-        session.execute_write(_write_invoice_tx, invoice_id, pharmacy_id, user_id, image_object_key, invoice)
+        session.execute_write(_write_invoice_tx, invoice_id, pharmacy_id, user_id, image_keys, invoice)
 
-    logger.info(f"[NEO4J] Saved invoice {invoice_id} ({len(invoice.line_items)} line items) for pharmacy {pharmacy_id}")
+    logger.info(
+        f"[NEO4J] Saved invoice {invoice_id} ({len(invoice.line_items)} line items, "
+        f"{len(image_keys)} page image(s)) for pharmacy {pharmacy_id}"
+    )
     return invoice_id
 
 
-def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image_object_key: Optional[str], inv: CanonicalInvoice):
+def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image_keys: list[str], inv: CanonicalInvoice):
     vendor_id = _resolve_vendor(tx, inv)
 
     # MERGE (not MATCH) for the tenant nodes: if the Pharmacy/User were ever
@@ -83,11 +101,15 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
             sgst: $sgst,
             igst: $igst,
             grand_total: $grand_total,
+            roundoff: $roundoff,
             confidence: $confidence,
             extraction_engine: $extraction_engine,
             page_angle: $page_angle,
+            page_angles: $page_angles,
             status: 'needs_review',
             source_image_ref: $image_ref,
+            source_image_refs: $image_refs,
+            page_count: $page_count,
             created_at: datetime()
         })
         CREATE (inv)-[:BELONGS_TO]->(ph)
@@ -112,10 +134,17 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
         sgst=inv.sgst,
         igst=inv.igst,
         grand_total=inv.grand_total,
+        roundoff=inv.roundoff,
         confidence=inv.confidence,
         extraction_engine=inv.extraction_engine,
         page_angle=inv.page_angle,
-        image_ref=image_object_key,
+        page_angles=[float(a) for a in (inv.page_angles or [])],
+        # source_image_ref stays as page 1 so records written before
+        # multi-page support, and any reader still expecting a single key,
+        # keep working unchanged.
+        image_ref=image_keys[0] if image_keys else None,
+        image_refs=image_keys,
+        page_count=len(image_keys),
     ).single()
 
     if record is None:
@@ -135,8 +164,8 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
             vendor_id=vendor_id,
         )
 
-    for item in inv.line_items:
-        _write_line_item(tx, invoice_id, item.model_dump())
+    for row_index, item in enumerate(inv.line_items):
+        _write_line_item(tx, invoice_id, item.model_dump(), row_index)
 
 
 def _resolve_vendor(tx, inv: CanonicalInvoice) -> Optional[str]:
@@ -176,10 +205,13 @@ def _resolve_vendor(tx, inv: CanonicalInvoice) -> Optional[str]:
     return None
 
 
-def _write_line_item(tx, invoice_id: str, item: dict):
+def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
     """item is a plain dict with CanonicalLineItem-shaped keys (name, pack, batch,
     expiry, hsn, quantity, free_quantity, mrp, rate, discount, gst_percent, amount,
-    bounding_box) — shared by both the initial extraction write and PATCH updates."""
+    bounding_box) — shared by both the initial extraction write and PATCH updates.
+    row_index records the item's position in the caller's list — Neo4j doesn't
+    preserve relationship or node creation order on retrieval, so without this
+    the printed line-item order would be lost as soon as it's re-read."""
     item_id = str(uuid.uuid4())
     name = item.get("name")
     pack = item.get("pack")
@@ -191,14 +223,17 @@ def _write_line_item(tx, invoice_id: str, item: dict):
         MATCH (inv:Invoice {id: $invoice_id})
         CREATE (li:LineItem {
             id: $item_id,
+            row_index: $row_index,
             quantity: $quantity,
             free_quantity: $free_quantity,
             mrp: $mrp,
             rate: $rate,
             discount: $discount,
+            discount_percent: $discount_percent,
             gst_percent: $gst_percent,
             amount: $amount,
             bounding_box: $bounding_box,
+            is_estimated_amount: $is_estimated_amount,
             hsn: $hsn,
             batch: $batch,
             expiry: $expiry
@@ -206,6 +241,7 @@ def _write_line_item(tx, invoice_id: str, item: dict):
         CREATE (inv)-[:CONTAINS]->(li)
         """,
         invoice_id=invoice_id,
+        row_index=row_index,
         item_id=item_id,
         hsn=str(hsn).strip() if hsn else None,
         batch=str(batch).strip() if batch else None,
@@ -215,9 +251,11 @@ def _write_line_item(tx, invoice_id: str, item: dict):
         mrp=_to_float(item.get("mrp")),
         rate=_to_float(item.get("rate")),
         discount=_to_float(item.get("discount")),
+        discount_percent=_to_float(item.get("discount_percent")),
         gst_percent=_to_float(item.get("gst_percent")),
         amount=_to_float(item.get("amount")),
         bounding_box=item.get("bounding_box"),
+        is_estimated_amount=bool(item.get("is_estimated_amount")),
     )
 
     product_id = None
@@ -294,7 +332,7 @@ def update_invoice(
 _EDITABLE_HEADER_FIELDS = {
     "invoice_number", "invoice_date", "seller_name", "seller_gstin",
     "seller_address", "seller_phone", "drug_license", "buyer_gstin",
-    "subtotal", "discount", "cgst", "sgst", "igst", "grand_total",
+    "subtotal", "discount", "cgst", "sgst", "igst", "grand_total", "roundoff",
 }
 
 
@@ -325,8 +363,8 @@ def _update_invoice_tx(tx, invoice_id: str, header: dict, line_items: Optional[l
             """,
             id=invoice_id,
         )
-        for item in line_items:
-            _write_line_item(tx, invoice_id, item)
+        for row_index, item in enumerate(line_items):
+            _write_line_item(tx, invoice_id, item, row_index)
 
     return True
 
@@ -358,10 +396,12 @@ def _list_invoices_tx(tx, pharmacy_id: str) -> list[dict]:
 
 
 def delete_invoice(invoice_id: str) -> Optional[dict]:
-    """Deletes an Invoice and its LineItems (shared Vendor/Product/Batch/HSNCode
-    nodes are left intact since other invoices may reference them). Returns
-    {"image_ref": ...} for R2 cleanup by the caller, or None if the invoice
-    didn't exist (distinct from "existed but had no image")."""
+    """Deletes an Invoice and its LineItems, then cleans up any Vendor/Product/
+    Batch nodes that were only referenced by this invoice (orphans left behind
+    by the delete). Nodes still referenced by other invoices are left intact.
+    Returns {"image_ref": ..., "image_refs": [...]} for R2 cleanup by the
+    caller - image_refs covers every page of a multi-page invoice - or None if
+    the invoice didn't exist (distinct from "existed but had no image")."""
     driver = get_driver()
     with driver.session() as session:
         return session.execute_write(_delete_invoice_tx, invoice_id)
@@ -371,16 +411,70 @@ def _delete_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
     record = tx.run(
         """
         MATCH (inv:Invoice {id: $id})
-        WITH inv, inv.source_image_ref AS image_ref
+        WITH inv, inv.source_image_ref AS image_ref, inv.source_image_refs AS image_refs
+        OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
         OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
-        DETACH DELETE inv, li
-        RETURN image_ref
+        OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
+        OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
+        RETURN image_ref, image_refs, v.id AS vendor_id,
+               collect(DISTINCT p.id) AS product_ids,
+               collect(DISTINCT b.id) AS batch_ids
         """,
         id=invoice_id,
     ).single()
     if record is None:
         return None
-    return {"image_ref": record["image_ref"]}
+
+    tx.run(
+        """
+        MATCH (inv:Invoice {id: $id})
+        OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
+        DETACH DELETE inv, li
+        """,
+        id=invoice_id,
+    )
+
+    # Orphan cleanup: delete Vendor/Product/Batch nodes left with no
+    # remaining invoice/line-item pointing to them. Nodes still shared by
+    # other invoices are untouched.
+    if record["vendor_id"]:
+        tx.run(
+            """
+            MATCH (v:Vendor {id: $vendor_id})
+            WHERE NOT (v)<-[:SUPPLIED_BY]-(:Invoice)
+            DETACH DELETE v
+            """,
+            vendor_id=record["vendor_id"],
+        )
+
+    product_ids = [pid for pid in record["product_ids"] if pid]
+    if product_ids:
+        tx.run(
+            """
+            UNWIND $product_ids AS pid
+            MATCH (p:Product {id: pid})
+            WHERE NOT (p)<-[:OF_PRODUCT]-(:LineItem)
+            DETACH DELETE p
+            """,
+            product_ids=product_ids,
+        )
+
+    batch_ids = [bid for bid in record["batch_ids"] if bid]
+    if batch_ids:
+        tx.run(
+            """
+            UNWIND $batch_ids AS bid
+            MATCH (b:Batch {id: bid})
+            WHERE NOT (b)<-[:OF_BATCH]-(:LineItem)
+            DETACH DELETE b
+            """,
+            batch_ids=batch_ids,
+        )
+
+    # Fall back to the legacy single ref for invoices written before
+    # multi-page support, so their image is still cleaned up.
+    image_refs = record["image_refs"] or ([record["image_ref"]] if record["image_ref"] else [])
+    return {"image_ref": record["image_ref"], "image_refs": image_refs}
 
 
 def get_invoice(invoice_id: str) -> Optional[dict]:
@@ -397,6 +491,8 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
         OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
         OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
+        WITH inv, v, li, p, b
+        ORDER BY coalesce(li.row_index, 0)
         RETURN inv, v, collect({item: li, product: p, batch: b}) AS rows
         """,
         invoice_id=invoice_id,

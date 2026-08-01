@@ -1,5 +1,9 @@
 import pytest
-from extraction.normalizers.azure_invoice_normalizer import normalize_azure_invoice, parse_split_quantity
+from extraction.normalizers.azure_invoice_normalizer import (
+    normalize_azure_invoice,
+    normalize_header,
+    parse_split_quantity,
+)
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
 
 def test_detect_item_table_by_headers():
@@ -728,3 +732,399 @@ def test_same_cell_split_quantity_is_parsed_into_billed_and_free_quantity():
     assert item.amount != item.rate * (item.quantity + item.free_quantity)
     assert item.hsn == "30049079"
     assert item.batch == "ARHS0076"
+
+
+# ==========================================================================
+# Vertically offset columns
+#
+# From a real invoice (ENN PEE MEDICOS, A002111) where the Batch column is
+# typeset about half a row below its neighbours. Azure files each cell by
+# vertical position, so the "Batch" header landed in the first DATA row and
+# every batch value one row below its true row - producing an entire column
+# of blanks plus phantom rows carrying the stray values.
+# ==========================================================================
+
+def _offset_batch_table():
+    """Header row has no Batch label; it sits in the first data row instead,
+    and each batch value is one row lower than the item it belongs to. Row 3
+    is the phantom the offset creates - batch only, no other content."""
+    rows = [
+        # r0: header - note column 5 is EMPTY where "Batch" should be
+        [(0, 0, "S."), (0, 1, "Qty"), (0, 2, "Product Name"), (0, 3, "HSN"), (0, 4, "Amount")],
+        [(1, 0, "1."), (1, 1, "2"), (1, 2, "ALPHA TAB"), (1, 3, "3004"), (1, 4, "100.00")],
+        [(2, 0, "2."), (2, 1, "3"), (2, 2, "BETA CAP"), (2, 3, "3004"), (2, 4, "200.00")],
+        [(4, 0, "3."), (4, 1, "1"), (4, 2, "GAMMA SYP"), (4, 3, "3004"), (4, 4, "300.00")],
+    ]
+    cells = [{"rowIndex": r, "columnIndex": c, "content": v} for row in rows for (r, c, v) in row]
+    # column 5: header label in the first data row, then values one row down,
+    # with r3 a phantom row holding only a batch value
+    cells += [
+        {"rowIndex": 1, "columnIndex": 5, "content": "Batch"},
+        {"rowIndex": 2, "columnIndex": 5, "content": "BATCH-A"},
+        {"rowIndex": 3, "columnIndex": 5, "content": "BATCH-B"},
+        {"rowIndex": 4, "columnIndex": 5, "content": "BATCH-C"},
+    ]
+    return {
+        "modelId": "prebuilt-invoice",
+        "documents": [{"fields": {"InvoiceId": {"value": "A002111"}}}],
+        "tables": [{"rowCount": 5, "columnCount": 6, "cells": cells}],
+    }
+
+
+def test_offset_batch_column_is_realigned_to_correct_items():
+    invoice = normalize_azure_invoice(_offset_batch_table())
+    got = [(i.name, i.batch) for i in invoice.line_items]
+    assert got == [("ALPHA TAB", "BATCH-A"), ("BETA CAP", "BATCH-B"), ("GAMMA SYP", "BATCH-C")]
+
+
+def test_offset_column_does_not_create_phantom_line_item():
+    """The stray row the offset creates must not survive as an extra item."""
+    invoice = normalize_azure_invoice(_offset_batch_table())
+    assert len(invoice.line_items) == 3
+    assert all(i.name for i in invoice.line_items)
+
+
+def test_offset_realignment_is_skipped_when_counts_disagree():
+    """If the values can't be matched 1:1 to the items, no batch is assigned -
+    a wrong batch number is worse than a missing one, it's what a recall is
+    traced by."""
+    raw = _offset_batch_table()
+    # drop one batch value so 3 items have only 2 values available
+    raw["tables"][0]["cells"] = [
+        c for c in raw["tables"][0]["cells"]
+        if not (c["columnIndex"] == 5 and c["content"] == "BATCH-B")
+    ]
+    invoice = normalize_azure_invoice(raw)
+    assert all(not i.batch for i in invoice.line_items)
+
+
+def test_normal_table_is_unaffected_by_offset_detection():
+    """A correctly typeset table must take the unchanged path."""
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "Batch"},
+        {"rowIndex": 0, "columnIndex": 2, "content": "Amount"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "ALPHA TAB"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "BATCH-A"},
+        {"rowIndex": 1, "columnIndex": 2, "content": "100.00"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 2, "columnCount": 3, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert [(i.name, i.batch) for i in invoice.line_items] == [("ALPHA TAB", "BATCH-A")]
+
+
+# ==========================================================================
+# Handwritten tick marks in the Qty column
+# ==========================================================================
+
+def test_selection_marks_are_stripped_from_cells():
+    """Azure annotates a detected tick as ':selected:' inline; it is never
+    part of the printed value and breaks numeric parsing."""
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "Qty"},
+        {"rowIndex": 0, "columnIndex": 2, "content": "Amount"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "ALPHA TAB"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "4\n:selected:"},
+        {"rowIndex": 1, "columnIndex": 2, "content": "100.00"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 2, "columnCount": 3, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.line_items[0].quantity == 4
+
+
+@pytest.mark.parametrize(
+    "cell,expected",
+    [
+        ("v1", 1.0),        # tick read as a letter
+        ("L2", 2.0),
+        ("+1", 1.0),
+        ("-3", 3.0),        # tick read as a sign - never a negative quantity
+        ("L-1", 1.0),
+        ("৳ 1", 1.0),  # tick read as a currency glyph
+        # tick AND digit both read as letters: drop the tick, map the rest
+        ("VI", 1.0),
+        ("NI", 1.0),
+        ("LI", 1.0),
+        ("VZ", 2.0),
+        ("VS", 5.0),
+        ("VA", None),       # 'A' maps to no digit - left blank, not guessed
+        ("x", None),        # nothing after the tick
+    ],
+)
+def test_tick_marked_quantity_recovery(cell, expected):
+    from extraction.normalizers.azure_invoice_normalizer import salvage_tick_marked_qty
+    assert salvage_tick_marked_qty(cell) == expected
+
+
+def test_quantity_is_never_negative():
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "Qty"},
+        {"rowIndex": 0, "columnIndex": 2, "content": "Amount"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "ALPHA TAB"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "-3"},
+        {"rowIndex": 1, "columnIndex": 2, "content": "100.00"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 2, "columnCount": 3, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.line_items[0].quantity == 3
+
+
+# ==========================================================================
+# Wrapped continuation rows
+# ==========================================================================
+
+def test_wrapped_values_are_absorbed_into_the_item_above():
+    """On a continuation page the batch/expiry/HSN can wrap onto a following
+    row that has no product or amount. That is the tail of the item above,
+    not a new item."""
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "Batch"},
+        {"rowIndex": 0, "columnIndex": 2, "content": "Exp"},
+        {"rowIndex": 0, "columnIndex": 3, "content": "Amount"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "VONEFI 20 MG"},
+        {"rowIndex": 1, "columnIndex": 3, "content": "162.93"},
+        # wrapped tail - batch and expiry only
+        {"rowIndex": 2, "columnIndex": 1, "content": "HTL0189"},
+        {"rowIndex": 2, "columnIndex": 2, "content": "9/27"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 3, "columnCount": 4, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert len(invoice.line_items) == 1
+    item = invoice.line_items[0]
+    assert item.name == "VONEFI 20 MG"
+    assert item.batch == "HTL0189"
+    assert item.expiry == "9/27"
+
+
+def test_multiline_expiry_cell_keeps_only_this_rows_value():
+    """A merged cell holding two rows' expiries must not concatenate into
+    nonsense like '4/281/28'."""
+    from extraction.normalizers.azure_invoice_normalizer import clean_expiry_string
+    assert clean_expiry_string("4/28\n1/28") == "4/28"
+
+
+# ==========================================================================
+# OCR-tolerant header matching
+#
+# Header labels were previously matched as exact strings, so every new
+# misreading silently dropped a whole column: "QTY." read as "OTY." on the
+# Arora Bros invoice lost every quantity. Matching on a look-alike-collapsed
+# form absorbs that class.
+# ==========================================================================
+
+def test_misread_qty_header_still_maps():
+    """The observed failure: Q read as O."""
+    assert normalize_header("OTY.") == "quantity_pcs"
+    assert normalize_header("OTY") == "quantity_pcs"
+
+
+@pytest.mark.parametrize(
+    "misread,expected",
+    [
+        ("0TY", "quantity_pcs"),          # Q -> 0
+        ("8ATCH", "batch"),               # B -> 8
+        ("EXPlRY", "expiry"),             # I -> l
+        ("H5N", "hsn"),                   # S -> 5
+        ("RA7E", "rate"),                 # T -> 7
+        ("AMOUN7", "amount"),
+        ("Gross Amt", "gross_amount"),
+        ("GrossAmt", "gross_amount"),     # spacing lost
+        ("M.R.P", "mrp"),
+    ],
+)
+def test_look_alike_header_variants(misread, expected):
+    assert normalize_header(misread) == expected
+
+
+def test_tax_columns_never_collapse_into_each_other():
+    """The dangerous case for any fuzzy matching: SGST/CGST/IGST differ by a
+    single character. They must stay distinct, because mapping one onto
+    another silently mis-files tax on every row."""
+    from extraction.normalizers.azure_invoice_normalizer import ocr_visual_key
+    keys = {ocr_visual_key(x) for x in ("sgst", "cgst", "igst")}
+    assert len(keys) == 3
+
+
+def test_no_two_concepts_share_aocr_visual_key():
+    """Guards the look-alike table: if a future label makes two different
+    concepts collapse together, that key is dropped rather than guessed - and
+    this test makes the collision visible instead of silent."""
+    from extraction.normalizers.azure_invoice_normalizer import (
+        _EXACT_HEADER_MAP, ocr_visual_key,
+    )
+    by_key = {}
+    for label, concept in _EXACT_HEADER_MAP.items():
+        by_key.setdefault(ocr_visual_key(label), set()).add(concept)
+    collisions = {k: v for k, v in by_key.items() if len(v) > 1}
+    assert not collisions, f"look-alike collisions: {collisions}"
+
+
+def test_unknown_header_still_returns_none():
+    """The fallback must not map arbitrary text onto a column."""
+    assert normalize_header("Delivery Instructions") is None
+    assert normalize_header("Transporter") is None
+
+
+def test_misread_qty_header_recovers_the_whole_column():
+    """End to end: with the header misread, every quantity must still land."""
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "SN"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "OTY."},
+        {"rowIndex": 0, "columnIndex": 2, "content": "ITEM NAME"},
+        {"rowIndex": 0, "columnIndex": 3, "content": "AMOUNT"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "1"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "4.00"},
+        {"rowIndex": 1, "columnIndex": 2, "content": "STERIVON H/S"},
+        {"rowIndex": 1, "columnIndex": 3, "content": "152.00"},
+        {"rowIndex": 2, "columnIndex": 0, "content": "2"},
+        {"rowIndex": 2, "columnIndex": 1, "content": "10.00"},
+        {"rowIndex": 2, "columnIndex": 2, "content": "BACIFYL 5 ML"},
+        {"rowIndex": 2, "columnIndex": 3, "content": "173.00"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 3, "columnCount": 4, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert [i.quantity for i in invoice.line_items] == [4, 10]
+
+
+# ==========================================================================
+# Totals block edge cases (Arora Bros, GST-15168)
+# ==========================================================================
+
+def _footer_only(rows):
+    cells = [
+        {"rowIndex": r, "columnIndex": c, "content": v}
+        for r, row in enumerate(rows) for c, v in enumerate(row) if v
+    ]
+    return {
+        "modelId": "prebuilt-invoice",
+        "documents": [],
+        "tables": [
+            {   # item table so the footer table isn't also treated as items
+                "rowCount": 2, "columnCount": 3,
+                "cells": [
+                    {"rowIndex": 0, "columnIndex": 0, "content": "Product Name"},
+                    {"rowIndex": 0, "columnIndex": 1, "content": "Qty"},
+                    {"rowIndex": 0, "columnIndex": 2, "content": "Amount"},
+                    {"rowIndex": 1, "columnIndex": 0, "content": "ALPHA"},
+                    {"rowIndex": 1, "columnIndex": 1, "content": "1"},
+                    {"rowIndex": 1, "columnIndex": 2, "content": "2277.50"},
+                ],
+            },
+            {"rowCount": len(rows), "columnCount": max(len(r) for r in rows), "cells": cells},
+        ],
+    }
+
+
+def test_discount_printed_as_negative_is_stored_as_magnitude():
+    """Invoices print the deduction as "-151.42". Every consumer subtracts
+    the discount, so keeping the sign would add it back as a surcharge."""
+    invoice = normalize_azure_invoice(_footer_only([
+        ["", "TOTAL", "2277.50"],
+        ["", "DISCOUNT", "-151.42"],
+        ["", "Net Amount", "2278.00"],
+    ]))
+    assert invoice.discount == 151.42
+
+
+def test_footer_label_found_when_stray_text_shares_the_row():
+    """The amount-in-words line sits in column 0 beside "Round Off"; reading
+    the first two populated cells would take the words as the label and
+    "Round Off" as its value."""
+    invoice = normalize_azure_invoice(_footer_only([
+        ["", "TOTAL", "2277.50"],
+        ["", "CGST", "75.86"],
+        ["", "SGST", "75.86"],
+        ["Rs. : Two Thousand Two Hundred Seventy Eight Only", "Round Off", "0.20"],
+        ["CHALLAN BILL:", "Net Amount", "2278.00"],
+    ]))
+    assert invoice.roundoff == 0.20
+    assert invoice.grand_total == 2278.00
+    assert invoice.cgst == 75.86
+
+
+def test_arora_bros_totals_reconcile():
+    """subtotal - discount + tax + roundoff == the printed net amount."""
+    invoice = normalize_azure_invoice(_footer_only([
+        ["", "TOTAL", "2277.50"],
+        ["", "DISCOUNT", "-151.42"],
+        ["", "CGST", "75.86"],
+        ["", "SGST", "75.86"],
+        ["Rs. : Two Thousand Two Hundred Seventy Eight Only", "Round Off", "0.20"],
+        ["CHALLAN BILL:", "Net Amount", "2278.00"],
+    ]))
+    derived = (
+        invoice.subtotal - invoice.discount + invoice.cgst + invoice.sgst + invoice.roundoff
+    )
+    assert round(derived, 2) == invoice.grand_total == 2278.00
+
+
+# ==========================================================================
+# GST rate when only one half of the split is readable
+#
+# From the Arora Bros invoice: items 1-2 are taxed at 9% SGST + 9% CGST = 18%,
+# but the CGST value merged into the neighbouring C.D. column ("9.0015.20 %")
+# leaving the CGST cell empty. Requiring both halves reported those lines as
+# 0%, which then flowed into inventory as tax-free stock.
+# ==========================================================================
+
+def test_lone_sgst_implies_the_matching_cgst_half():
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("9.00", "", None) == 18.0
+
+
+def test_lone_cgst_implies_the_matching_sgst_half():
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("", "2.50", None) == 5.0
+
+
+def test_both_halves_present_are_summed():
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("2.50", "2.50", None) == 5.0
+    assert extract_gst_percent("9.00", "9.00", None) == 18.0
+
+
+def test_zero_half_beside_a_real_half_is_treated_as_unread():
+    """A 0/9 split is not valid under GST - it is a half that failed to read,
+    so reporting 9% instead of 18% would halve the tax on the line."""
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("0.00", "9.00", None) == 18.0
+    assert extract_gst_percent("9.00", "0.00", None) == 18.0
+
+
+def test_genuinely_zero_rated_line_stays_zero():
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("0.00", "0.00", None) == 0.0
+
+
+def test_igst_is_used_whole_not_doubled():
+    """Inter-state supply carries a single IGST rate, not two halves."""
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("", "", "18.00") == 18.0
+
+
+def test_no_gst_information_returns_none():
+    from extraction.normalizers.azure_invoice_normalizer import extract_gst_percent
+    assert extract_gst_percent("", "", "") is None
+
+
+def test_missing_cgst_cell_still_yields_full_rate_end_to_end():
+    """The real shape: the CGST cell is empty because its value was absorbed
+    by the column beside it."""
+    cells = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "ITEM NAME"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "SGST\n(*)"},
+        {"rowIndex": 0, "columnIndex": 2, "content": "CGST\n(*)"},
+        {"rowIndex": 0, "columnIndex": 3, "content": "C.D."},
+        {"rowIndex": 0, "columnIndex": 4, "content": "AMOUNT"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "STERIVON H/S"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "9.00"},
+        # CGST cell empty - its value was merged into C.D. below
+        {"rowIndex": 1, "columnIndex": 3, "content": "9.0015.20 %"},
+        {"rowIndex": 1, "columnIndex": 4, "content": "152.00"},
+    ]
+    raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 2, "columnCount": 5, "cells": cells}]}
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.line_items[0].gst_percent == 18.0

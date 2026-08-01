@@ -53,6 +53,7 @@ interface RunContextType {
   // OCR Workbench Actions
   refreshRuns: () => Promise<void>;
   uploadInvoiceFile: (file: File) => Promise<RunSummary>;
+  uploadInvoicePages: (files: File[], options?: { force?: boolean }) => Promise<RunSummary>;
   triggerOCR: () => Promise<void>;
   triggerReconstruction: () => Promise<void>;
   flagAnomaly: (note: string) => void;
@@ -169,6 +170,28 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const uploadInvoicePages = async (
+    files: File[],
+    options: { force?: boolean } = {}
+  ): Promise<RunSummary> => {
+    setIsLoading(true);
+    try {
+      const newRun = await apiClient.uploadInvoicePages(files, options);
+      if (!newRun) {
+        throw new Error('Upload failed or backend is offline.');
+      }
+      const data = await apiClient.getRuns();
+      setRuns(data);
+      setCurrentRunId(newRun.run_id);
+      return newRun;
+    } catch (err: any) {
+      setError(err.message || 'Multi-page upload failed');
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const triggerOCR = async () => {
     if (!currentRunId) return;
     setIsLoading(true);
@@ -228,6 +251,7 @@ export const RunProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         error,
         refreshRuns,
         uploadInvoiceFile,
+        uploadInvoicePages,
         triggerOCR,
         triggerReconstruction,
         flagAnomaly,

@@ -14,6 +14,8 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   Maximize2,
   X,
@@ -33,6 +35,7 @@ interface InvoiceHeader {
   sgst: number | null;
   igst: number | null;
   grand_total: number | null;
+  roundoff: number | null;
   seller_gstin?: string;
   seller_address?: string;
   seller_phone?: string;
@@ -53,6 +56,7 @@ interface TableLineItem {
   mrp: number | null;
   rate: number | null;
   discount: number | null;
+  discount_percent: number | null;
   gst_percent: number | null;
   amount: number | null;
   is_suggested_amount?: boolean;
@@ -80,10 +84,36 @@ const formatCurrencyOrDash = (value: any): string => {
   return `₹${num.toFixed(2)}`;
 };
 
+// Helper: Formats a signed currency value (e.g. roundoff), showing an
+// explicit +/- since the sign itself is meaningful, unlike other totals.
+const formatSignedCurrency = (value: any): string => {
+  const num = toNumberOrNull(value);
+  if (num === null) return '—';
+  const sign = num < 0 ? '-' : num > 0 ? '+' : '';
+  return `${sign}₹${Math.abs(num).toFixed(2)}`;
+};
+
 const formatQuantityOrDash = (value: any): string => {
   const num = toNumberOrNull(value);
   if (num === null) return '—';
   return num.toFixed(2);
+};
+
+// Read-only display for a verified/locked line item cell: an empty field
+// means the source invoice genuinely never had that value (not that we
+// failed to extract something still fixable), so it's shown as "N/A"
+// rather than the "—" edit-mode placeholder that invites the user to type.
+const ReadOnlyCell: React.FC<{ value: string | number | null | undefined; align?: 'left' | 'right'; bold?: boolean }> = ({ value, align = 'left', bold = false }) => {
+  const isEmpty = value === null || value === undefined || value === '';
+  return (
+    <div
+      className={`w-full min-h-[38px] flex items-center px-3 py-2 text-sm rounded-lg ${
+        align === 'right' ? 'justify-end text-right' : ''
+      } ${bold ? 'font-bold' : ''} ${isEmpty ? 'text-gray-400 italic' : 'text-[#0f172a]'}`}
+    >
+      {isEmpty ? 'N/A' : value}
+    </div>
+  );
 };
 
 // Helper: Billed quantity
@@ -101,6 +131,18 @@ const getReceivedQty = (item: TableLineItem): number => {
   const billed = item.quantity ?? 0;
   const free = item.free_quantity ?? 0;
   return billed + free;
+};
+
+// Helper: the quantity shown in the Qty column — what actually arrived,
+// billed plus free. A "2.75 + 0.25" scheme line means 3 units on the shelf,
+// so 3 is the number the reviewer is checking against the physical delivery.
+// Returns null (not 0) when nothing is known, so the cell stays blank and
+// keeps its missing-field flag.
+const getDisplayQty = (item: TableLineItem): number | null => {
+  if (item.quantity === null || item.quantity === undefined) {
+    return item.free_quantity ?? null;
+  }
+  return parseFloat((item.quantity + (item.free_quantity ?? 0)).toFixed(4));
 };
 
 // Helper: Numeric line item amount
@@ -133,7 +175,12 @@ export const InvoiceReviewPage: React.FC = () => {
 
   // Zoom & Rotation Preview State for the original scan
   const [zoom, setZoom] = useState(1);
-  const [rotation, setRotation] = useState(0);
+  // Rotation is tracked per page, not once per invoice. Sheets of the same
+  // invoice are frequently photographed at different angles - on a real
+  // two-page bill Azure reported 89.4 deg for page 1 and -0.1 deg for page 2 -
+  // so one shared value would leave every page but the first sideways. Keeping
+  // it per page also means a manual correction survives paging away and back.
+  const [pageRotations, setPageRotations] = useState<number[]>([]);
 
   // Image dragging/panning state
   const [panX, setPanX] = useState(0);
@@ -194,6 +241,7 @@ export const InvoiceReviewPage: React.FC = () => {
     sgst: null,
     igst: null,
     grand_total: null,
+    roundoff: null,
     seller_gstin: '',
     seller_address: '',
     seller_phone: '',
@@ -207,6 +255,19 @@ export const InvoiceReviewPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [invoiceStatus, setInvoiceStatus] = useState<'needs_review' | 'verified'>('needs_review');
   const [imageUrl, setImageUrl] = useState<string>('');
+  // Multi-page invoices carry one presigned URL per page, in page order.
+  const [imageUrls, setImageUrls] = useState<string[]>([]);
+  const [activePage, setActivePage] = useState(0);
+
+  const rotation = pageRotations[activePage] ?? 0;
+  const setRotation = (next: number | ((current: number) => number)) => {
+    setPageRotations((prev) => {
+      const updated = [...prev];
+      const current = updated[activePage] ?? 0;
+      updated[activePage] = typeof next === 'function' ? next(current) : next;
+      return updated;
+    });
+  };
   const [isSaving, setIsSaving] = useState(false);
 
   // Verified invoices load locked — editing them (add/delete/edit line items,
@@ -464,9 +525,10 @@ export const InvoiceReviewPage: React.FC = () => {
       const isMissingBatch = isCriticalItemMissing(item, 'batch');
       const isMissingHsn = isCriticalItemMissing(item, 'hsn');
       const isMissingQty = isCriticalItemMissing(item, 'quantity');
+      const isMissingMrp = isCriticalItemMissing(item, 'mrp');
       const isMissingAmount = isCriticalItemMissing(item, 'amount');
 
-      if (isMissingName || isMissingBatch || isMissingHsn || isMissingQty || isMissingAmount) {
+      if (isMissingName || isMissingBatch || isMissingHsn || isMissingQty || isMissingMrp || isMissingAmount) {
         const rowEl = document.getElementById(`item-row-${item.id}`);
         if (rowEl) {
           rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -478,6 +540,7 @@ export const InvoiceReviewPage: React.FC = () => {
             : isMissingBatch ? `item-batch-${item.id}`
             : isMissingHsn ? `item-hsn-${item.id}`
             : isMissingQty ? `item-quantity-${item.id}`
+            : isMissingMrp ? `item-mrp-${item.id}`
             : `item-amount-${item.id}`;
 
           const inputEl = document.getElementById(targetInputId);
@@ -497,12 +560,23 @@ export const InvoiceReviewPage: React.FC = () => {
   };
 
   // Check if critical line item fields are missing
+  // Not every invoice format prints an MRP column at all. Treating a blank
+  // MRP as missing unconditionally would flag every row on those invoices,
+  // so it only counts when the invoice clearly has the column — i.e. at
+  // least one row carries a value.
+  const invoiceHasMrpColumn = React.useMemo(
+    () => lineItems.some((item) => isPresent(item.mrp)),
+    [lineItems]
+  );
+
   const isCriticalItemMissing = (item: TableLineItem, field: keyof TableLineItem) => {
     let val: any = item[field];
     if (field === 'quantity') {
       val = getBilledQty(item);
     } else if (field === 'amount') {
       val = getItemAmount(item);
+    } else if (field === 'mrp') {
+      if (!invoiceHasMrpColumn) return false;
     }
     return val === null || val === undefined || String(val).trim() === '';
   };
@@ -520,6 +594,7 @@ export const InvoiceReviewPage: React.FC = () => {
       if (isCriticalItemMissing(item, 'batch')) count++;
       if (isCriticalItemMissing(item, 'hsn')) count++;
       if (isCriticalItemMissing(item, 'quantity')) count++;
+      if (isCriticalItemMissing(item, 'mrp')) count++;
       if (isCriticalItemMissing(item, 'amount')) count++;
     });
 
@@ -534,7 +609,7 @@ export const InvoiceReviewPage: React.FC = () => {
     setIsLoading(true);
     setError(null);
     setZoom(1);
-    setRotation(0);
+    setPageRotations([]);
     setPanX(0);
     setPanY(0);
     setIsDragging(false);
@@ -547,7 +622,14 @@ export const InvoiceReviewPage: React.FC = () => {
         setRawEngineMetadata(detail);
         setInvoiceStatus(detail.status === 'verified' ? 'verified' : 'needs_review');
         setIsLocked(detail.status === 'verified');
-        setImageUrl(detail.image_url || '');
+        // Fall back to the single image_url for invoices saved before
+        // multi-page support, which have no image_urls array.
+        const pageUrls: string[] = Array.isArray(detail.image_urls) && detail.image_urls.length > 0
+          ? detail.image_urls
+          : (detail.image_url ? [detail.image_url] : []);
+        setImageUrls(pageUrls);
+        setImageUrl(pageUrls[0] || '');
+        setActivePage(0);
 
         setHeader({
           invoice_number: detail.invoice_number || '',
@@ -560,6 +642,7 @@ export const InvoiceReviewPage: React.FC = () => {
           sgst: detail.sgst ?? null,
           igst: detail.igst ?? null,
           grand_total: detail.grand_total ?? null,
+          roundoff: detail.roundoff ?? null,
           seller_gstin: detail.seller_gstin || detail.seller?.gstin || '',
           seller_address: detail.seller_address || detail.seller?.address || '',
           seller_phone: detail.seller_phone || detail.seller?.phone || '',
@@ -567,17 +650,24 @@ export const InvoiceReviewPage: React.FC = () => {
           buyer_gstin: detail.buyer_gstin || '',
         });
 
-        // ---- Auto Rotation from Azure Page Angle ----
-        const angleCandidate = detail.page_angle;
-        if (angleCandidate !== undefined && angleCandidate !== null) {
-          const parsedAngle = parseFloat(String(angleCandidate));
-          if (!isNaN(parsedAngle)) {
-            // Convert Azure counter-clockwise page angle to CSS clockwise rotation
-            const normAngle = ((-parsedAngle % 360) + 360) % 360;
-            const roundedAngle = Math.round(normAngle / 90) * 90 % 360;
-            setRotation(roundedAngle);
-          }
-        }
+        // ---- Auto Rotation from Azure Page Angles ----
+        // One angle per page so each sheet is uprighted on its own terms.
+        // Records saved before per-page angles existed only carry a single
+        // page_angle; applying it to page 1 and leaving the rest unrotated is
+        // the best available guess for those.
+        const toCssRotation = (raw: any): number => {
+          const parsed = parseFloat(String(raw));
+          if (isNaN(parsed)) return 0;
+          // Azure reports counter-clockwise; CSS rotates clockwise.
+          const normalized = ((-parsed % 360) + 360) % 360;
+          return (Math.round(normalized / 90) * 90) % 360;
+        };
+
+        const anglesFromDetail: any[] = Array.isArray(detail.page_angles) && detail.page_angles.length > 0
+          ? detail.page_angles
+          : [detail.page_angle];
+        const initialRotations = pageUrls.map((_, i) => toCssRotation(anglesFromDetail[i]));
+        setPageRotations(initialRotations);
 
         if (detail.confidence !== undefined && detail.confidence !== null) {
           setConfidence(Math.round((toNumberOrNull(detail.confidence) ?? 0.85) * 100));
@@ -590,13 +680,13 @@ export const InvoiceReviewPage: React.FC = () => {
           const rate = toNumberOrNull(item.rate);
           const qty = toNumberOrNull(item.quantity);
 
-          let is_suggested_amount = false;
-          let finalAmount = amount;
-          if (finalAmount === null && qty !== null && rate !== null) {
-            const disc = toNumberOrNull(item.discount) || 0;
-            finalAmount = parseFloat((qty * rate - disc).toFixed(2));
-            is_suggested_amount = true;
-          }
+          // Amounts the invoice didn't state are derived server-side, using a
+          // formula inferred from the rows this invoice DID state — the
+          // relationship between qty/rate/discount and amount differs per
+          // distributor, so it can't be assumed here. is_estimated_amount
+          // marks those so they're labelled rather than shown as extracted.
+          const is_suggested_amount = Boolean(item.is_estimated_amount);
+          const finalAmount = amount;
 
           return {
             id: item.id ?? `item-${idx + 1}`,
@@ -610,6 +700,7 @@ export const InvoiceReviewPage: React.FC = () => {
             mrp: toNumberOrNull(item.mrp),
             rate: rate,
             discount: toNumberOrNull(item.discount),
+            discount_percent: toNumberOrNull(item.discount_percent),
             gst_percent: toNumberOrNull(item.gst_percent),
             amount: finalAmount,
             is_suggested_amount: is_suggested_amount,
@@ -695,6 +786,7 @@ export const InvoiceReviewPage: React.FC = () => {
       mrp: null,
       rate: null,
       discount: null,
+      discount_percent: null,
       gst_percent: null,
       amount: null
     };
@@ -733,9 +825,7 @@ export const InvoiceReviewPage: React.FC = () => {
     ? parseFloat(((cgstVal || 0) + (sgstVal || 0) + (igstVal || 0)).toFixed(2))
     : null;
 
-  // Extract roundoff safely from raw metadata
-  const roundoffVal = rawEngineMetadata?.roundoff ?? rawEngineMetadata?.round_off ?? null;
-  const roundoff = toNumberOrNull(roundoffVal);
+  const roundoff = toNumberOrNull(header.roundoff);
 
   // Math validation logic (ensures we don't calculate false mismatches)
   const isSuggestedAmtPresent = lineItems.some(item => item.is_suggested_amount);
@@ -772,7 +862,14 @@ export const InvoiceReviewPage: React.FC = () => {
     if (subVal !== null && computedSubtotal !== null) {
       const diffWithSubtotal = Math.abs(computedSubtotal - subVal);
       const diffWithTaxable = Math.abs(computedSubtotal - (subVal - discVal));
-      if (diffWithSubtotal > 2.0 && diffWithTaxable > 2.0) {
+      // Some invoice formats print a per-item "Amount" that's already
+      // tax-inclusive (Taxable + CGST + SGST for that line), rather than a
+      // pre-tax gross figure - there, line items sum to grand_total (minus
+      // roundoff) instead of to subtotal or the taxable amount. Line items
+      // aren't wrong just because they don't match one particular formula;
+      // matching any of the three is a genuine reconciliation.
+      const diffWithGrandTotal = Math.abs(computedSubtotal - (grandVal - rOff));
+      if (diffWithSubtotal > 2.0 && diffWithTaxable > 2.0 && diffWithGrandTotal > 2.0) {
         isLineTotalMatched = false;
       }
     }
@@ -811,6 +908,7 @@ export const InvoiceReviewPage: React.FC = () => {
     sgst: header.sgst,
     igst: header.igst,
     grand_total: header.grand_total,
+    roundoff: header.roundoff,
     ...(status ? { status } : {}),
     line_items: lineItems.map((item) => ({
       name: item.product_name || null,
@@ -823,8 +921,10 @@ export const InvoiceReviewPage: React.FC = () => {
       mrp: item.mrp,
       rate: item.rate,
       discount: item.discount,
+      discount_percent: item.discount_percent,
       gst_percent: item.gst_percent,
       amount: item.amount,
+      is_estimated_amount: item.is_suggested_amount ?? false,
       bounding_box: item.bounding_box ?? null,
     })),
   });
@@ -944,9 +1044,25 @@ export const InvoiceReviewPage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  // Get source image — a presigned R2 URL from the backend, refreshed on every load
+  // Get source image — a presigned R2 URL from the backend, refreshed on every
+  // load. For a multi-page invoice this is whichever page is being viewed.
   const getSourceImage = () => {
-    return imageUrl;
+    return imageUrls[activePage] ?? imageUrl;
+  };
+
+  const pageCount = imageUrls.length;
+  const isMultiPage = pageCount > 1;
+
+  // Changing page resets the view transform: zoom/pan from one page means
+  // nothing on the next, which may be a different size or orientation.
+  const goToPage = (index: number) => {
+    if (index < 0 || index >= pageCount) return;
+    setActivePage(index);
+    // Zoom and pan are position-specific and meaningless on another sheet,
+    // but rotation belongs to the page and is preserved.
+    setZoom(1);
+    setPanX(0);
+    setPanY(0);
   };
 
   if (isLoading) {
@@ -1141,7 +1257,32 @@ export const InvoiceReviewPage: React.FC = () => {
           <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs flex flex-col">
             {/* Dark Header bar */}
             <div className="bg-slate-900 text-white px-3.5 py-2 flex items-center justify-between shrink-0">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">ORIGINAL SCAN</span>
+              <div className="flex items-center space-x-3 min-w-0">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-200">ORIGINAL SCAN</span>
+                {isMultiPage && (
+                  <div className="flex items-center space-x-1 shrink-0">
+                    <button
+                      onClick={() => goToPage(activePage - 1)}
+                      disabled={activePage === 0}
+                      className="p-1 rounded text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                      title="Previous page"
+                    >
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span className="text-[10px] font-semibold text-slate-300 tabular-nums px-1">
+                      Page {activePage + 1} / {pageCount}
+                    </span>
+                    <button
+                      onClick={() => goToPage(activePage + 1)}
+                      disabled={activePage >= pageCount - 1}
+                      className="p-1 rounded text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                      title="Next page"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="flex items-center space-x-2">
                 <button
                   onClick={() => setZoom((z) => Math.min(10.0, z + 0.25))}
@@ -1258,6 +1399,13 @@ export const InvoiceReviewPage: React.FC = () => {
                 <span className="text-gray-500 font-medium">Discount -</span>
                 <span className="font-semibold text-slate-800">{formatCurrencyOrDash(discountVal)}</span>
               </div>
+
+              {roundoff !== null && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500 font-medium">Round Off</span>
+                  <span className="font-semibold text-slate-800">{formatSignedCurrency(roundoff)}</span>
+                </div>
+              )}
 
               <div className="border-t border-slate-200/80 pt-2 flex items-center justify-between">
                 <span className="font-bold text-slate-900 text-sm">Grand Total</span>
@@ -1445,13 +1593,15 @@ export const InvoiceReviewPage: React.FC = () => {
                 <th className="p-3 text-right min-w-[135px]">Qty</th>
                 <th className="p-3 text-right min-w-[115px]">MRP</th>
                 <th className="p-3 text-right min-w-[130px]">Amount</th>
-                <th className="p-3 text-center pr-5 min-w-[120px]">Action</th>
+                {!isLocked && (
+                  <th className="p-3 text-center pr-5 min-w-[120px]">Action</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-[#e2e8f0] bg-white">
               {lineItems.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-12 text-gray-400 font-medium">
+                  <td colSpan={isLocked ? 7 : 8} className="text-center py-12 text-gray-400 font-medium">
                     No line items found. Click "Add Row" to append items.
                   </td>
                 </tr>
@@ -1459,7 +1609,7 @@ export const InvoiceReviewPage: React.FC = () => {
                 lineItems.map((item, index) => {
                   const billedQty = getBilledQty(item);
                   const freeQty = getFreeQty(item);
-                  const hasFreeQty = freeQty !== null;
+                  const hasFreeQty = freeQty !== null && freeQty > 0;
                   const receivedQty = billedQty !== null ? billedQty + (freeQty ?? 0) : null;
 
                   // Row has any missing critical field → amber tint
@@ -1468,6 +1618,7 @@ export const InvoiceReviewPage: React.FC = () => {
                     isCriticalItemMissing(item, 'batch') ||
                     isCriticalItemMissing(item, 'hsn') ||
                     isCriticalItemMissing(item, 'quantity') ||
+                    isCriticalItemMissing(item, 'mrp') ||
                     isCriticalItemMissing(item, 'amount');
 
                   return (
@@ -1492,65 +1643,94 @@ export const InvoiceReviewPage: React.FC = () => {
                       </td>
 
                       <td className="p-3 pl-5 align-top">
-                        <input
-                          id={`item-name-${item.id}`}
-                          type="text"
-                          value={item.product_name}
-                          placeholder={hasMissing && !item.product_name ? 'Enter product name...' : '—'}
-                          onFocus={() => handleRowClick(item.id, index)}
-                          onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
-                          disabled={isLocked}
-                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-                            isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                          }`}
-                        />
+                        {isLocked ? (
+                          <ReadOnlyCell value={item.product_name} />
+                        ) : (
+                          <input
+                            id={`item-name-${item.id}`}
+                            type="text"
+                            value={item.product_name}
+                            placeholder={hasMissing && !item.product_name ? 'Enter product name...' : '—'}
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       <td className="p-3 align-top">
-                        <input
-                          id={`item-batch-${item.id}`}
-                          type="text"
-                          value={item.batch}
-                          placeholder="—"
-                          onFocus={() => handleRowClick(item.id, index)}
-                          onChange={(e) => handleItemChange(item.id, 'batch', e.target.value)}
-                          disabled={isLocked}
-                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-                            isCriticalItemMissing(item, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                          }`}
-                        />
+                        {isLocked ? (
+                          <ReadOnlyCell value={item.batch} />
+                        ) : (
+                          <input
+                            id={`item-batch-${item.id}`}
+                            type="text"
+                            value={item.batch}
+                            placeholder="—"
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'batch', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'batch') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       <td className="p-3 align-top">
-                        <input
-                          id={`item-hsn-${item.id}`}
-                          type="text"
-                          value={item.hsn}
-                          placeholder="—"
-                          onFocus={() => handleRowClick(item.id, index)}
-                          onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
-                          disabled={isLocked}
-                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-                            isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                          }`}
-                        />
+                        {isLocked ? (
+                          <ReadOnlyCell value={item.hsn} />
+                        ) : (
+                          <input
+                            id={`item-hsn-${item.id}`}
+                            type="text"
+                            value={item.hsn}
+                            placeholder="—"
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'hsn', e.target.value)}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'hsn') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       <td className="p-3 align-top text-right">
                         <div className="space-y-1">
-                          <input
-                            id={`item-quantity-${item.id}`}
-                            type="number"
-                            step="any"
-                            value={item.quantity ?? ''}
-                            placeholder="—"
-                            onFocus={() => handleRowClick(item.id, index)}
-                            onChange={(e) => handleItemChange(item.id, 'quantity', e.target.value === '' ? null : parseFloat(e.target.value))}
-                            disabled={isLocked}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right font-extrabold focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-                              isCriticalItemMissing(item, 'quantity') ? 'border-amber-300 bg-amber-50/50 text-amber-700' : 'border-gray-200 text-[#0f172a]'
-                            }`}
-                          />
+                          {isLocked ? (
+                            <ReadOnlyCell value={getDisplayQty(item)} align="right" bold />
+                          ) : (
+                            <input
+                              id={`item-quantity-${item.id}`}
+                              type="number"
+                              step="any"
+                              value={getDisplayQty(item) ?? ''}
+                              placeholder="—"
+                              onFocus={() => handleRowClick(item.id, index)}
+                              // The field shows what arrived (billed + free), so an
+                              // edit is a correction to that total; the free portion
+                              // is held steady and the billed quantity absorbs the
+                              // change. With no free quantity this is a plain edit.
+                              onChange={(e) => {
+                                if (e.target.value === '') {
+                                  handleItemChange(item.id, 'quantity', null);
+                                  return;
+                                }
+                                const total = parseFloat(e.target.value);
+                                if (Number.isNaN(total)) return;
+                                const free = item.free_quantity ?? 0;
+                                handleItemChange(
+                                  item.id,
+                                  'quantity',
+                                  parseFloat((total - free).toFixed(4))
+                                );
+                              }}
+                              className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right font-extrabold focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                                isCriticalItemMissing(item, 'quantity') ? 'border-amber-300 bg-amber-50/50 text-amber-700' : 'border-gray-200 text-[#0f172a]'
+                              }`}
+                            />
+                          )}
                           {hasFreeQty && (
                             <div className="text-[10px] text-gray-500 whitespace-nowrap text-right">
                               {formatQuantityOrDash(billedQty)} billed + {formatQuantityOrDash(freeQty)} free = {formatQuantityOrDash(receivedQty)}
@@ -1560,51 +1740,60 @@ export const InvoiceReviewPage: React.FC = () => {
                       </td>
 
                       <td className="p-3 align-top text-right">
-                        <input
-                          id={`item-mrp-${item.id}`}
-                          type="number"
-                          step="any"
-                          value={item.mrp ?? ''}
-                          placeholder="—"
-                          onFocus={() => handleRowClick(item.id, index)}
-                          onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
-                          disabled={isLocked}
-                          className="w-full min-h-[38px] bg-[#f8fafc] border border-gray-200 rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                        />
+                        {isLocked ? (
+                          <ReadOnlyCell value={item.mrp ?? null} align="right" />
+                        ) : (
+                          <input
+                            id={`item-mrp-${item.id}`}
+                            type="number"
+                            step="any"
+                            value={item.mrp ?? ''}
+                            placeholder="—"
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'mrp', e.target.value === '' ? null : parseFloat(e.target.value))}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                              isCriticalItemMissing(item, 'mrp') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       <td className="p-3 align-top text-right">
-                        <input
-                          id={`item-amount-${item.id}`}
-                          type="number"
-                          step="any"
-                          value={getItemAmount(item) ?? ''}
-                          placeholder="—"
-                          onFocus={() => handleRowClick(item.id, index)}
-                          onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
-                          disabled={isLocked}
-                          className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-bold disabled:opacity-60 disabled:cursor-not-allowed ${
-                            isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                          }`}
-                        />
+                        {isLocked ? (
+                          <ReadOnlyCell value={getItemAmount(item) ?? null} align="right" bold />
+                        ) : (
+                          <input
+                            id={`item-amount-${item.id}`}
+                            type="number"
+                            step="any"
+                            value={getItemAmount(item) ?? ''}
+                            placeholder="—"
+                            onFocus={() => handleRowClick(item.id, index)}
+                            onChange={(e) => handleItemChange(item.id, 'amount', e.target.value === '' ? null : parseFloat(e.target.value))}
+                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-right text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors font-bold ${
+                              isCriticalItemMissing(item, 'amount') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                            }`}
+                          />
+                        )}
                         {item.is_suggested_amount && (
                           <div className="text-[10px] text-amber-600 mt-1 font-semibold">Suggested</div>
                         )}
                       </td>
 
-                      <td className="p-3 pr-5 align-top text-center">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteRow(item.id);
-                          }}
-                          disabled={isLocked}
-                          className="p-2 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-400"
-                          title="Delete Row"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </td>
+                      {!isLocked && (
+                        <td className="p-3 pr-5 align-top text-center">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteRow(item.id);
+                            }}
+                            className="p-2 text-gray-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"
+                            title="Delete Row"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })
