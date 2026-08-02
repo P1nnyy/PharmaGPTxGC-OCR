@@ -253,6 +253,17 @@ def update_product(product_id: str, payload: ProductUpdate):
     return {"status": "ok", "product": result}
 
 
+@router.post("/products/reparse")
+def reparse_products():
+    """Re-reads stored products with the current parser.
+
+    Run after the parser learns something new - reading the TA/CA/T/M pack
+    codes, for instance. Fields a human confirmed are left untouched; only
+    guesses are re-made.
+    """
+    return product_repository.reparse_products()
+
+
 @router.post("/products/{product_id}/enrich")
 async def enrich_product(product_id: str, fetch_top: int = 2):
     """Looks the product up against public drug listings and returns suggestions.

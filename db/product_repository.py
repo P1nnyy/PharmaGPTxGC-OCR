@@ -848,6 +848,119 @@ def _split_alias_tx(tx, alias_id: str, overrides: dict) -> Optional[str]:
     return new_id
 
 
+def reparse_products(pharmacy_id: Optional[str] = None) -> dict:
+    """Re-reads every product's own invoice text with the current parser.
+
+    The parser improves - it learned to read the TA/CA/T/M pack codes that
+    most of this catalogue was written with - but products already stored keep
+    whatever the parser understood on the day they were created. Without this
+    the improvement only ever reaches items scanned from now on, and the
+    existing catalogue stays permanently worse than the code that serves it.
+
+    Human decisions are never overwritten: a field listed in confirmed_fields
+    is left exactly as the pharmacist set it, even when the parser now
+    disagrees. Only guesses are re-made.
+    """
+    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    driver = get_driver()
+
+    with driver.session() as session:
+        rows = session.execute_read(
+            lambda tx: [
+                dict(r)
+                for r in tx.run(
+                    """
+                    MATCH (p:Product)<-[:OF_PRODUCT]-(li:LineItem)
+                          <-[:CONTAINS]-(:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
+                    OPTIONAL MATCH (p)<-[:RESOLVES_TO]-(a:ProductAlias)
+                    WITH p, collect(DISTINCT a.raw_name) AS names,
+                         collect(DISTINCT li.pack) AS packs
+                    RETURN p, names, packs
+                    """,
+                    pharmacy_id=pharmacy_id,
+                )
+            ]
+        )
+
+        changed, skipped = 0, 0
+        details = []
+
+        for row in rows:
+            product = dict(row["p"])
+            names = [n for n in row["names"] if n] or [product.get("canonical_name")]
+            # Prefer the pack column the invoice printed; fall back to the
+            # stored pack_size, which still holds the raw text for exactly the
+            # rows the old parser could not read.
+            packs = [p for p in row["packs"] if p]
+            pack = packs[0] if packs else product.get("pack_size")
+
+            if not names or not names[0]:
+                skipped += 1
+                continue
+
+            parsed = parse_product_name(names[0], pack)
+            confirmed = set(product.get("confirmed_fields") or [])
+
+            updates = {}
+            for field, guess in (
+                ("strength", parsed.strength),
+                ("form", parsed.form),
+                ("pack_size", parsed.pack_size),
+                ("pack_multiplier", parsed.pack_multiplier),
+                ("base_unit", parsed.base_unit),
+            ):
+                if field in confirmed or not guess.known:
+                    continue
+                if product.get(field) != guess.value:
+                    updates[field] = guess.value
+
+            if not updates:
+                skipped += 1
+                continue
+
+            session.execute_write(_apply_reparse_tx, product["id"], updates)
+            changed += 1
+            details.append({
+                "id": product["id"],
+                "name": names[0],
+                "pack": pack,
+                "updated": updates,
+            })
+
+    logger.info(f"[CATALOGUE] Re-parsed {len(rows)} product(s): {changed} updated, {skipped} unchanged")
+    return {"examined": len(rows), "updated": changed, "unchanged": skipped, "details": details}
+
+
+def _apply_reparse_tx(tx, product_id: str, updates: dict):
+    set_clauses = [f"p.{key} = ${key}" for key in updates]
+    tx.run(
+        f"MATCH (p:Product {{id: $id}}) SET {', '.join(set_clauses)}, p.updated_at = datetime()",
+        id=product_id,
+        **updates,
+    )
+
+    # Identity depends on brand/strength/form/pack, so a better parse can move
+    # a product onto a key another record already holds. That is a genuine
+    # duplicate, but merging records as a side effect of a maintenance pass is
+    # not this function's call - the key is left alone and the pair surfaces
+    # in the review queue for a person to merge deliberately.
+    record = tx.run("MATCH (p:Product {id: $id}) RETURN p", id=product_id).single()
+    product = dict(record["p"])
+    new_key = build_identity_key(
+        product.get("brand"), product.get("strength"), product.get("form"), product.get("pack_size")
+    )
+    if new_key == product.get("identity_key"):
+        return
+
+    clash = tx.run(
+        "MATCH (o:Product {identity_key: $key}) WHERE o.id <> $id RETURN o.id AS id LIMIT 1",
+        key=new_key,
+        id=product_id,
+    ).single()
+    if not clash:
+        tx.run("MATCH (p:Product {id: $id}) SET p.identity_key = $key", id=product_id, key=new_key)
+
+
 def delete_orphan_products() -> int:
     """Removes catalogue rows no invoice references any more."""
     driver = get_driver()

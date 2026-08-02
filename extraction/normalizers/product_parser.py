@@ -46,6 +46,13 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel
 
+from extraction.normalizers.form_indicators import (
+    forms_conflict,
+    read_name_modifier,
+    read_pack_code,
+    strip_pack_code,
+)
+
 # Dosage forms as they actually appear, mapped to a canonical label and the
 # unit a single dispensable item is counted in. Longer phrases are matched
 # first so "EYE DROPS" doesn't get shortened to "DROPS", which would lose the
@@ -190,24 +197,62 @@ def _normalize_strength(value: str, unit: str) -> str:
     return f"{compact}{unit.upper()}"
 
 
-def _parse_pack_token(token: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
-    """Reads a pack expression into (display, units_per_pack, evidence).
+def _parse_pack_token(
+    token: str,
+) -> tuple[Optional[str], Optional[int], Optional[str], Optional[Any]]:
+    """Reads a pack expression into (display, units_per_pack, evidence, form_code).
 
     "1*10" is one strip of ten and "10*10" is ten strips of ten, so the
     multiplier is the product of both numbers - taking only the second would
     under-count a box by a factor of ten and quietly halve, or worse, the
     stock figures derived from it.
+
+    A trailing form code is removed before the numbers are read and returned
+    alongside them. "1x10TA" otherwise parses to nothing at all: the letters
+    defeat the numeric patterns, so the pack falls through as opaque text and
+    the item is left with no units per pack - which is most of a real
+    catalogue, since TA/CA/T suffixes are the common case rather than the
+    exception.
     """
     if not token:
-        return None, None, None
+        return None, None, None, None
 
     text = str(token).upper().strip()
+
+    form_code, code_text = read_pack_code(text)
+    if form_code:
+        stripped = strip_pack_code(text)
+        # Only accept the split if numbers remain; otherwise the "code" was
+        # the whole value (a pack column reading just "VIAL"), which is a
+        # form statement and not a quantity.
+        if re.search(r"\d", stripped):
+            display, multiplier, evidence = _parse_numeric_pack(stripped, form_code, code_text)
+            return display, multiplier, evidence, form_code
+        return text, None, text, form_code
+
+    display, multiplier, evidence = _parse_numeric_pack(text, None, None)
+    return display, multiplier, evidence, None
+
+
+def _parse_numeric_pack(
+    text: str, form_code: Optional[Any], code_text: Optional[str]
+) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    """The numeric half of a pack expression, once any form code is removed."""
 
     grid = _PACK_GRID_RE.search(text)
     if grid:
         outer = int(grid.group("outer"))
         inner = int(grid.group("inner"))
         unit = grid.group("unit")
+
+        # A code saying the trailing number is a MEASURE rather than a count
+        # settles the arithmetic: "1X200M" is one 200ml bottle, not two
+        # hundred of anything, and "1x10TA" is ten tablets. Same shape, and
+        # only the code distinguishes them - which is why reading it matters
+        # beyond just labelling the form.
+        if not unit and form_code is not None and not form_code.counts_units:
+            unit = form_code.base_unit
+
         if unit:
             # "60X5ML" is sixty containers holding 5ml each. The dispensable
             # item is the container, so the count is the outer number; the
@@ -231,10 +276,16 @@ def _parse_pack_token(token: str) -> tuple[Optional[str], Optional[int], Optiona
         # contents, not a count of units inside it.
         return f"{value}{unit}", 1, measure.group(0)
 
-    # A bare integer in a dedicated pack column is a count.
-    bare = re.fullmatch(r"(\d+)", text)
+    # A bare number in a dedicated pack column is a count - unless a code
+    # already said it measures contents. "60 ML" strips to "60", and reading
+    # that as sixty dispensable units turns one syrup bottle into sixty of
+    # them, and every stock and valuation figure downstream with it.
+    bare = re.fullmatch(r"(\d+(?:\.\d+)?)", text)
     if bare:
-        n = int(bare.group(1))
+        value = bare.group(1)
+        if form_code is not None and not form_code.counts_units:
+            return f"{value}{form_code.base_unit}", 1, text
+        n = int(float(value))
         return f"{n}'S", n, text
 
     return text or None, None, text or None
@@ -316,8 +367,10 @@ def parse_product_name(name: Optional[str], pack_column: Optional[str] = None) -
     pack_confidence = 0.0
     pack_evidence: Optional[str] = None
 
+    pack_code = None
+
     if pack_column and str(pack_column).strip():
-        pack_display, pack_multiplier, pack_evidence = _parse_pack_token(str(pack_column))
+        pack_display, pack_multiplier, pack_evidence, pack_code = _parse_pack_token(str(pack_column))
         pack_confidence = 0.9 if pack_display else 0.0
 
     if pack_display is None:
@@ -326,7 +379,7 @@ def parse_product_name(name: Optional[str], pack_column: Optional[str] = None) -
         measure = _MEASURE_RE.search(working)
         source = grid.group(0) if grid else (count.group(0) if count else (measure.group(0) if measure else None))
         if source:
-            pack_display, pack_multiplier, pack_evidence = _parse_pack_token(source)
+            pack_display, pack_multiplier, pack_evidence, _ = _parse_pack_token(source)
             pack_confidence = 0.75
             claimed.append(source)
 
@@ -336,6 +389,46 @@ def parse_product_name(name: Optional[str], pack_column: Optional[str] = None) -
         parsed.pack_multiplier = ParsedField(
             value=pack_multiplier, confidence=pack_confidence, evidence=pack_evidence
         )
+
+    # --- form, from the coded hints ---------------------------------------
+    # Precedence is by directness of the statement: a form word spelled out in
+    # the name beats a code in the pack column, which beats a release marker
+    # that only implies a solid oral dose.
+    if pack_code and pack_code.form:
+        if not parsed.form.known:
+            parsed.form = ParsedField(
+                value=pack_code.form,
+                confidence=pack_code.confidence,
+                evidence=f"pack column “{pack_evidence or pack_column}”",
+            )
+        elif forms_conflict(parsed.form.value, pack_code.form):
+            # The name and the pack column name different medicines' forms.
+            # Neither is discarded and neither wins silently - the confidence
+            # drops so the review queue surfaces it for a human.
+            parsed.form = ParsedField(
+                value=parsed.form.value,
+                confidence=0.3,
+                evidence=(
+                    f"name says {parsed.form.value}, pack column says "
+                    f"{pack_code.form} — these disagree"
+                ),
+            )
+
+    if pack_code and not parsed.base_unit.known:
+        parsed.base_unit = ParsedField(
+            value=pack_code.base_unit,
+            confidence=pack_code.confidence,
+            evidence=f"pack column “{pack_evidence or pack_column}”",
+        )
+
+    if not parsed.form.known:
+        hint = read_name_modifier(raw)
+        if hint:
+            parsed.form = ParsedField(value=hint.form, confidence=hint.confidence, evidence=hint.note)
+            if not parsed.base_unit.known:
+                parsed.base_unit = ParsedField(
+                    value=hint.base_unit, confidence=hint.confidence, evidence=hint.note
+                )
 
     # A volume/weight pack implies the base unit even when no form word
     # appeared - "DYNAPAR QPS 30 ML" names no form but is plainly a liquid.

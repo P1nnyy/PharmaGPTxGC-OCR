@@ -232,13 +232,19 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
             is_estimated_amount: $is_estimated_amount,
             hsn: $hsn,
             batch: $batch,
-            expiry: $expiry
+            expiry: $expiry,
+            pack: $pack
         })
         CREATE (inv)-[:CONTAINS]->(li)
         """,
         invoice_id=invoice_id,
         row_index=row_index,
         item_id=item_id,
+        # The pack column as printed. Previously it was consumed by the parser
+        # and discarded, so when the parser later improved there was nothing
+        # left to re-read - the codes carrying dosage form and units per pack
+        # had already been thrown away.
+        pack=str(pack).strip() if pack else None,
         hsn=str(hsn).strip() if hsn else None,
         batch=str(batch).strip() if batch else None,
         expiry=item.get("expiry"),
