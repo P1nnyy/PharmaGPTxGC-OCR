@@ -18,6 +18,8 @@ from services.validators import content_validator
 
 from db import invoice_repository, product_repository
 
+from enrichment import service as enrichment_service
+
 from extraction.router import get_extraction_engine
 from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
 from extraction.normalizers.invoice_merger import check_pages_consistent, merge_invoice_pages
@@ -249,6 +251,30 @@ def update_product(product_id: str, payload: ProductUpdate):
             "product": product_repository.get_product(product_id),
         }
     return {"status": "ok", "product": result}
+
+
+@router.post("/products/{product_id}/enrich")
+async def enrich_product(product_id: str, fetch_top: int = 2):
+    """Looks the product up against public drug listings and returns suggestions.
+
+    Read-only by design: this never writes to the catalogue. The response says
+    what a listing claims and how well it matched; applying any of it goes
+    through the ordinary PATCH, with a human choosing. Matching an invoice's
+    abbreviated item name to a retail listing is fuzzy, and the fields it would
+    fill - strength above all - are ones where a silent wrong answer corrupts
+    stock and dosing records at catalogue scale.
+    """
+    product = product_repository.get_product(product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail=f"Product {product_id} not found.")
+
+    # Runs in a worker thread: this makes outbound HTTP calls with the
+    # blocking client, which would otherwise stall the event loop and every
+    # other request with it.
+    result = await run_in_threadpool(
+        enrichment_service.enrich_product, product, max(0, min(fetch_top, 3))
+    )
+    return result
 
 
 @router.post("/products/merge")

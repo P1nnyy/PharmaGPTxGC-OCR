@@ -54,3 +54,11 @@ frontend/dist/
 !frontend/package.json
 !frontend/package-lock.json
 !frontend/tsconfig*.json
+
+# Test fixtures are source, not output. The rule above hides them, which does
+# not fail loudly - it fails as a test that passes locally and errors on a
+# fresh clone with a missing-file traceback.
+!tests/fixtures/**/*.json
+
+# Editor/harness run configuration.
+!.claude/launch.json

@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -281,6 +281,21 @@ export const apiClient = {
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to save product.');
+    }
+    return response.json();
+  },
+
+  // Looks the product up against public drug listings. Read-only: it returns
+  // what a listing claims, and applying any of it still goes through
+  // updateProduct with the user choosing. Slower than other calls because it
+  // fetches the matched listing pages.
+  async enrichProduct(productId: string, fetchTop = 2): Promise<EnrichmentResult> {
+    const response = await fetch(`/products/${productId}/enrich?fetch_top=${fetchTop}`, {
+      method: 'POST'
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Lookup failed.');
     }
     return response.json();
   },

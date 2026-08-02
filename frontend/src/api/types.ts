@@ -244,6 +244,69 @@ export interface Product {
   observations?: ProductObservation[];
 }
 
+// --- Catalogue enrichment (public drug-listing lookup) ---------------------
+
+export interface MatchCandidate {
+  slug: string;
+  source: string;
+  url: string;
+  display: string;
+  listing_brand: string;
+  listing_strength: string | null;
+  listing_form: string | null;
+  score: number;
+  brand_score: number;
+  // True only when BOTH sides stated a strength and they agree. A false here
+  // is the difference between "we checked" and "nobody said".
+  strength_verified: boolean;
+  form_agrees: boolean;
+  reasons: string[];
+}
+
+export interface ProductFacts {
+  source: string;
+  source_url: string;
+  listing_name: string | null;
+  brand: string | null;
+  strength: string | null;
+  form: string | null;
+  pack_size: string | null;
+  pack_multiplier: number | null;
+  base_unit: string | null;
+  manufacturer: string | null;
+  composition: string | null;
+  listed_mrp: number | null;
+  prescription_note: string | null;
+  // Fields the source does not publish at all, so the UI can say so rather
+  // than implying the listing asserted a blank.
+  unavailable: string[];
+}
+
+export interface FieldSuggestion {
+  field: string;
+  current: string | null;
+  suggested: string | null;
+  agrees: boolean;
+  confirmed: boolean;
+}
+
+export interface Suggestion {
+  match: MatchCandidate;
+  facts: ProductFacts | null;
+  fields: FieldSuggestion[];
+  high_confidence: boolean;
+}
+
+export interface EnrichmentResult {
+  product_id: string;
+  query: string;
+  suggestions: Suggestion[];
+  // An empty suggestion list means very different things depending on this:
+  // ok | no_query | no_index | no_match
+  status: string;
+  message: string | null;
+}
+
 export interface ProductSummary {
   total: number;
   needs_review: number;

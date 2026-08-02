@@ -1,0 +1,393 @@
+{
+ "drugPageReducer": {
+  "staticData": {
+   "sku": {
+    "id": 732600,
+    "images": [
+     {
+      "thumbnail": "https://onemg.gumlet.io/l_watermark_346,w_120,h_120/a_ignore,w_120,h_120,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png",
+      "low": "https://onemg.gumlet.io/l_watermark_346,w_180,h_180/a_ignore,w_180,h_180,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png",
+      "medium": "https://onemg.gumlet.io/l_watermark_346,w_480,h_480/a_ignore,w_480,h_480,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png",
+      "high": "https://onemg.gumlet.io/l_watermark_346/a_ignore,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png",
+      "mediumhigh": "https://onemg.gumlet.io/l_watermark_346,w_480,h_480/a_ignore,w_480,h_480,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png"
+     },
+     {
+      "thumbnail": "https://onemg.gumlet.io/l_watermark_346,w_120,h_120/a_ignore,w_120,h_120,c_fit,q_auto,f_auto/marketing/6372ce27-0de3-4014-9415-a8aa27baa9ca.png",
+      "low": "https://onemg.gumlet.io/l_watermark_346,w_180,h_180/a_ignore,w_180,h_180,c_fit,q_auto,f_auto/marketing/6372ce27-0de3-4014-9415-a8aa27baa9ca.png",
+      "medium": "https://onemg.gumlet.io/l_watermark_346,w_480,h_480/a_ignore,w_480,h_480,c_fit,q_auto,f_auto/marketing/6372ce27-0de3-4014-9415-a8aa27baa9ca.png",
+      "high": "https://onemg.gumlet.io/l_watermark_346/a_ignore,c_fit,q_auto,f_auto/marketing/6372ce27-0de3-4014-9415-a8aa27baa9ca.png",
+      "mediumhigh": "https://onemg.gumlet.io/l_watermark_346,w_480,h_480/a_ignore,w_480,h_480,c_fit,q_auto,f_auto/marketing/6372ce27-0de3-4014-9415-a8aa27baa9ca.png"
+     }
+    ],
+    "manufacturer": {
+     "id": null,
+     "name": null,
+     "address": null,
+     "header": null,
+     "manufacturer_header": null
+    },
+    "name": "Dulohox 20mg Tablet",
+    "references": {
+     "header": "References",
+     "follow": false,
+     "icon_url": "https://onemg.gumlet.io/external_link_2x_mnk4m2.png",
+     "values": [
+      {
+       "url": "",
+       "data": "Stahl SM, editor. Duloxetine. In: Stahl's Essential Pschopharmacology: Prescriber's Guide. 5th ed. New York, New York: Cambridge University Press; 2014. pp. 219-24."
+      },
+      {
+       "url": "",
+       "data": "Briggs GG, Freeman RK, editors. A Reference Guide to Fetal and Neonatal Risk: Drugs in Pregnancy and Lactation. 10th ed. Philadelphia, PA: Wolters Kluwer Health; 2015. pp. 442-43."
+      },
+      {
+       "url": "https://www.medicines.org.uk/emc/medicine/15694",
+       "data": "Duloxetine hydrochloride. Basingstoke, Hampshire: Eli Lilly and Company Limited; 2004 [revised 09 Nov. 2018]. [Accessed 23 Jan. 2019] (online) Available from:"
+      },
+      {
+       "url": "https://www.ncbi.nlm.nih.gov/books/NBK501470/",
+       "data": "Drugs and Lactation Database (LactMed) [Internet]. Bethesda (MD): National Library of Medicine (US); 2006. Duloxetine. [Updated 2020 Jan 20]. [Accessed 20 Feb. 2020] (online) Available from:"
+      },
+      {
+       "url": "https://cdscoonline.gov.in/CDSCO/Drugs",
+       "data": "Central Drugs Standard Control Organisation (CDSCO). [Accessed 22 Mar. 2019] (online) Available from:"
+      }
+     ]
+    },
+    "slug": "/drugs/dulohox-20mg-tablet-732600",
+    "storage_condition": {
+     "header": "Storage",
+     "display_text": "Store below 30\u00b0C"
+    },
+    "therapeutic_class": "NEURO CNS",
+    "importer": {
+     "id": null,
+     "name": null,
+     "address": null,
+     "header": null,
+     "importer_header": null
+    },
+    "marketer": {
+     "id": 79282,
+     "name": "Hochest Biotech India",
+     "address": "35 Bharat Nagar, G.T. Road Amritsar, Punjab-143001",
+     "slug": "/marketer/hochest-biotech-india-79282",
+     "header": "Marketer details",
+     "marketer_header": "Marketer"
+    },
+    "summary": {
+     "prescription_required": {
+      "header": "This item requires prescription <a href=\"#rx_reason\"><font color=\"#767676\">Why?</font></a>",
+      "icon": "https://onemg.gumlet.io/marketing/yjglttewtdy9u1o3ycrh.png",
+      "prescription_box": {
+       "id": "rx_reason",
+       "header": "Why is a prescription needed?",
+       "reasons": [
+        {
+         "header": "To follow government policy",
+         "display_text": "Schedule H and H1 drugs cannot be sold without a valid prescription, as per the Drugs and Cosmetics Act, 1940 and Rules, 1945",
+         "image_url": "https://onemg.gumlet.io/marketing/j8tjddqgyfmxjkmymx79.png"
+        },
+        {
+         "header": "To provide right medicines",
+         "display_text": "Prescriptions are complex documents. We proof read and recheck at various steps to provide you the right medication in the correct form and dose",
+         "image_url": "https://onemg.gumlet.io/marketing/eu5gpaaogfjy7c9c3mem.png"
+        },
+        {
+         "header": "To set up reminders",
+         "display_text": "Our in-house pharmacists analyse your prescriptions to understand your healthcare needs and can set up timely reminders for the medicines you need regularly",
+         "image_url": "https://onemg.gumlet.io/marketing/rog3xgebfu7lyupsu8np.png"
+        }
+       ]
+      }
+     },
+     "salt_composition": {
+      "header": "Composition",
+      "display_text": "<a href='https://www.1mg.com/generics/duloxetine-211035'><font color='#3B3B3B'>Duloxetine (20mg)</font></a>"
+     }
+    },
+    "pack_form": "strip",
+    "label": "by <a href='/marketer/hochest-biotech-india-79282'>Hochest Biotech India</a>",
+    "label_vsat": "<a href='/marketer/hochest-biotech-india-79282'>Hochest Biotech India</a>",
+    "brief_info": [
+     {
+      "header": "Prescription",
+      "sub_header": "required",
+      "left_icon": "https://onemg.gumlet.io/marketing/7c6befe8-193b-4c5e-93c6-bd5d7ad3316f.png",
+      "cta": {
+       "action": "OPEN_RX_BOTTOMSHEET",
+       "content_description": "Prescription required",
+       "details": {
+        "target_url": null
+       }
+      }
+     }
+    ]
+   },
+   "metaData": {
+    "schema": {
+     "drug": {
+      "@context": "http://schema.org/",
+      "@type": "Drug",
+      "url": "/drugs/Dulohox-Tablet-732600",
+      "mainEntityOfPage": "/drugs/Dulohox-Tablet-732600",
+      "prescriptionStatus": "prescription",
+      "drugUnit": "20mg Tablet",
+      "activeIngredient": "Duloxetine",
+      "alcoholWarning": "It is unsafe to consume alcohol with Dulohox 20mg Tablet",
+      "breastfeedingWarning": "Dulohox 20mg Tablet may be unsafe to use during breastfeeding. Limited human data suggests that the drug may pass into the breastmilk and harm the baby. It should be used only if the expected benefit outweighs the potential risk. Please consult your doctor.",
+      "foodWarning": null,
+      "pregnancyWarning": "Dulohox 20mg Tablet is not recommended during pregnancy as there is positive evidence of fetal risk based on animal studies. However, it may still be prescribed by a doctor in situations where the benefits outweigh the risks.",
+      "marketer": {
+       "@type": "Organization",
+       "legalName": "Hochest Biotech India"
+      },
+      "administrationRoute": "Oral Route",
+      "isAvailableGenerically": true,
+      "isProprietary": true,
+      "nonProprietaryName": "Duloxetine 20mg Tablet",
+      "dosageForm": "Tablet",
+      "description": "Dulohox 20mg Tablet works by increasing the level of chemical messengers (serotonin and noradrenaline) in the brain that have a calming effect on the brain and relax the nerves, thus treating your illness. It may be taken with or without food. It is advised to take this medicine at a fixed time each day to maintain a consistent level in the blood. If you miss any doses, take it as soon as you remember. Do not skip any doses and finish the full course of treatment even if you feel better. This medication mustn't be stopped suddenly as it may worsen your symptoms.Some common side effects of this medicine include nausea, headache, decreased libido, abnormal dreams, blurred vision, and dry mouth. It even causes dizziness and sleepiness, so do not drive or do anything that requires mental focus until you know how this medicine affects you. However, these side effects are temporary and usually resolve on their own in some time. Please consult your doctor if these do not subside or bother you.Before taking Dulohox 20mg Tablet, inform your doctor if you have any problems with your kidneys, heart, liver, or have a history of seizures (epilepsy or fits). Inform your doctor if you develop any unusual changes in mood or behavior, new or worsening depression, or if you have any suicidal thoughts.",
+      "name": "Dulohox 20mg Tablet",
+      "proprietaryName": "Dulohox 20mg Tablet",
+      "availableStrength": [
+       {
+        "@type": "DrugStrength",
+        "activeIngredient": "Duloxetine",
+        "strengthUnit": "mg",
+        "strengthValue": "20"
+       }
+      ],
+      "mechanismOfAction": [
+       "Dulohox 20mg Tablet works by increasing the levels of chemical messengers (serotonin and noradrenaline), natural substances in the brain that help maintain mental balance and stop the movement of pain signals in the brain."
+      ],
+      "doseSchedule": {
+       "@type": "DoseSchedule",
+       "doseUnit": "",
+       "doseValue": "",
+       "frequency": ""
+      },
+      "image": "https://onemg.gumlet.io/l_watermark_346,w_480,h_480/a_ignore,w_480,h_480,c_fit,q_auto,f_auto/hx2gxivwmeoxxxsc1hix.png",
+      "brand": {
+       "@type": "Brand",
+       "name": "Dulohox"
+      },
+      "offers": {
+       "@type": "Offer",
+       "url": "/drugs/Dulohox-Tablet-732600",
+       "priceCurrency": "INR",
+       "availability": "http://schema.org/OutOfStock",
+       "price": 70.9,
+       "seller": {
+        "@type": "Organization",
+        "name": "Hochest Biotech India"
+       }
+      },
+      "author": [
+       {
+        "@type": "http://schema.org/author",
+        "givenName": "Dr. Sakshi Jain",
+        "jobTitle": "MS, BDS",
+        "url": "https://www.1mg.com/editorial-policy-processes/dr.-sakshi-jain-5",
+        "affiliation": {
+         "@type": "Organization",
+         "name": "MS, BDS"
+        }
+       }
+      ],
+      "reviewer": [
+       {
+        "@type": "http://schema.org/reviewedby",
+        "givenName": "Dr. Sachin Gupta",
+        "jobTitle": "MD Pharmacology, MBBS",
+        "url": "https://www.1mg.com/editorial-policy-processes/dr.-sachin-gupta-86",
+        "affiliation": {
+         "@type": "Organization",
+         "name": "MD Pharmacology, MBBS"
+        }
+       }
+      ],
+      "dateModified": "2025-11-25T00:47:22+05:30",
+      "datePublished": "2022-04-21T14:45:55+05:30",
+      "citation": [
+       {
+        "@type": "CreativeWork",
+        "position": 1
+       },
+       {
+        "@type": "CreativeWork",
+        "position": 2
+       },
+       {
+        "@type": "CreativeWork",
+        "position": 3,
+        "url": "https://www.medicines.org.uk/emc/medicine/15694"
+       },
+       {
+        "@type": "CreativeWork",
+        "position": 4,
+        "url": "https://www.ncbi.nlm.nih.gov/books/NBK501470/"
+       },
+       {
+        "@type": "CreativeWork",
+        "position": 5,
+        "url": "https://cdscoonline.gov.in/CDSCO/Drugs"
+       }
+      ]
+     }
+    }
+   },
+   "productConfig": {
+    "entity_id": 732600,
+    "entity_name": "Dulohox 20mg Tablet"
+   }
+  },
+  "dynamicData": {
+   "priceData": {
+    "packSizes": "10 tablets",
+    "disclaimer": "(inclusive of all taxes)",
+    "minimumQty": 1,
+    "maximumQty": 20,
+    "sellingQuantity": 10,
+    "ctas": [],
+    "isSkuInStock": false
+   },
+   "priceBox": {
+    "priceList": [
+     {
+      "type": "out_of_stock_view",
+      "mrp": {
+       "displayText": "MRP ",
+       "price": "\u20b971"
+      },
+      "discount": {
+       "price": "\u20b963.9",
+       "displayText": "10% off",
+       "discountCta": {},
+       "discountIcon": {},
+       "skuId": 732600
+      },
+      "offerPrice": null,
+      "coupon": null,
+      "description": "",
+      "discountCta": null,
+      "cpNudge": null,
+      "upsellInfo": {},
+      "bestPrice": null,
+      "label": "SOLD OUT",
+      "unavailableImageUrl": "https://onemg.gumlet.io/marketing/7aadef75-a87e-474b-ba00-e006b79f89bf.png",
+      "sale": null,
+      "codBenefit": {
+       "codBenefitBottomsheet": {}
+      }
+     }
+    ],
+    "regularPrice": null,
+    "selected": "out_of_stock_view",
+    "packSizes": "10 tablets",
+    "disclaimer": "(inclusive of all taxes)",
+    "minimumQty": 1,
+    "maximumQty": 20,
+    "sellingQuantity": 10,
+    "ctas": [],
+    "isSkuInStock": false,
+    "substitutesFooter": null,
+    "atcExperimentEnabled": true,
+    "bestPriceVariant": "test1",
+    "couponBottomSheet": null,
+    "mixpanelData": {
+     "sku_id": "732600",
+     "sku_name": "Dulohox 20mg Tablet",
+     "mrp": 71,
+     "discount_percent": 10,
+     "eta": null,
+     "eta_text": "Item not available at this pincode",
+     "cta_text": null,
+     "pincode": 122019,
+     "epoch_eta": null,
+     "cta_type": "price_box",
+     "cp_recommended_type": "mini",
+     "cp_recommended_type_old": "mini",
+     "new_cp_plan_cohort": null,
+     "list_price": 63.9,
+     "cp_list_price": 61.34,
+     "cp_discount_percent": 4.01
+    },
+    "discountBannerMixPanelData": {
+     "discounting_mweb_pdp_cohort": "Test_1",
+     "discounting_nudge_shown": false,
+     "discounting_coupon_shown": "",
+     "discount_per_shown_on_nudge": 0,
+     "discounting_nudge_type": "generic_rx"
+    },
+    "discountBanner": null,
+    "welcomeOfferDetails": null,
+    "genericSubstituteNudge": null,
+    "offers": {
+     "header": "<h2 class=titleMediumExtraBold>Save more with additional offers</h2>",
+     "headerWithoutTags": "Save more with additional offers",
+     "list": [
+      {
+       "title": "Offer details",
+       "header": "Flat Rs.150 on a Min Transaction of Rs.1000.",
+       "subHeader": "Flat Rs.150 on a Min Transaction of Rs.1000.",
+       "imageUrl": "https://onemg.gumlet.io/marketing/4bd6eb15-564d-4700-b277-d14620291fa5.png",
+       "description": "Flat Rs.150 on a Min Transaction of Rs.1000.<br><ul>\n<li>The offer is available only for Airtel Payments Bank (APBL) savings account customers.</li>\n<li>User can avail - Flat Rs.150 on a Min Transaction of Rs.1000.</li>\n<li>Offer is applicable only for first time users of Airtel Payments Bank on 1MG.</li>\n<li>Limited period offer from (1st to 5th)Aug&rsquo;2026,</li>\n<li>Minimum purchase of Rs.1000 is mandatory in order to avail this offer.</li>\n<li>Cashback would be credited within 72 business hours in the user's Airtel Payments Bank savings account.</li>\n<li>Airtel Payments Bank reserves the right to disqualify any Airtel Payments Bank savings account holder(s) from the benefits of this offer in case of any fraudulent activity/suspicious transactions.</li>\n<li>Airtel Payments Bank also reserves the right to discontinue this offer without assigning any reasons or without any prior intimation whatsoever.</li>\n<li>In addition to the above, this offer is also subject to Airtel Payments Bank's General Terms &amp; Conditions available on http://www.airtel.in/personal/money/terms-of-use.</li>\n<li>For further details, please send your queries to wecare@airtelbank.com</li>\n</ul>",
+       "gaLabel": {
+        "cta": "Flat Rs.150 on a Min Transaction of Rs.1000."
+       }
+      },
+      {
+       "title": "Offer details",
+       "header": "Assured cashback up to \u20b9300*. T&C Apply*",
+       "subHeader": "Assured cashback up to \u20b9300*. T&C Apply*",
+       "imageUrl": "https://onemg.gumlet.io/marketing%2F108cca3d-6fec-471a-881e-911eb7ee5616.png",
+       "description": "Assured cashback up to \u20b9300*. T&C Apply*<br><ul>\n<li>\n<div dir=\"auto\">*Offer valid for users who have not used Paytm for any payment in the last 60 days</div>\n</li>\n<li>\n<div dir=\"auto\">Eligible for users making payments via Paytm UPI/UPI Lite</div>\n</li>\n<li>\n<div dir=\"auto\">Minimum order value: Rs.300</div>\n</li>\n<li>\n<div dir=\"auto\">Cashback is credited to the user's linked bank account on the Paytm app</div>\n</li>\n<li>\n<div dir=\"auto\">Offer valid once per user</div>\n</li>\n<li>\n<div dir=\"auto\">Cashback scratch card must be redeemed within 2 days</div>\n</li>\n<li>\n<div dir=\"auto\">Offer is valid until 30 Sep, '26</div>\n</li>\n<li>\n<div dir=\"auto\">Minimum \u20b910 cashback if no Paytm payment has been made in the last 60 days; otherwise, receive a Flat 5% discount coupon up to \u20b9500 applicable on subsequent gold purchases within the Paytm app.</div>\n</li>\n<li>\n<div dir=\"auto\">Earn Gold coins on all Paytm payments</div>\n</li>\n</ul>",
+       "gaLabel": {
+        "cta": "Assured cashback up to \u20b9300*. T&C Apply*"
+       }
+      },
+      {
+       "title": "Offer details",
+       "header": "Get up to \u20b975 cashback on a minimum order value (MOV) of \u20b9499 and above, valid once per customer.",
+       "subHeader": "Get up to \u20b975 cashback on a minimum order value (MOV) of \u20b9499 and above, valid once per customer.",
+       "imageUrl": "https://onemg.gumlet.io/marketing/ff6db98b-7a01-40ea-95f9-b44e9b4c0ebd.png",
+       "description": "Get up to \u20b975 cashback on a minimum order value (MOV) of \u20b9499 and above, valid once per customer.<br><p>Get up to \u20b975 cashback on a minimum order value (MOV) of \u20b9499 and above, valid once per customer.</p>\n<p>&nbsp;</p>\n<p>Steps to Redeem&nbsp; &nbsp;</p>\n<ul>\n<li class=\"m_-6100244356602882804MsoListParagraph\">Once the reward is collected, make a payment on 1mg between 01-Aug-2026 12:00:00 AM to 31-Aug-2026 11:59:59 PM of min. value \u20b9499.</li>\n<li class=\"m_-6100244356602882804MsoListParagraph\">Reward is applicable when you pay on 1mg - Valid for India Mobile Verified Users only on 1mg Orders. Valid only for users who have linked their Amazon account and made a payment using Amazon Pay Balance. Not valid on paying using Amazon Pay Later or Amazon Pay UPI directly from the UPI section or Pay later section on 1mg. The cashback will only be issued once the customer scratches the issued card by going to the rewards page on Amazon Pay (https://www.amazon.in/h/rewards). The Scratch card is available until end of this month.</li>\n<li class=\"m_-6100244356602882804MsoListParagraph\">This offer can't be clubbed with any other offer &amp; is valid 1 time(s) per user</li>\n<li class=\"m_-6100244356602882804MsoListParagraph\">The cashback will be credited as Amazon Pay balance within 24 hours. You'll receive an email for the cashback. Alternatively, you can also check your cashback at: www.amazon.in/vs<br /><br /><br /></li>\n</ul>",
+       "gaLabel": {
+        "cta": "Get up to \u20b975 cashback on a minimum order value (MOV) of \u20b9499 and above, valid once per customer."
+       }
+      },
+      {
+       "title": "Offer details",
+       "header": "Get upto Rs.500 Cashback on minimum transaction of Rs.999/- with Mobikwik Wallet.",
+       "subHeader": "Get upto Rs.500 Cashback on minimum transaction of Rs.999/- with Mobikwik Wallet.",
+       "imageUrl": "https://onemg.gumlet.io/image/upload/v1631000321/yvtqbcj9sa7zx5g0ghuc.jpg",
+       "description": "Get upto Rs.500 Cashback on minimum transaction of Rs.999/- with Mobikwik Wallet.<br><ul>\n<li>Get upto Rs.500 Cashback on minimum transaction of Rs.999/- with Mobikwik Wallet.</li>\n<li>Transaction to be done through Mobikwik wallet only.</li>\n<li>Offer can be availed once per user in a calendar month</li>\n<li>Offer is valid till 30th Aug 2026.</li>\n</ul>",
+       "gaLabel": {
+        "cta": "Get upto Rs.500 Cashback on minimum transaction of Rs.999/- with Mobikwik Wallet."
+       }
+      },
+      {
+       "title": "Offer details",
+       "header": "Get upto Rs.150 Cashback on minimum transaction of Rs.599/- with Mobikwik UPI.",
+       "subHeader": "Get upto Rs.150 Cashback on minimum transaction of Rs.599/- with Mobikwik UPI.",
+       "imageUrl": "https://onemg.gumlet.io/image/upload/v1631000321/yvtqbcj9sa7zx5g0ghuc.jpg",
+       "description": "Get upto Rs.150 Cashback on minimum transaction of Rs.599/- with Mobikwik UPI.<br><ul>\n<li>Get upto Rs.150 Cashback on minimum transaction of Rs.599/- with Mobikwik UPI (@ikwik &amp; @mbkns).</li>\n<li>Offer can be availed once per user in a calendar month.</li>\n<li>Cashback can be claimed instantly through a scratch card on the Mobikwik app in the rewards section.</li>\n<li>Scratch card will be valid for 7 days.</li>\n<li>Cashback shall be credited to KYC users instantly.</li>\n<li>Offer is valid till 30th Aug 2026.</li>\n</ul>",
+       "gaLabel": {
+        "cta": "Get upto Rs.150 Cashback on minimum transaction of Rs.599/- with Mobikwik UPI."
+       }
+      }
+     ],
+     "ctaLabel": "See all offers",
+     "cta": {
+      "icon": {}
+     },
+     "upfrontCount": 3,
+     "gaLabel": {
+      "cta": "See all offers"
+     }
+    }
+   }
+  }
+ }
+}

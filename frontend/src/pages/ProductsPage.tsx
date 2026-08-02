@@ -11,10 +11,20 @@ import {
   Info,
   Loader2,
   FileText,
-  Tag
+  Tag,
+  Globe,
+  ExternalLink,
+  ShieldAlert
 } from 'lucide-react';
 import { apiClient } from '../api/client';
-import type { Product, ProductSummary, ProductFlag, ProductAlias } from '../api/types';
+import type {
+  Product,
+  ProductSummary,
+  ProductFlag,
+  ProductAlias,
+  EnrichmentResult,
+  Suggestion
+} from '../api/types';
 
 // Vocabulary the pharmacist picks from rather than types, so the catalogue
 // doesn't accumulate TAB / Tab / Tablet / TABLET as four different forms —
@@ -469,6 +479,8 @@ const ProductDetailDrawer: React.FC<{
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<Product | null>(null);
   const [splitting, setSplitting] = useState<ProductAlias | null>(null);
+  const [lookup, setLookup] = useState<EnrichmentResult | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
 
   const confirmed = new Set(product.confirmed_fields || []);
   const set = (key: keyof typeof form) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
@@ -509,6 +521,41 @@ const ProductDetailDrawer: React.FC<{
     } finally {
       setSaving(false);
     }
+  };
+
+  const runLookup = async () => {
+    setLookingUp(true);
+    setLookup(null);
+    try {
+      setLookup(await apiClient.enrichProduct(product.id));
+    } catch (e: any) {
+      setLookup({
+        product_id: product.id,
+        query: '',
+        suggestions: [],
+        status: 'error',
+        message: e?.message || 'Lookup failed.'
+      });
+    } finally {
+      setLookingUp(false);
+    }
+  };
+
+  // Fills the form only — the user still has to save, so a lookup can never
+  // write to the catalogue on its own.
+  const applySuggestion = (suggestion: Suggestion) => {
+    const f = suggestion.facts;
+    if (!f) return;
+    setForm((prev) => ({
+      ...prev,
+      brand: f.brand ?? prev.brand,
+      strength: f.strength ?? prev.strength,
+      form: f.form ?? prev.form,
+      pack_size: f.pack_size ?? prev.pack_size,
+      pack_multiplier: f.pack_multiplier?.toString() ?? prev.pack_multiplier,
+      base_unit: f.base_unit ?? prev.base_unit,
+      manufacturer: f.manufacturer ?? prev.manufacturer
+    }));
   };
 
   const doSplit = async (alias: ProductAlias, overrides: Record<string, any>) => {
@@ -614,6 +661,15 @@ const ProductDetailDrawer: React.FC<{
               ))}
             </div>
           )}
+
+          {/* Online lookup */}
+          <LookupPanel
+            product={product}
+            result={lookup}
+            busy={lookingUp}
+            onRun={runLookup}
+            onApply={applySuggestion}
+          />
 
           {/* Catalogue fields */}
           <section className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm p-5 space-y-4">
@@ -862,6 +918,189 @@ const ProductDetailDrawer: React.FC<{
 };
 
 // --------------------------------------------------------------------------
+
+const FIELD_LABELS: Record<string, string> = {
+  brand: 'Brand',
+  strength: 'Strength',
+  form: 'Form',
+  pack_size: 'Pack size',
+  pack_multiplier: 'Units per pack',
+  base_unit: 'Dispensing unit',
+  manufacturer: 'Manufacturer'
+};
+
+// Suggestions are presented as a claim by a named source with a link, never as
+// an answer. The reviewer needs to be able to check it, so the match score,
+// what could not be verified, and the source URL all travel with the values.
+const LookupPanel: React.FC<{
+  product: Product;
+  result: EnrichmentResult | null;
+  busy: boolean;
+  onRun: () => void;
+  onApply: (s: Suggestion) => void;
+}> = ({ product, result, busy, onRun, onApply }) => {
+  const searchName = product.aliases?.[0]?.raw_name || product.canonical_name || product.brand;
+
+  return (
+    <section className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h4 className="text-sm font-bold text-[#0f172a] flex items-center gap-1.5">
+            <Globe size={14} className="text-gray-400" />
+            Look up online
+          </h4>
+          <p className="text-[11px] text-gray-500">
+            Searches public drug listings for{' '}
+            <span className="font-mono text-[#0f172a]">{searchName}</span> and suggests the
+            catalogue details. Nothing is saved until you apply it and press save.
+          </p>
+        </div>
+        <button
+          onClick={onRun}
+          disabled={busy}
+          className="shrink-0 flex items-center gap-1.5 bg-white hover:bg-slate-50 text-[#1b5dfc] font-semibold px-3 py-2 rounded-xl text-xs border border-blue-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+          {busy ? 'Searching…' : result ? 'Search again' : 'Search'}
+        </button>
+      </div>
+
+      {result && result.suggestions.length === 0 && (
+        <div className="flex items-start gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-600">
+          <Info size={14} className="shrink-0 mt-0.5" />
+          <span>{result.message || 'No matching listing found.'}</span>
+        </div>
+      )}
+
+      {result?.suggestions.map((suggestion) => {
+        const m = suggestion.match;
+        const changes = suggestion.fields.filter((f) => !f.agrees);
+        const overwritesConfirmed = changes.filter((f) => f.confirmed);
+
+        return (
+          <div key={m.slug} className="border border-[#e2e8f0] rounded-xl overflow-hidden">
+            <div className="bg-[#f8fafc] px-4 py-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-[#0f172a]">
+                    {suggestion.facts?.listing_name || m.display}
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                      m.score >= 88
+                        ? 'bg-green-50 text-green-700 border-green-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200'
+                    }`}
+                  >
+                    {Math.round(m.score)}% match
+                  </span>
+                  {m.strength_verified ? (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-50 text-green-700 border border-green-200">
+                      strength verified
+                    </span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                      strength unverified
+                    </span>
+                  )}
+                </div>
+                <a
+                  href={m.url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="text-[10px] text-[#1b5dfc] hover:underline flex items-center gap-1 mt-1"
+                >
+                  {m.source} <ExternalLink size={9} />
+                </a>
+              </div>
+              {suggestion.facts && (
+                <button
+                  onClick={() => onApply(suggestion)}
+                  className="shrink-0 bg-[#1b5dfc] hover:bg-blue-700 text-white font-semibold px-3 py-1.5 rounded-lg text-[11px] transition-colors cursor-pointer"
+                >
+                  Use these details
+                </button>
+              )}
+            </div>
+
+            <div className="px-4 py-3 space-y-2">
+              {m.reasons.map((reason, i) => (
+                <div key={i} className="flex items-start gap-1.5 text-[10px] text-gray-500">
+                  <Info size={10} className="shrink-0 mt-0.5" />
+                  <span>{reason}</span>
+                </div>
+              ))}
+
+              {overwritesConfirmed.length > 0 && (
+                <div className="flex items-start gap-1.5 text-[10px] text-red-600 font-semibold">
+                  <ShieldAlert size={11} className="shrink-0 mt-0.5" />
+                  <span>
+                    Would change {overwritesConfirmed.map((f) => FIELD_LABELS[f.field]).join(', ')},
+                    which someone already confirmed.
+                  </span>
+                </div>
+              )}
+
+              {suggestion.fields.length > 0 && (
+                <table className="w-full text-[11px] mt-1">
+                  <tbody className="divide-y divide-[#f1f5f9]">
+                    {suggestion.fields.map((f) => (
+                      <tr key={f.field}>
+                        <td className="py-1.5 text-gray-500 w-32">{FIELD_LABELS[f.field] || f.field}</td>
+                        <td className="py-1.5 text-gray-400 line-through">
+                          {f.agrees ? '' : f.current || ''}
+                        </td>
+                        <td className="py-1.5 font-semibold text-[#0f172a]">
+                          {f.suggested}
+                          {f.agrees && (
+                            <span className="ml-1.5 text-[9px] font-bold text-green-600">agrees</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              {suggestion.facts && (
+                <div className="pt-2 mt-1 border-t border-[#f1f5f9] space-y-1">
+                  {suggestion.facts.composition && (
+                    <p className="text-[10px] text-gray-500">
+                      <span className="text-gray-400">Composition:</span>{' '}
+                      {suggestion.facts.composition}
+                    </p>
+                  )}
+                  {suggestion.facts.prescription_note && (
+                    <p className="text-[10px] text-gray-500">
+                      <span className="text-gray-400">Regulatory:</span>{' '}
+                      {suggestion.facts.prescription_note}
+                      <span className="text-gray-400">
+                        {' '}— set the schedule yourself; listings don’t distinguish H from H1.
+                      </span>
+                    </p>
+                  )}
+                  {suggestion.facts.listed_mrp !== null && (
+                    <p className="text-[10px] text-gray-500">
+                      <span className="text-gray-400">Listed MRP:</span>{' '}
+                      {currency(suggestion.facts.listed_mrp)}
+                      <span className="text-gray-400"> — for comparison only, not saved.</span>
+                    </p>
+                  )}
+                  {suggestion.facts.unavailable.length > 0 && (
+                    <p className="text-[10px] text-gray-400">
+                      Not published by {suggestion.facts.source}:{' '}
+                      {suggestion.facts.unavailable.join(', ')}.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+};
 
 const SplitDialog: React.FC<{
   alias: ProductAlias;
