@@ -19,6 +19,17 @@ import {
   Layers
 } from 'lucide-react';
 
+interface UploadJob {
+  id: number;
+  file: File;
+  status: 'uploading' | 'extracting' | 'success' | 'failed';
+  progress: number;
+  error: string | null;
+  // Set once the backend has accepted the invoice, so a finished upload can
+  // still be opened later instead of only at the instant it completes.
+  runId: string | null;
+}
+
 export const UploadInvoicePage: React.FC = () => {
   const { uploadInvoiceFile, uploadInvoicePages } = useRun();
   const navigate = useNavigate();
@@ -27,10 +38,19 @@ export const UploadInvoicePage: React.FC = () => {
 
   // States
   const [dragActive, setDragActive] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'extracting' | 'success' | 'failed'>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  // One entry per upload, rather than one set of fields shared by all of them.
+  // The previous shape held a single file/status/progress, so starting a
+  // second upload while the first was still in flight overwrote the first
+  // one's identity: both progress timers then wrote to the same percentage,
+  // and whichever request happened to finish first navigated away — showing
+  // the wrong filename on the way out and discarding the other result.
+  const [jobs, setJobs] = useState<UploadJob[]>([]);
+  const jobSeq = useRef(0);
+
+  const updateJob = (id: number, patch: Partial<UploadJob>) =>
+    setJobs((prev) => prev.map((job) => (job.id === id ? { ...job, ...patch } : job)));
+
+  const activeJobs = jobs.filter((j) => j.status === 'uploading' || j.status === 'extracting');
 
   // Multi-page invoice states
   const [multiDragActive, setMultiDragActive] = useState(false);
@@ -110,42 +130,62 @@ export const UploadInvoicePage: React.FC = () => {
     fileInputRef.current?.click();
   };
 
-  // Main Upload and API call flow
+  // Main Upload and API call flow. Every write below targets one job id, so
+  // concurrent uploads cannot overwrite each other's progress or status.
   const processFile = async (file: File) => {
-    setSelectedFile(file);
-    setUploadStatus('uploading');
-    setErrorMsg(null);
-    setUploadProgress(15);
+    const id = ++jobSeq.current;
+    setJobs((prev) => [
+      ...prev,
+      { id, file, status: 'uploading', progress: 15, error: null, runId: null }
+    ]);
 
     // Simulate upload stages visually before final API call
     const progressTimer = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 65) {
-          clearInterval(progressTimer);
-          return 65;
-        }
-        return prev + 10;
-      });
+      setJobs((prev) =>
+        prev.map((job) =>
+          job.id === id && job.status === 'uploading'
+            ? { ...job, progress: Math.min(job.progress + 10, 65) }
+            : job
+        )
+      );
     }, 150);
 
     try {
       // Execute upload client call
       const newRun = await uploadInvoiceFile(file);
-      
-      clearInterval(progressTimer);
-      setUploadProgress(100);
-      setUploadStatus('success');
 
-      // Short delay for visual verification checkmark
-      setTimeout(() => {
-        navigate(`/review/${newRun.run_id}`);
-      }, 1000);
+      clearInterval(progressTimer);
+      updateJob(id, { status: 'success', progress: 100, runId: newRun.run_id });
+
+      // Only leave the page when this was the sole upload in flight.
+      // Navigating while another is still processing would abandon it
+      // mid-flight and drop the user on a review screen for an invoice they
+      // did not just finish; the completed card carries a Review button
+      // instead, so nothing is lost either way.
+      setJobs((prev) => {
+        const othersBusy = prev.some(
+          (job) => job.id !== id && (job.status === 'uploading' || job.status === 'extracting')
+        );
+        if (!othersBusy) {
+          setTimeout(() => navigate(`/review/${newRun.run_id}`), 1000);
+        }
+        return prev;
+      });
     } catch (err: any) {
       clearInterval(progressTimer);
-      setUploadStatus('failed');
-      setErrorMsg(err.message || 'Invoice processing failed. Please check image format validity.');
+      updateJob(id, {
+        status: 'failed',
+        error: err.message || 'Invoice processing failed. Please check image format validity.'
+      });
     }
   };
+
+  const retryJob = (job: UploadJob) => {
+    setJobs((prev) => prev.filter((j) => j.id !== job.id));
+    processFile(job.file);
+  };
+
+  const dismissJob = (id: number) => setJobs((prev) => prev.filter((j) => j.id !== id));
 
   // --- Multi-page invoice handling ------------------------------------------
 
@@ -508,84 +548,114 @@ export const UploadInvoicePage: React.FC = () => {
           <div className="bg-white rounded-2xl border border-[#e2e8f0] p-5 shadow-sm space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-[#e2e8f0]">
               <h4 className="text-xs font-bold text-[#0f172a] uppercase tracking-wider">Processing Queue</h4>
-              {selectedFile && uploadStatus !== 'success' && uploadStatus !== 'failed' && (
+              {activeJobs.length > 0 && (
                 <span className="bg-blue-50 text-[#1b5dfc] text-[10px] px-2 py-0.5 rounded-full font-bold animate-pulse">
-                  1 Active
+                  {activeJobs.length} Active
                 </span>
               )}
             </div>
 
-            {selectedFile ? (
+            {jobs.length > 0 ? (
               <div className="space-y-3">
-                <div className="p-4 bg-slate-50 border border-slate-200/60 rounded-xl space-y-3 relative overflow-hidden">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center space-x-2 min-w-0">
-                      <div className="p-2 bg-white rounded-lg border border-[#e2e8f0] text-gray-500 shrink-0">
-                        <FileText size={16} />
-                      </div>
-                      <div className="min-w-0">
-                        <h5 className="text-xs font-semibold text-[#0f172a] truncate">{selectedFile.name}</h5>
-                        <p className="text-[9px] text-gray-400 font-mono">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                      </div>
-                    </div>
-                    {uploadStatus === 'uploading' && (
-                      <span className="text-[10px] font-bold font-mono text-[#1b5dfc]">{uploadProgress}%</span>
-                    )}
-                  </div>
-
-                  {/* Progress Indicators */}
-                  {uploadStatus === 'uploading' && (
-                    <div className="space-y-1">
-                      <div className="w-full bg-[#e2e8f0] h-1.5 rounded-full overflow-hidden">
-                        <div 
-                          className="bg-[#1b5dfc] h-full rounded-full transition-all duration-300"
-                          style={{ width: `${uploadProgress}%` }}
-                        />
-                      </div>
-                      <span className="text-[9px] text-gray-400 flex items-center space-x-1 font-mono">
-                        <RefreshCw size={10} className="animate-spin text-blue-500" />
-                        <span>Uploading to secure vault...</span>
-                      </span>
-                    </div>
-                  )}
-
-                  {uploadStatus === 'extracting' && (
-                    <div className="space-y-1">
-                      <div className="w-full bg-blue-100 h-1.5 rounded-full overflow-hidden">
-                        <div className="bg-[#1b5dfc] h-full rounded-full w-4/5 animate-pulse" />
-                      </div>
-                      <span className="text-[9px] text-amber-600 flex items-center space-x-1 font-mono">
-                        <RefreshCw size={10} className="animate-spin" />
-                        <span>Extracting line items...</span>
-                      </span>
-                    </div>
-                  )}
-
-                  {uploadStatus === 'success' && (
-                    <div className="bg-green-50 border border-green-200/50 p-2 rounded-lg flex items-center space-x-2 text-[10px] text-green-700 font-mono">
-                      <CheckCircle2 size={12} className="text-green-600" />
-                      <span>Ready! Redirecting to editor...</span>
-                    </div>
-                  )}
-
-                  {uploadStatus === 'failed' && (
-                    <div className="space-y-2">
-                      <div className="bg-red-50 border border-red-200/50 p-2 rounded-lg flex items-start space-x-2 text-[10px] text-red-700">
-                        <AlertTriangle size={12} className="text-red-600 shrink-0 mt-0.5" />
-                        <div className="space-y-1">
-                          <span className="font-semibold font-mono block">Extraction Failed</span>
-                          <p className="text-[9px] text-gray-500 leading-normal">{errorMsg}</p>
+                {jobs.map((job) => (
+                  <div
+                    key={job.id}
+                    className="p-4 bg-slate-50 border border-slate-200/60 rounded-xl space-y-3 relative overflow-hidden"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center space-x-2 min-w-0">
+                        <div className="p-2 bg-white rounded-lg border border-[#e2e8f0] text-gray-500 shrink-0">
+                          <FileText size={16} />
+                        </div>
+                        <div className="min-w-0">
+                          <h5 className="text-xs font-semibold text-[#0f172a] truncate">{job.file.name}</h5>
+                          <p className="text-[9px] text-gray-400 font-mono">
+                            {(job.file.size / 1024 / 1024).toFixed(2)} MB
+                          </p>
                         </div>
                       </div>
-                      <button
-                        onClick={() => processFile(selectedFile)}
-                        className="w-full bg-[#1b5dfc] hover:bg-[#154ecb] text-white py-1.5 rounded-lg text-[10px] font-bold transition-colors cursor-pointer"
-                      >
-                        Retry Upload
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {job.status === 'uploading' && (
+                          <span className="text-[10px] font-bold font-mono text-[#1b5dfc]">{job.progress}%</span>
+                        )}
+                        {(job.status === 'success' || job.status === 'failed') && (
+                          <button
+                            onClick={() => dismissJob(job.id)}
+                            className="p-0.5 text-gray-300 hover:text-gray-600 transition-colors cursor-pointer"
+                            aria-label={`Dismiss ${job.file.name}`}
+                          >
+                            <X size={13} />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
+
+                    {/* Progress Indicators */}
+                    {job.status === 'uploading' && (
+                      <div className="space-y-1">
+                        <div className="w-full bg-[#e2e8f0] h-1.5 rounded-full overflow-hidden">
+                          <div
+                            className="bg-[#1b5dfc] h-full rounded-full transition-all duration-300"
+                            style={{ width: `${job.progress}%` }}
+                          />
+                        </div>
+                        <span className="text-[9px] text-gray-400 flex items-center space-x-1 font-mono">
+                          <RefreshCw size={10} className="animate-spin text-blue-500" />
+                          <span>Uploading to secure vault...</span>
+                        </span>
+                      </div>
+                    )}
+
+                    {job.status === 'extracting' && (
+                      <div className="space-y-1">
+                        <div className="w-full bg-blue-100 h-1.5 rounded-full overflow-hidden">
+                          <div className="bg-[#1b5dfc] h-full rounded-full w-4/5 animate-pulse" />
+                        </div>
+                        <span className="text-[9px] text-amber-600 flex items-center space-x-1 font-mono">
+                          <RefreshCw size={10} className="animate-spin" />
+                          <span>Extracting line items...</span>
+                        </span>
+                      </div>
+                    )}
+
+                    {job.status === 'success' && (
+                      <div className="space-y-2">
+                        <div className="bg-green-50 border border-green-200/50 p-2 rounded-lg flex items-center space-x-2 text-[10px] text-green-700 font-mono">
+                          <CheckCircle2 size={12} className="text-green-600" />
+                          <span>{activeJobs.length > 0 ? 'Ready to review.' : 'Ready! Redirecting to editor...'}</span>
+                        </div>
+                        {/* Shown while other uploads are still running, since
+                            the page will not navigate on its own then. */}
+                        {activeJobs.length > 0 && job.runId && (
+                          <button
+                            onClick={() => navigate(`/review/${job.runId}`)}
+                            className="w-full bg-white hover:bg-slate-50 text-[#1b5dfc] border border-blue-200 py-1.5 rounded-lg text-[10px] font-bold transition-colors cursor-pointer"
+                          >
+                            Review this invoice
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {job.status === 'failed' && (
+                      <div className="space-y-2">
+                        <div className="bg-red-50 border border-red-200/50 p-2 rounded-lg flex items-start space-x-2 text-[10px] text-red-700">
+                          <AlertTriangle size={12} className="text-red-600 shrink-0 mt-0.5" />
+                          <div className="space-y-1">
+                            <span className="font-semibold font-mono block">Extraction Failed</span>
+                            <p className="text-[9px] text-gray-500 leading-normal">{job.error}</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => retryJob(job)}
+                          className="w-full bg-[#1b5dfc] hover:bg-[#154ecb] text-white py-1.5 rounded-lg text-[10px] font-bold transition-colors cursor-pointer"
+                        >
+                          Retry Upload
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="py-8 text-center text-gray-400 text-xs font-medium">
