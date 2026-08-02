@@ -193,7 +193,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
               <Package size={20} className="stroke-[2.5]" />
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight text-[#0f172a] leading-none">PharmaFlow</h1>
+              <h1 className="text-lg font-bold tracking-tight text-[#0f172a] leading-none">PharmaGPT</h1>
               <span className="text-[10px] text-gray-500 font-mono">Admin Portal</span>
             </div>
           </div>
@@ -230,7 +230,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
             </div>
             <div className="flex-1 min-w-0">
               <h4 className="text-xs font-semibold text-[#0f172a] truncate">Admin User</h4>
-              <p className="text-[10px] text-gray-500 truncate">admin@pharmaflow.io</p>
+              <p className="text-[10px] text-gray-500 truncate">admin@pharmagpt.co</p>
             </div>
             <ChevronDown size={14} className="text-gray-500" />
           </div>
@@ -268,7 +268,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
                   <Package size={20} />
                 </div>
                 <div>
-                  <h1 className="text-base font-bold text-[#0f172a]">PharmaFlow</h1>
+                  <h1 className="text-base font-bold text-[#0f172a]">PharmaGPT</h1>
                   <span className="text-[10px] text-gray-500">Admin Portal</span>
                 </div>
               </div>
@@ -301,7 +301,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
                 </div>
                 <div>
                   <h4 className="text-xs font-semibold text-[#0f172a]">Admin User</h4>
-                  <p className="text-[9px] text-gray-500">admin@pharmaflow.io</p>
+                  <p className="text-[9px] text-gray-500">admin@pharmagpt.co</p>
                 </div>
               </div>
             </div>

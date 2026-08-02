@@ -39,8 +39,8 @@ WANTED = re.compile(r"sitemap_(drugs|otc|generics)_\d+\.xml$")
 
 HEADERS = {
     "User-Agent": (
-        "PharmaFlowCatalogueIndexer/1.0 (pharmacy inventory reconciliation; "
-        "contact: admin@pharmaflow.io)"
+        "PharmaGPTCatalogueIndexer/1.0 (pharmacy inventory reconciliation; "
+        "contact: admin@pharmagpt.co)"
     )
 }
 

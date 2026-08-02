@@ -1,5 +1,8 @@
-version: '3.8'
 
+# Local development only - runs the API against the Dockerfile in this repo,
+# with the source bind-mounted for hot reload. For a real deployment see
+# deploy/docker-compose.prod.yml, which adds Caddy in front for TLS, a
+# basic-auth gate, and the built frontend, and does not bind-mount source.
 services:
   ocr-api:
     build: .
@@ -8,14 +11,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./datasets:/workspace/datasets
-      - .:/workspace  # Optional: to allow hot-reloading if you run uvicorn with --reload
+      - ./datasets:/app/datasets
+      - .:/app # hot-reload: requires `command` below to pass --reload
+    env_file:
+      - .env
     environment:
       - LOG_LEVEL=INFO
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    # No GPU reservation: the image installs requirements.txt, which the
+    # default (and only production) extraction engine - Azure Document
+    # Intelligence - does not need. A GPU device request here would simply
+    # fail to start on any machine without nvidia-container-toolkit
+    # configured, which is most laptops and every plain VPS.

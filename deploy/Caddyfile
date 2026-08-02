@@ -1,0 +1,55 @@
+# Production edge: terminates TLS for {$DOMAIN}, gates the whole site behind
+# a single shared login (the interim access control until the app has real
+# per-pharmacy auth), and serves the built SPA and the API from one origin -
+# so the frontend calls relative paths like /invoices exactly as it does
+# against the Vite dev proxy, and no CORS configuration is needed anywhere.
+#
+# {$DOMAIN}, {$BASIC_AUTH_USER}, {$BASIC_AUTH_HASH} are read from the
+# environment at container start (see deploy/.env.prod.example). The hash is
+# generated with `caddy hash-password` - Caddy refuses plaintext passwords in
+# its config, so there is nothing here to leak even if this file is read by
+# someone who shouldn't have it.
+{$DOMAIN} {
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	encode gzip
+
+	# `handle` blocks, not a bare matcher on reverse_proxy: only the first
+	# matching block runs, which is what keeps API and SPA routing apart.
+	# With a plain `reverse_proxy @api` plus a top-level `try_files`, the
+	# try_files runs on EVERY request regardless of the matcher - Caddy
+	# executes directives in its own hard-coded order, and try_files sorts
+	# ahead of reverse_proxy - so /health was rewritten to /index.html and
+	# the API returned the SPA's HTML instead of JSON.
+	#
+	# Every path here mirrors the frontend's dev proxy
+	# (frontend/vite.config.ts), so "works in dev" and "works in prod" mean
+	# the same routing.
+	handle /health* {
+		reverse_proxy backend:8000
+	}
+	handle /upload-invoice* {
+		reverse_proxy backend:8000
+	}
+	handle /clear-cache* {
+		reverse_proxy backend:8000
+	}
+	handle /invoices* {
+		reverse_proxy backend:8000
+	}
+	handle /products* {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else is the SPA. try_files falls back to index.html so
+	# client-side routes like /catalogue or /review/<id> resolve on a hard
+	# refresh instead of 404ing - there is no file at that path, only a
+	# React Router route the app defines after index.html loads.
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

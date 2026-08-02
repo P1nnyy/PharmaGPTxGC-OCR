@@ -179,7 +179,7 @@ export const ReportsPage: React.FC = () => {
           <p className="text-gray-500 text-sm">Analyze pharmacy spend summaries, supplier tax distributions, and GST breakdowns.</p>
         </div>
         <button
-          onClick={() => handleExportCSV('PharmaFlow_Full_Purchase_Audit.csv')}
+          onClick={() => handleExportCSV('PharmaGPT_Full_Purchase_Audit.csv')}
           disabled={verifiedInvoices.length === 0}
           className="bg-[#1b5dfc] hover:bg-[#154ecb] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white font-semibold px-4 py-2.5 rounded-xl text-xs flex items-center space-x-1.5 shadow-md shadow-blue-500/10 transition-colors cursor-pointer"
         >
@@ -292,7 +292,7 @@ export const ReportsPage: React.FC = () => {
             <div className="flex items-center justify-between border-b border-gray-100 pb-3">
               <h3 className="text-base font-bold text-[#0f172a]">Ledger Reconciliation</h3>
               <button
-                onClick={() => handleExportCSV('PharmaFlow_Ledger_Reconciliation.csv')}
+                onClick={() => handleExportCSV('PharmaGPT_Ledger_Reconciliation.csv')}
                 className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1 cursor-pointer"
               >
                 <Download size={14} />

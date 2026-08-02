@@ -1,0 +1,50 @@
+# Run from the repo root: docker compose -f deploy/docker-compose.prod.yml up -d --build
+#
+# Two containers. `backend` is never published to the host - only `edge` can
+# reach it, over the compose network - so the API is not directly reachable
+# from the internet even if someone finds its port; every request has to go
+# through Caddy's basic_auth gate first.
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    volumes:
+      # Cache and any local OCR artifacts survive a redeploy instead of
+      # starting cold every time the image is rebuilt.
+      - backend_datasets:/app/datasets
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  edge:
+    build:
+      context: ..
+      dockerfile: deploy/edge.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    env_file:
+      - .env.prod
+    volumes:
+      # Caddy's ACME account and issued certificates. Losing this volume
+      # doesn't lose data, but it does mean re-requesting certificates from
+      # Let's Encrypt on next start, which is rate-limited - worth keeping.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  backend_datasets:
+  caddy_data:
+  caddy_config:

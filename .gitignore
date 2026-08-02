@@ -5,6 +5,11 @@ __pycache__/
 .env
 datasets/
 
+# Production secrets. ".env" above only matches that exact filename, not
+# "deploy/.env.prod" - a real secrets file living one directory over from
+# .gitignore is exactly the kind of thing that gets committed by accident.
+deploy/.env.prod
+
 # Verification workspace generated artifacts (keep scripts/ README)
 verification/debug_outputs/
 verification/visualizations/

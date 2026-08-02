@@ -30,8 +30,8 @@ DEFAULT_FETCH_TOP = 2
 REQUEST_TIMEOUT = 20
 HEADERS = {
     "User-Agent": (
-        "PharmaFlowCatalogueLookup/1.0 (pharmacy inventory reconciliation; "
-        "contact: admin@pharmaflow.io)"
+        "PharmaGPTCatalogueLookup/1.0 (pharmacy inventory reconciliation; "
+        "contact: admin@pharmagpt.co)"
     )
 }
 

@@ -1,0 +1,35 @@
+# Keeps the build context small and the image free of things that either
+# don't belong in it (git history, node_modules) or that must never leave
+# the developer's machine (.env, local datasets/OCR output).
+
+.git
+.gitignore
+.github
+
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+
+.env
+.env.*
+!.env.prod.example
+
+frontend/node_modules
+frontend/dist
+
+datasets
+local_runs
+forensic_runs
+test_images
+scratch
+verification/debug_outputs
+verification/visualizations
+verification/benchmark_reports
+verification/temp
+verification/comparisons
+
+.DS_Store
+**/.DS_Store
+*.log

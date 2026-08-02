@@ -226,7 +226,7 @@ export const DashboardPage: React.FC = () => {
               </p>
             </div>
             <button
-              onClick={() => window.open('mailto:support@pharmaflow.io')}
+              onClick={() => window.open('mailto:support@pharmagpt.co')}
               className="w-full mt-6 bg-white hover:bg-blue-50 text-[#1b5dfc] font-semibold py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
             >
               Talk to Support

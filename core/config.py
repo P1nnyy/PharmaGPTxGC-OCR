@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     DEFAULT_PHARMACY_ID: str = "default-pharmacy"
     DEFAULT_PHARMACY_NAME: str = "My Pharmacy"
     DEFAULT_USER_ID: str = "default-user"
-    DEFAULT_USER_EMAIL: str = "admin@pharmaflow.local"
+    DEFAULT_USER_EMAIL: str = "admin@pharmagpt.co"
 
     MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024
     IMAGE_MIN_SIDE_PX: int = 256
