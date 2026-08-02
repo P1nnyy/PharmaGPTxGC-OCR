@@ -9,6 +9,15 @@
 # generated with `caddy hash-password` - Caddy refuses plaintext passwords in
 # its config, so there is nothing here to leak even if this file is read by
 # someone who shouldn't have it.
+
+# Anyone who types the www form lands on the canonical apex. This needs its
+# own site block, not just a DNS record: Caddy issues a certificate per site
+# address it is configured for, so a www A record pointing here with no block
+# to match it fails TLS rather than redirecting.
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}
+
 {$DOMAIN} {
 	basic_auth {
 		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
