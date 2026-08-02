@@ -237,6 +237,11 @@ def merge_invoice_pages(pages: List[CanonicalInvoice]) -> CanonicalInvoice:
 
     # Fall back to the line items only when no page stated a subtotal at all,
     # mirroring the single-page normalizer's behaviour.
+    # Captured before the fallback below can back-derive it from the line
+    # items: a subtotal computed by summing amounts cannot then serve as
+    # evidence for how those amounts were computed.
+    printed_subtotal = merged.subtotal
+
     if merged.subtotal is None:
         amounts = [item.amount for item in line_items if isinstance(item.amount, (int, float))]
         if amounts:
@@ -246,7 +251,7 @@ def merge_invoice_pages(pages: List[CanonicalInvoice]) -> CanonicalInvoice:
     # often carries too few rows to infer a formula on its own, but the full
     # invoice does - so a page-2 line whose Amount was unreadable can be
     # derived from the pattern page 1 demonstrates.
-    amount_fill = fill_missing_amounts(line_items)
+    amount_fill = fill_missing_amounts(line_items, printed_total=printed_subtotal)
 
     merged.extraction_engine = next(
         (p.extraction_engine for p in pages if p.extraction_engine), None

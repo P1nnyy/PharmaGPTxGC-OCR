@@ -836,9 +836,16 @@ export const InvoiceReviewPage: React.FC = () => {
   let mathStatus: 'matched' | 'mismatch' | 'missing_fields';
   let mathStatusMessage: string;
 
-  if (isAnyAmountMissing || isSuggestedAmtPresent) {
+  if (isAnyAmountMissing) {
     mathStatus = 'missing_fields';
     mathStatusMessage = 'Missing item amounts';
+  } else if (isSuggestedAmtPresent) {
+    // Present, but worked out rather than read off the page. Saying "missing"
+    // here contradicts the amounts visible in the table right beside it, and
+    // sends the reviewer looking for a blank that isn't there — the thing
+    // actually worth their attention is that these are derived.
+    mathStatus = 'missing_fields';
+    mathStatusMessage = 'Item amounts derived — verify';
   } else if (hasMissingGrandTotal || hasMissingSubtotal) {
     mathStatus = 'missing_fields';
     mathStatusMessage = 'Needs manual review';

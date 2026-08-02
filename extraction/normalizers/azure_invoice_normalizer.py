@@ -1517,6 +1517,11 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
 
     # 7. Merge header fields (footer data takes precedence for totals)
     subtotal = footer_data.get("subtotal") if footer_data.get("subtotal") is not None else doc_subtotal
+    # Kept separate from `subtotal` below, which may end up back-derived from
+    # the line items themselves. Deriving amounts from a total that was itself
+    # derived from those amounts proves nothing, so only a subtotal the
+    # invoice actually printed can serve as evidence for the line formula.
+    printed_subtotal = subtotal
     discount = footer_data.get("discount")
     cgst = footer_data.get("cgst")
     sgst = footer_data.get("sgst")
@@ -1609,7 +1614,13 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # Derive Amount for any line the invoice didn't give us one for, using the
     # formula this invoice's own readable rows demonstrate. Runs after every
     # line item exists so it has the full set to learn from.
-    amount_fill = fill_missing_amounts(line_items)
+    #
+    # The printed subtotal is passed as a second witness, for invoices whose
+    # Amount column has values but no column heading: the extractor cannot
+    # anchor an unlabelled column, so every row comes back blank and there are
+    # no readable amounts to learn from. A formula whose row sum reproduces the
+    # printed total is confirmed by the document rather than assumed.
+    amount_fill = fill_missing_amounts(line_items, printed_total=printed_subtotal)
 
     # 9. Populate metadata
     raw_engine_metadata = {

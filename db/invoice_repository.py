@@ -378,6 +378,33 @@ def _update_invoice_tx(tx, invoice_id: str, header: dict, line_items: Optional[l
     return True
 
 
+def update_line_item_amounts(amounts: dict[str, float]) -> int:
+    """Writes derived Amounts onto existing line items, by line item id.
+
+    Deliberately narrow. The general update path replaces an invoice's line
+    items wholesale, which is right when the review screen resends the whole
+    edited table but wrong for a backfill: it would rewrite every field of
+    every row to correct one column, and any field the read path does not
+    round-trip would be silently dropped on the way through.
+    """
+    if not amounts:
+        return 0
+
+    driver = get_driver()
+    with driver.session() as session:
+        return session.execute_write(
+            lambda tx: tx.run(
+                """
+                UNWIND $rows AS row
+                MATCH (li:LineItem {id: row.id})
+                SET li.amount = row.amount, li.is_estimated_amount = true
+                RETURN count(li) AS updated
+                """,
+                rows=[{"id": k, "amount": v} for k, v in amounts.items()],
+            ).single()["updated"]
+        )
+
+
 def list_invoices(pharmacy_id: Optional[str] = None) -> list[dict]:
     pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
     driver = get_driver()

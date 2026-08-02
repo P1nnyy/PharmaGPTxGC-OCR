@@ -36,6 +36,10 @@ from extraction.normalizers.canonical_invoice import CanonicalLineItem
 # last decimal place, so a small absolute floor plus a tiny relative term.
 _MATCH_ABSOLUTE_TOLERANCE = 0.05
 _MATCH_RELATIVE_TOLERANCE = 0.001
+# Tighter than the per-row figure: matching a whole-invoice total is a single
+# equation rather than several independent agreements, so it has to clear a
+# higher bar before a formula is trusted on that evidence alone.
+_TOTAL_RELATIVE_TOLERANCE = 0.0005
 
 # A formula must be corroborated by at least this many rows, and by this
 # share of the rows it could have explained. Two independent rows agreeing is
@@ -134,18 +138,80 @@ def infer_amount_formula(items: List[CanonicalLineItem]) -> Optional[AmountFormu
     return min(winners, key=lambda c: c.complexity)
 
 
-def fill_missing_amounts(items: List[CanonicalLineItem]) -> Dict[str, Any]:
+def infer_amount_formula_from_total(
+    items: List[CanonicalLineItem], printed_total: Optional[float]
+) -> Optional[AmountFormula]:
+    """Picks the formula whose row sum reproduces the invoice's printed total.
+
+    Row-level inference needs at least one Amount to have been read, and some
+    invoices supply none at all - a distributor whose Amount column has values
+    but no column heading gives the extractor nothing to anchor on, so every
+    row comes back blank and there is no evidence to learn from.
+
+    The footer is the remaining witness. Summing a candidate over every row and
+    comparing against the printed subtotal is a single equation over the whole
+    invoice, and a formula that reproduces it to the paisa is not a guess: the
+    document has confirmed it. On the invoice that prompted this, qty x rate
+    summed to 3747.24 against a printed 3747.24.
+
+    It is deliberately all-or-nothing. Every row must supply a usable quantity
+    and rate, because a sum with rows missing cannot be compared against a
+    total that includes them - it would either reject a correct formula or, far
+    worse, quietly match a wrong one whose error happens to fill the gap.
+    """
+    if printed_total is None or printed_total <= 0:
+        return None
+
+    inputs = [_inputs(item) for item in items]
+    if not inputs or any(i is None for i in inputs):
+        return None
+
+    # Tolerance grows with row count, since each rounded row contributes its
+    # own error to the sum.
+    tolerance = max(_MATCH_ABSOLUTE_TOLERANCE * len(inputs), abs(printed_total) * _TOTAL_RELATIVE_TOLERANCE)
+
+    winners = []
+    for candidate in _CANDIDATES:
+        total = sum(
+            candidate.compute(i["base"], i["d"], i["p"], i["g"]) for i in inputs  # type: ignore[index]
+        )
+        if abs(total - printed_total) <= tolerance:
+            winners.append(candidate)
+
+    if not winners:
+        return None
+
+    # Several formulas can reproduce the same total when the adjustments they
+    # differ by are all zero. Prefer the simplest, as with row-level matching.
+    return min(winners, key=lambda c: c.complexity)
+
+
+def fill_missing_amounts(
+    items: List[CanonicalLineItem], printed_total: Optional[float] = None
+) -> Dict[str, Any]:
     """Derives Amount for rows that lack one, using the invoice's own formula.
 
     Only ever fills a blank - an Amount actually read off the invoice is never
     overwritten. Rows filled here are marked is_estimated_amount so the review
     screen can label them rather than pass them off as extracted.
+
+    Two sources of truth, strongest first: the Amounts this invoice printed on
+    other rows, and failing that its printed total. Row-level evidence is
+    preferred because it is corroborated independently several times over,
+    whereas the total is a single equation that a wrong formula could in
+    principle satisfy by coincidence.
     """
     missing = [item for item in items if _as_float(item.amount) is None]
     if not missing:
         return {"formula": None, "filled": 0}
 
     formula = infer_amount_formula(items)
+    evidence = "printed row amounts"
+
+    if formula is None:
+        formula = infer_amount_formula_from_total(items, printed_total)
+        evidence = "printed invoice total"
+
     if formula is None:
         return {"formula": None, "filled": 0}
 
@@ -160,4 +226,8 @@ def fill_missing_amounts(items: List[CanonicalLineItem]) -> Dict[str, Any]:
         item.is_estimated_amount = True
         filled += 1
 
-    return {"formula": formula.name if filled else None, "filled": filled}
+    return {
+        "formula": formula.name if filled else None,
+        "filled": filled,
+        "evidence": evidence if filled else None,
+    }

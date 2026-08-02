@@ -22,6 +22,8 @@ from enrichment import service as enrichment_service
 
 from extraction.router import get_extraction_engine
 from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
+from extraction.normalizers.amount_inference import fill_missing_amounts
+from extraction.normalizers.canonical_invoice import CanonicalLineItem
 from extraction.normalizers.invoice_merger import check_pages_consistent, merge_invoice_pages
 
 router = APIRouter()
@@ -110,6 +112,59 @@ def update_invoice(invoice_id: str, payload: InvoiceUpdate):
     updated = invoice_repository.get_invoice(invoice_id)
     _attach_image_urls(updated)
     return updated
+
+@router.post("/invoices/{invoice_id}/recompute-amounts")
+def recompute_invoice_amounts(invoice_id: str):
+    """Derives missing line Amounts on an invoice already stored.
+
+    The inference runs during extraction, so an invoice captured before it
+    could read a given format keeps its blanks forever. This re-runs it over
+    the stored rows using the invoice's own printed subtotal, which is what
+    rescues the case this was built for: an Amount column carrying values
+    under no column heading, where nothing anchors the column and every row
+    extracts blank.
+
+    Only blanks are filled, and only when a formula reproduces the printed
+    total. An amount actually read off the page is left alone.
+    """
+    invoice = invoice_repository.get_invoice(invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
+
+    rows = invoice.get("line_items") or []
+    items = [
+        CanonicalLineItem(
+            name=row.get("product_name"),
+            quantity=row.get("quantity"),
+            rate=row.get("rate"),
+            discount=row.get("discount"),
+            discount_percent=row.get("discount_percent"),
+            gst_percent=row.get("gst_percent"),
+            amount=row.get("amount"),
+        )
+        for row in rows
+    ]
+
+    before = [item.amount for item in items]
+    result = fill_missing_amounts(items, printed_total=invoice.get("subtotal"))
+
+    derived = {
+        row["id"]: item.amount
+        for row, item, was in zip(rows, items, before)
+        if was is None and item.amount is not None
+    }
+    updated = invoice_repository.update_line_item_amounts(derived)
+
+    refreshed = invoice_repository.get_invoice(invoice_id)
+    _attach_image_urls(refreshed)
+    return {
+        "status": "ok",
+        "formula": result.get("formula"),
+        "evidence": result.get("evidence"),
+        "updated": updated,
+        "invoice": refreshed,
+    }
+
 
 @router.delete("/invoices/{invoice_id}")
 def delete_invoice(invoice_id: str):
