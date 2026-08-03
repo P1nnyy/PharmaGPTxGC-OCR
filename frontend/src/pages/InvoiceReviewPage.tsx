@@ -103,11 +103,70 @@ const formatQuantityOrDash = (value: any): string => {
 // means the source invoice genuinely never had that value (not that we
 // failed to extract something still fixable), so it's shown as "N/A"
 // rather than the "—" edit-mode placeholder that invites the user to type.
+// Reveals a cell's full value on hover, but ONLY when the cell is too narrow
+// to show it. Overflow is measured on the real element rather than guessed
+// from a character count, because the cell is a fixed-width input in a
+// proportional font - "CENTRUM ADULT JOINT&MOBILITY" and "IIIIIIIIIIIIII" are
+// the same length and nothing like the same width.
+//
+// Deliberately not the native `title` attribute: that waits about a second,
+// cannot be styled, and fires on every cell whether or not anything is
+// hidden. A tooltip that appears when there is nothing more to see trains
+// people to ignore it.
+const TruncatedCell: React.FC<{ value: string | number | null | undefined; children: React.ReactNode }> = ({
+  value,
+  children
+}) => {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [hovering, setHovering] = useState(false);
+
+  const text = value === null || value === undefined ? '' : String(value);
+
+  // Measured on enter rather than on render: column widths change with the
+  // window and with the lock/unlock toggle, so a value cached at mount goes
+  // stale.
+  const measure = () => {
+    const el = wrapRef.current?.querySelector('input, div') as HTMLElement | null;
+    // +1 absorbs sub-pixel rounding, which otherwise reports a perfectly
+    // fitting cell as overflowing.
+    setTruncated(!!el && el.scrollWidth > el.clientWidth + 1);
+  };
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative"
+      onMouseEnter={() => {
+        measure();
+        setHovering(true);
+      }}
+      onMouseLeave={() => setHovering(false)}
+    >
+      {children}
+      {hovering && truncated && text && (
+        // pointer-events-none so the tooltip cannot swallow the click that
+        // was aimed at the input underneath it.
+        <div
+          role="tooltip"
+          className="pointer-events-none absolute left-0 top-full z-50 mt-1 max-w-md whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] px-3 py-2 text-xs font-medium leading-snug text-white shadow-xl"
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ReadOnlyCell: React.FC<{ value: string | number | null | undefined; align?: 'left' | 'right'; bold?: boolean }> = ({ value, align = 'left', bold = false }) => {
   const isEmpty = value === null || value === undefined || value === '';
   return (
+    // `truncate` (overflow-hidden + nowrap + ellipsis) rather than letting the
+    // text wrap: a wrapped cell changes row height and pushes the table
+    // around, and it also makes scrollWidth equal clientWidth, so
+    // TruncatedCell would never detect that anything was cut off.
     <div
-      className={`w-full min-h-[38px] flex items-center px-3 py-2 text-sm rounded-lg ${
+      className={`w-full min-h-[38px] flex items-center px-3 py-2 text-sm rounded-lg truncate ${
         align === 'right' ? 'justify-end text-right' : ''
       } ${bold ? 'font-bold' : ''} ${isEmpty ? 'text-gray-400 italic' : 'text-[#0f172a]'}`}
     >
@@ -1649,24 +1708,27 @@ export const InvoiceReviewPage: React.FC = () => {
                       </td>
 
                       <td className="p-3 pl-5 align-top">
-                        {isLocked ? (
-                          <ReadOnlyCell value={item.product_name} />
-                        ) : (
-                          <input
-                            id={`item-name-${item.id}`}
-                            type="text"
-                            value={item.product_name}
-                            placeholder={hasMissing && !item.product_name ? 'Enter product name...' : '—'}
-                            onFocus={() => handleRowClick(item.id, index)}
-                            onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
-                            className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
-                              isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
-                            }`}
-                          />
-                        )}
+                        <TruncatedCell value={item.product_name}>
+                          {isLocked ? (
+                            <ReadOnlyCell value={item.product_name} />
+                          ) : (
+                            <input
+                              id={`item-name-${item.id}`}
+                              type="text"
+                              value={item.product_name}
+                              placeholder={hasMissing && !item.product_name ? 'Enter product name...' : '—'}
+                              onFocus={() => handleRowClick(item.id, index)}
+                              onChange={(e) => handleItemChange(item.id, 'product_name', e.target.value)}
+                              className={`w-full min-h-[38px] bg-[#f8fafc] border rounded-lg px-3 py-2 text-sm text-[#0f172a] focus:outline-none focus:bg-white focus:border-blue-500 transition-colors ${
+                                isCriticalItemMissing(item, 'product_name') ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'
+                              }`}
+                            />
+                          )}
+                        </TruncatedCell>
                       </td>
 
                       <td className="p-3 align-top">
+                        <TruncatedCell value={item.batch}>
                         {isLocked ? (
                           <ReadOnlyCell value={item.batch} />
                         ) : (
@@ -1682,6 +1744,7 @@ export const InvoiceReviewPage: React.FC = () => {
                             }`}
                           />
                         )}
+                        </TruncatedCell>
                       </td>
 
                       <td className="p-3 align-top">
