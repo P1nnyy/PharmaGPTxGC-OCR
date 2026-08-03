@@ -16,7 +16,9 @@ import {
   X,
   ArrowUp,
   ArrowDown,
-  Layers
+  Layers,
+  RotateCw,
+  RotateCcw
 } from 'lucide-react';
 
 interface UploadJob {
@@ -63,6 +65,9 @@ export const UploadInvoicePage: React.FC = () => {
   const [pageMismatch, setPageMismatch] = useState<any>(null);
   // Lightbox for inspecting a queued page at full size before committing.
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  // The file behind the open lightbox, so a rotation made while enlarged is
+  // written back to that page rather than lost on close.
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
 
   // Helper check: does any bench data exist to clear
   const hasBenchData = () => {
@@ -204,6 +209,31 @@ export const UploadInvoicePage: React.FC = () => {
       pagePreviews.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [pagePreviews]);
+
+  // Per-page preview rotation, in degrees.
+  //
+  // These previews cannot be rotated automatically. The review screen manages
+  // it because Azure returns a page angle, but that only exists after the
+  // extraction call. Before upload the only metadata that could orient an
+  // image is its EXIF Orientation tag, and the photos this actually receives
+  // do not carry one - WhatsApp re-encodes and strips EXIF, baking any
+  // rotation into the pixels. There is nothing left to read, so orientation
+  // here is the reviewer's call rather than a guess.
+  //
+  // Keyed by File identity, not list position: pages get reordered and
+  // removed, and an index-keyed map would silently transfer one page's
+  // rotation onto another.
+  const [pageRotations, setPageRotations] = useState<Map<File, number>>(new Map());
+
+  const rotationOf = (file: File) => pageRotations.get(file) ?? 0;
+
+  const rotatePage = (file: File, delta: 90 | -90) => {
+    setPageRotations((prev) => {
+      const next = new Map(prev);
+      next.set(file, (((rotationOf(file) + delta) % 360) + 360) % 360);
+      return next;
+    });
+  };
 
   const addPageFiles = (incoming: FileList | File[]) => {
     const accepted = Array.from(incoming).filter((f) => f.type.startsWith('image/'));
@@ -397,20 +427,53 @@ export const UploadInvoicePage: React.FC = () => {
                         sheet is which, since camera filenames are opaque. */}
                     <button
                       type="button"
-                      onClick={() => setPreviewUrl(pagePreviews[index])}
+                      onClick={() => { setPreviewUrl(pagePreviews[index]); setPreviewFile(file); }}
                       className="shrink-0 rounded-lg overflow-hidden border border-slate-300 bg-white hover:border-indigo-500 transition-colors cursor-zoom-in"
                       title="Click to enlarge"
                     >
-                      <img
-                        src={pagePreviews[index]}
-                        alt={`Page ${index + 1}`}
-                        className="w-24 h-28 object-cover object-top"
-                      />
+                      {/* The rotation is applied to an inner wrapper rather
+                          than the button, so the thumbnail's footprint in the
+                          row stays the same size whichever way the page is
+                          turned and the list does not jump about. */}
+                      <div className="w-24 h-28 flex items-center justify-center overflow-hidden">
+                        <img
+                          src={pagePreviews[index]}
+                          alt={`Page ${index + 1}`}
+                          style={{ transform: `rotate(${rotationOf(file)}deg)` }}
+                          className={
+                            rotationOf(file) % 180 === 0
+                              ? 'w-24 h-28 object-cover object-top transition-transform'
+                              : // A quarter turn swaps the axes, so the box to
+                                // fit within is the opposite one.
+                                'h-24 w-28 object-cover object-top transition-transform'
+                          }
+                        />
+                      </div>
                     </button>
                     <div className="min-w-0 flex-1">
                       <p className="text-[11px] font-semibold text-[#0f172a] truncate">{file.name}</p>
                       <p className="text-[9px] text-gray-400 font-mono">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                      <p className="text-[9px] text-indigo-600 font-semibold mt-1">Click image to enlarge</p>
+                      <div className="mt-1 flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => rotatePage(file, -90)}
+                          className="p-1 rounded-md border border-slate-300 bg-white text-gray-500 hover:text-indigo-600 hover:border-indigo-400 transition-colors cursor-pointer"
+                          title="Rotate left"
+                          aria-label={`Rotate page ${index + 1} left`}
+                        >
+                          <RotateCcw size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => rotatePage(file, 90)}
+                          className="p-1 rounded-md border border-slate-300 bg-white text-gray-500 hover:text-indigo-600 hover:border-indigo-400 transition-colors cursor-pointer"
+                          title="Rotate right"
+                          aria-label={`Rotate page ${index + 1} right`}
+                        >
+                          <RotateCw size={11} />
+                        </button>
+                        <span className="text-[9px] text-indigo-600 font-semibold ml-1">Click image to enlarge</span>
+                      </div>
                     </div>
                     <div className="flex items-center gap-0.5 shrink-0">
                       <button
@@ -682,20 +745,60 @@ export const UploadInvoicePage: React.FC = () => {
       {previewUrl && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-6 cursor-zoom-out"
-          onClick={() => setPreviewUrl(null)}
+          onClick={() => { setPreviewUrl(null); setPreviewFile(null); }}
         >
+          {/* A quarter turn swaps width and height, so a rotated page sized
+              against max-w/max-h would overflow the viewport on its new long
+              axis. Constraining against the SWAPPED viewport dimension keeps
+              the whole sheet on screen either way, which is the entire point
+              of enlarging it. */}
+          {/* A quarter turn swaps width and height, so a rotated page sized
+              against max-w/max-h would overflow the viewport on its new long
+              axis. Constraining against the SWAPPED viewport dimension keeps
+              the whole sheet on screen either way, which is the entire point
+              of enlarging it. */}
           <img
             src={previewUrl}
             alt="Invoice page preview"
-            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            style={{
+              transform: `rotate(${previewFile ? rotationOf(previewFile) : 0}deg)`,
+              maxWidth: (previewFile ? rotationOf(previewFile) : 0) % 180 === 0 ? '100%' : '85vh',
+              maxHeight: (previewFile ? rotationOf(previewFile) : 0) % 180 === 0 ? '100%' : '85vw',
+            }}
+            className="object-contain rounded-lg shadow-2xl transition-transform"
           />
-          <button
-            onClick={() => setPreviewUrl(null)}
-            className="absolute top-4 right-4 p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors cursor-pointer"
-            title="Close preview"
+
+          {/* Stops clicks on the controls from reaching the backdrop, which
+              closes the lightbox. Rotating here writes through to the same
+              per-page state the thumbnail reads, so the two never disagree. */}
+          <div
+            className="absolute top-4 right-4 flex items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
           >
-            <X size={20} />
-          </button>
+            <button
+              onClick={() => previewFile && rotatePage(previewFile, -90)}
+              className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors cursor-pointer"
+              title="Rotate left"
+              aria-label="Rotate preview left"
+            >
+              <RotateCcw size={18} />
+            </button>
+            <button
+              onClick={() => previewFile && rotatePage(previewFile, 90)}
+              className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors cursor-pointer"
+              title="Rotate right"
+              aria-label="Rotate preview right"
+            >
+              <RotateCw size={18} />
+            </button>
+            <button
+              onClick={() => { setPreviewUrl(null); setPreviewFile(null); }}
+              className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors cursor-pointer"
+              title="Close preview"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </div>
       )}
 
