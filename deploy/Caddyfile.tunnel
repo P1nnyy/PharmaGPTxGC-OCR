@@ -1,0 +1,58 @@
+# Caddy configuration for Cloudflare Tunnel mode (deploy/docker-compose.tunnel.yml).
+#
+# Differs from the VPS Caddyfile in exactly one way that matters: the site
+# address is `:80`, plain HTTP, with no domain and no TLS.
+#
+# That is not a downgrade. With a tunnel, TLS is terminated by Cloudflare at
+# their edge and the connection from Cloudflare to this machine runs inside
+# the tunnel - an outbound, authenticated, encrypted connection cloudflared
+# establishes itself. Caddy never sees the public hostname and could not
+# obtain a Let's Encrypt certificate anyway, because the HTTP-01 challenge
+# would have to reach a port nothing is listening on publicly. Leaving the
+# domain here would make Caddy request a certificate it can never get and
+# retry forever.
+#
+# Everything else - the auth gate, the API routing, the SPA fallback - is
+# identical, so behaviour behind the tunnel matches the VPS deployment.
+:80 {
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	encode gzip
+
+	# `handle` blocks, not a bare matcher on reverse_proxy: only the first
+	# matching block runs, which is what keeps API and SPA routing apart.
+	# With a plain `reverse_proxy @api` plus a top-level `try_files`, the
+	# try_files runs on EVERY request regardless of the matcher - Caddy
+	# executes directives in its own hard-coded order, and try_files sorts
+	# ahead of reverse_proxy - so /health was rewritten to /index.html and
+	# the API returned the SPA's HTML instead of JSON.
+	#
+	# Every path here mirrors the frontend's dev proxy
+	# (frontend/vite.config.ts), so "works in dev" and "works in prod" mean
+	# the same routing.
+	handle /health* {
+		reverse_proxy backend:8000
+	}
+	handle /upload-invoice* {
+		reverse_proxy backend:8000
+	}
+	handle /clear-cache* {
+		reverse_proxy backend:8000
+	}
+	handle /invoices* {
+		reverse_proxy backend:8000
+	}
+	handle /products* {
+		reverse_proxy backend:8000
+	}
+
+	# SPA fallback: /catalogue and /review/<id> are React Router routes with
+	# no file behind them, so a hard refresh must still serve index.html.
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

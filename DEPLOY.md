@@ -16,6 +16,26 @@ have; the rest is already in the repo.
 
 ---
 
+## Pick a mode first
+
+| | **A. Rented VPS** | **B. Your laptop, via Cloudflare Tunnel** |
+| --- | --- | --- |
+| Cost | ~$6/month | Free |
+| Uptime | 24/7 | Only while the laptop is awake and online |
+| Needs a public IP | Yes | **No** |
+| Router / port-forwarding | Ports 80+443 open | **Nothing** — the connection is outbound |
+| TLS certificate | Caddy gets one from Let's Encrypt | Cloudflare provides it |
+| Good for | Real users | Reviewing your own work remotely |
+
+**Mode B is the faster start** and requires no purchase. The two share the
+same images and the same secrets file, so moving from B to A later is a
+change of compose file, not a rebuild of anything.
+
+- Mode A → continue to **step 1** below.
+- Mode B → skip to **[Mode B: laptop via Cloudflare Tunnel](#mode-b-laptop-via-cloudflare-tunnel)**.
+
+---
+
 ## 1. Rent a server **[you]**
 
 Any provider works. This is a CPU-only workload — extraction happens in
@@ -212,6 +232,83 @@ docker compose -f deploy/docker-compose.prod.yml up -d --build
 docker compose -f deploy/docker-compose.prod.yml logs -f backend
 docker compose -f deploy/docker-compose.prod.yml logs -f edge
 ```
+
+---
+
+## Mode B: laptop via Cloudflare Tunnel
+
+Runs the same two containers on your own machine, plus `cloudflared`, which
+opens an **outbound** connection to Cloudflare. Traffic for `pharmagpt.co`
+comes back down that connection.
+
+Nothing listens on a public port, so there is no port-forwarding, no static
+IP, and no firewall change. It works behind home NAT, behind CGNAT, and on
+connections whose ISP blocks inbound 80/443.
+
+### 1. Create the tunnel **[you]**
+
+Cloudflare dashboard → **Zero Trust** → **Networks** → **Tunnels** →
+**Create a tunnel** → **Cloudflared**. Name it (e.g. `pharmagpt-laptop`).
+
+On the install screen choose **Docker**. Cloudflare shows a long
+`docker run` command — you only need **the token string after `--token`**.
+Copy it; it is not shown again.
+
+### 2. Route the hostname **[you]**
+
+Still in the tunnel setup, add a **Public Hostname**:
+
+| Field | Value |
+| --- | --- |
+| Subdomain | *(leave blank for the apex)* |
+| Domain | `pharmagpt.co` |
+| Service type | `HTTP` |
+| URL | `edge:80` |
+
+`HTTP` and `edge:80` are correct and not a security downgrade: that leg runs
+inside the encrypted tunnel and the Docker network. TLS to the browser is
+terminated by Cloudflare.
+
+Cloudflare creates the DNS record for you — you do **not** add an A record
+by hand, and the orange-cloud rule from Mode A does not apply here.
+
+### 3. Secrets file
+
+Same as Mode A step 4, plus the tunnel token:
+
+```bash
+cp deploy/.env.prod.example deploy/.env.prod
+```
+
+Set `TUNNEL_TOKEN=<the token you copied>`, fill in the service credentials,
+and set `BASIC_AUTH_USER` / `BASIC_AUTH_HASH` (remember to escape `$` as
+`$$`). `DOMAIN` is unused in this mode.
+
+### 4. Start
+
+```bash
+docker compose -f deploy/docker-compose.tunnel.yml up -d --build
+```
+
+Then open `https://pharmagpt.co`. You should get the login prompt.
+
+### Keeping the laptop serving
+
+macOS sleeps on lid close and drops network on sleep, which takes the site
+offline. To keep it up while plugged in:
+
+```bash
+sudo pmset -c sleep 0 disablesleep 1
+```
+
+Undo with `sudo pmset -c disablesleep 0`. Note this keeps the machine awake
+and warm, so it is worth turning off when you are done reviewing.
+
+### Moving to a real server later
+
+Same images, same secrets file. Fill in `DOMAIN`, add the A records from
+Mode A step 2, and use `docker-compose.prod.yml` instead of
+`docker-compose.tunnel.yml`. Nothing else changes.
 
 ---
 

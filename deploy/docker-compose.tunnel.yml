@@ -1,0 +1,64 @@
+# Laptop / home-machine deployment via Cloudflare Tunnel.
+#
+#   docker compose -f deploy/docker-compose.tunnel.yml up -d --build
+#
+# Nothing here publishes a port to the host, and nothing needs a public IP,
+# a static IP, or a router port-forward. cloudflared makes an OUTBOUND
+# connection to Cloudflare and traffic for pharmagpt.co is routed back down
+# it - which is why this works behind home NAT, behind CGNAT, and on
+# connections whose ISP blocks inbound 80/443.
+#
+# Trade-off worth being explicit about: the site is up only while this
+# machine is awake and online. Closing the lid takes it offline. Fine for
+# reviewing your own work remotely; not a footing for real users.
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    volumes:
+      - backend_datasets:/app/datasets
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  edge:
+    build:
+      context: ..
+      dockerfile: deploy/edge.tunnel.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    env_file:
+      - .env.prod
+    # `expose`, not `ports`: reachable by cloudflared over the compose
+    # network, never bound to the host. The app is not listening on any
+    # interface of this laptop.
+    expose:
+      - "80"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - edge
+    # --no-autoupdate: an unattended in-place binary swap on a machine
+    # serving live traffic is a surprise, not a feature. Update by pulling a
+    # new image deliberately.
+    command: tunnel --no-autoupdate run
+    environment:
+      # From Cloudflare Zero Trust -> Networks -> Tunnels. Treat as a
+      # credential: it authorises routing traffic to this machine.
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    env_file:
+      - .env.prod
+
+volumes:
+  backend_datasets:
