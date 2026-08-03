@@ -186,9 +186,9 @@ export const ProductsPage: React.FC = () => {
       <div>
         <h2 className="text-2xl font-bold text-[#0f172a] tracking-tight">Product Catalogue</h2>
         <p className="text-gray-500 text-sm">
-          Every medicine seen on a scanned invoice, resolved into one master record. Confirm what each
-          item actually is — strength, form and units per pack — so stock and tax stop depending on how a
-          distributor happened to spell it.
+          Every medicine on a <span className="font-semibold text-gray-600">verified</span> invoice,
+          resolved into one master record. Confirm what each item actually is — strength, form and units
+          per pack — so stock and tax stop depending on how a distributor happened to spell it.
         </p>
       </div>
 
@@ -316,8 +316,12 @@ export const ProductsPage: React.FC = () => {
                     {searchTerm
                       ? 'No products match that search.'
                       : statusFilter === 'needs_review'
-                      ? 'Nothing waiting for review — every scanned item has been classified.'
-                      : 'No products yet. Scan an invoice and its items will appear here.'}
+                      ? 'Nothing waiting for review — every item on a verified invoice has been classified.'
+                      : // Says "verified", not just "scanned": items only reach
+                        // the catalogue once an invoice has been checked, so
+                        // "scan an invoice and they appear here" would send
+                        // someone hunting for a bug that isn't one.
+                        'No products yet. Items appear here once you mark an invoice as verified.'}
                   </td>
                 </tr>
               ) : (

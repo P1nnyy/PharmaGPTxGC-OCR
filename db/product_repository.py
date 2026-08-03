@@ -363,17 +363,33 @@ def _decorate(product: dict) -> dict:
 # Read path
 # --------------------------------------------------------------------------
 
+# The catalogue is master data, so only invoices a human has actually checked
+# may contribute to it. Extraction runs before anyone has looked at the
+# result, and a bad read produces convincing-looking rows - a tax footer line
+# came through as the product "VEE 2980.89*2.5+2.5%=74.51SGST+74.51CGST" -
+# which would otherwise be written into the permanent catalogue by the act of
+# uploading alone.
+#
+# Applied as a read filter rather than by withholding the write: the graph
+# still records what each invoice said, so verifying an invoice later surfaces
+# its products immediately with their full history intact, and un-verifying
+# one takes them back out. Nothing has to be replayed either way.
+VERIFIED_ONLY = "inv.status = 'verified'"
+
+
 def _aggregate_query(single: bool = False) -> str:
     """Rolls a product up with the invoice evidence behind it.
 
-    Scoped to one pharmacy's invoices: Product nodes are shared across
-    tenants, but "how many times have I bought this and at what price" is
-    emphatically not.
+    Scoped to one pharmacy's VERIFIED invoices: Product nodes are shared
+    across tenants, but "how many times have I bought this and at what price"
+    is emphatically not - and neither figure should count purchases nobody has
+    confirmed yet.
     """
     selector = "(p:Product {id: $product_id})" if single else "(p:Product)"
     return f"""
 MATCH {selector}<-[:OF_PRODUCT]-(li:LineItem)<-[:CONTAINS]-(inv:Invoice)
       -[:BELONGS_TO]->(:Pharmacy {{id: $pharmacy_id}})
+WHERE {VERIFIED_ONLY}
 OPTIONAL MATCH (p)<-[:RESOLVES_TO]-(a:ProductAlias)
 OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
 OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
@@ -492,9 +508,14 @@ def get_product(product_id: str, pharmacy_id: Optional[str] = None) -> Optional[
 
 def _observations_tx(tx, product_id: str, pharmacy_id: str) -> list[dict]:
     result = tx.run(
-        """
-        MATCH (p:Product {id: $product_id})<-[:OF_PRODUCT]-(li:LineItem)
-              <-[:CONTAINS]-(inv:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
+        f"""
+        MATCH (p:Product {{id: $product_id}})<-[:OF_PRODUCT]-(li:LineItem)
+              <-[:CONTAINS]-(inv:Invoice)-[:BELONGS_TO]->(:Pharmacy {{id: $pharmacy_id}})
+        // Same verified-only rule as the summary above. Without it a
+        // product's price range would mix confirmed purchases with unreviewed
+        // ones, and an unreviewed misread price would raise a price-conflict
+        // flag against data nobody has stood behind.
+        WHERE {VERIFIED_ONLY}
         OPTIONAL MATCH (li)-[:OF_ALIAS]->(a:ProductAlias)
         OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
         OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
@@ -871,7 +892,11 @@ def reparse_products(pharmacy_id: Optional[str] = None) -> dict:
                 for r in tx.run(
                     """
                     MATCH (p:Product)<-[:OF_PRODUCT]-(li:LineItem)
-                          <-[:CONTAINS]-(:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
+                          <-[:CONTAINS]-(inv:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
+                    // Verified only, matching the read path: re-parsing a
+                    // product nobody can see would report work done on rows
+                    // that are not in the catalogue yet.
+                    WHERE inv.status = 'verified'
                     OPTIONAL MATCH (p)<-[:RESOLVES_TO]-(a:ProductAlias)
                     WITH p, collect(DISTINCT a.raw_name) AS names,
                          collect(DISTINCT li.pack) AS packs
