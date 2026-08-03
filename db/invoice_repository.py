@@ -6,6 +6,7 @@ from core.logger import logger
 from db import product_repository
 from db.graph_db import get_driver
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
+from extraction.normalizers.quantity_check import check_free_quantity
 
 
 def _serialize_node(node) -> dict:
@@ -582,6 +583,15 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         li["batch_number"] = row["batch"].get("batch_number") if row["batch"] else li.get("batch")
         li["expiry_date"] = row["batch"].get("expiry_date") if row["batch"] else li.get("expiry")
         line_items.append(li)
+
+    # Computed on read rather than stored: it is a reading of the row, not a
+    # fact about it, so it must reflect whatever the row currently holds -
+    # including edits a reviewer just made. Stored, it would go stale the
+    # moment someone corrected the quantity by hand.
+    for li in line_items:
+        suggestion = check_free_quantity(li)
+        li["quantity_suggestion"] = suggestion.model_dump() if suggestion else None
+
     data["line_items"] = line_items
 
     return data

@@ -61,6 +61,17 @@ interface TableLineItem {
   amount: number | null;
   is_suggested_amount?: boolean;
   bounding_box?: number[];
+  // Set by the backend when billed + free lands short of a whole pack.
+  // Advisory only — nothing is applied until the reviewer accepts it.
+  quantity_suggestion?: {
+    field: string;
+    current: number;
+    suggested: number;
+    total_before: number;
+    total_after: number;
+    reason: string;
+    billed_verified: boolean;
+  } | null;
 }
 
 // Helper: Check if a value is present (non-empty string, non-null, non-undefined)
@@ -762,6 +773,7 @@ export const InvoiceReviewPage: React.FC = () => {
             gst_percent: toNumberOrNull(item.gst_percent),
             amount: finalAmount,
             is_suggested_amount: is_suggested_amount,
+            quantity_suggestion: item.quantity_suggestion ?? null,
             bounding_box: Array.isArray(item.bounding_box) ? item.bounding_box : undefined,
           };
         });
@@ -1803,6 +1815,48 @@ export const InvoiceReviewPage: React.FC = () => {
                           {hasFreeQty && (
                             <div className="text-[10px] text-gray-500 whitespace-nowrap text-right">
                               {formatQuantityOrDash(billedQty)} billed + {formatQuantityOrDash(freeQty)} free = {formatQuantityOrDash(receivedQty)}
+                            </div>
+                          )}
+
+                          {/* A received total that is not a whole pack. Shown
+                              rather than applied: quantity feeds stock, and a
+                              number nobody agreed to is what this screen
+                              exists to prevent. The arithmetic is spelled out
+                              so the claim can be checked, not just trusted.
+
+                              Gated on the CURRENT total, not just on the
+                              backend's suggestion: the suggestion was computed
+                              when the invoice loaded, so keying off it alone
+                              would leave the warning on screen after the
+                              reviewer had already acted on it — or after they
+                              fixed the row some other way. */}
+                          {item.quantity_suggestion && !isLocked &&
+                           receivedQty !== null &&
+                           Math.abs(receivedQty - Math.round(receivedQty)) > 1e-6 && (
+                            <div className="mt-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-left">
+                              <div className="flex items-start gap-1.5">
+                                <AlertTriangle size={11} className="mt-0.5 shrink-0 text-amber-600" />
+                                <div className="min-w-0">
+                                  <p className="text-[10px] font-semibold leading-snug text-amber-800">
+                                    Received {formatQuantityOrDash(item.quantity_suggestion.total_before)} — not a whole pack
+                                  </p>
+                                  <p className="mt-0.5 text-[9px] leading-snug text-amber-700">
+                                    {item.quantity_suggestion.reason}
+                                  </p>
+                                  <button
+                                    onClick={() =>
+                                      handleItemChange(
+                                        item.id,
+                                        'free_quantity',
+                                        item.quantity_suggestion!.suggested
+                                      )
+                                    }
+                                    className="mt-1 rounded-md border border-amber-300 bg-white px-2 py-0.5 text-[9px] font-bold text-amber-800 transition-colors hover:bg-amber-100 cursor-pointer"
+                                  >
+                                    Set free to {formatQuantityOrDash(item.quantity_suggestion.suggested)} → {formatQuantityOrDash(item.quantity_suggestion.total_after)}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>
