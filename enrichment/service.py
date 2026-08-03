@@ -19,8 +19,16 @@ from pydantic import BaseModel
 from core.logger import logger
 from enrichment.index import open_index
 from enrichment.matcher import MatchCandidate, STRONG_SCORE, find_matches
-from enrichment.sources import onemg
+from enrichment.sources import onemg, pharmeasy
 from enrichment.sources.base import ProductFacts
+
+# Which extractor reads which site's pages. Keyed by the source name stored
+# on each indexed listing, so adding a source is a matter of indexing it and
+# registering it here - the matcher and the review UI are already agnostic.
+_EXTRACTORS = {
+    onemg.SOURCE_NAME: onemg.facts_from_html,
+    pharmeasy.SOURCE_NAME: pharmeasy.facts_from_html,
+}
 
 # How many matches get their product page fetched. The rest are returned as
 # name-level matches only - enough for a reviewer to spot the right one and
@@ -131,9 +139,14 @@ def enrich_product(product: dict, fetch_top: int = DEFAULT_FETCH_TOP) -> Enrichm
     index = open_index()
     if index is None:
         result.status = "no_index"
+        # Phrased for the pharmacist who clicked the button, not the person
+        # who deploys the server. The previous wording handed them a shell
+        # command, which is neither something they can act on nor a hint that
+        # anything is wrong with their data.
         result.message = (
-            "Reference catalogue has not been built yet. "
-            "Run: python scripts/build_reference_index.py"
+            "Online lookup is not available yet — the reference catalogue of "
+            "medicines has not been downloaded on this server. Everything else "
+            "on this page works normally."
         )
         return result
 
@@ -153,12 +166,23 @@ def enrich_product(product: dict, fetch_top: int = DEFAULT_FETCH_TOP) -> Enrichm
     session = requests.Session()
     for position, match in enumerate(matches):
         suggestion = Suggestion(match=match)
+        extractor = _EXTRACTORS.get(match.source)
 
-        if position < fetch_top and match.source == onemg.SOURCE_NAME:
+        if position < fetch_top and extractor:
             html = _fetch_page(match.url, session)
             if html:
-                facts = onemg.facts_from_html(html, match.url)
+                facts = extractor(html, match.url)
                 if facts:
+                    # Pack size and units per pack come from the listing's URL
+                    # rather than its page - PharmEasy spells them out there
+                    # ("strip-of-15-tablets") and the page's structured data
+                    # does not carry them at all. Taken from the index so the
+                    # figure is available without a second request, and only
+                    # where the page itself said nothing.
+                    if facts.pack_size is None and match.pack_size:
+                        facts.pack_size = match.pack_size
+                    if facts.pack_multiplier is None and match.pack_multiplier:
+                        facts.pack_multiplier = match.pack_multiplier
                     suggestion.facts = facts
                     suggestion.fields = _diff_fields(product, facts)
 

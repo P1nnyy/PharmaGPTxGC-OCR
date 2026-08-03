@@ -48,12 +48,41 @@ _SLUG_STRENGTH_RE = re.compile(r"\b\d+(?:\.\d+)?(?:mcg|mg|iu|ml|gm|%)\b", re.IGN
 # one of them is right.
 _SLUG_BARE_STRENGTH_RE = re.compile(r"-(\d+(?:\.\d+)?)$")
 
+# Longest/most specific first: "oral-solution" must be tried before
+# "solution", or the "oral" is left behind and indexes as part of the brand
+# ("LEVESAM ORAL"), which no invoice will ever spell.
 _SLUG_FORMS = [
-    "tablet-md", "tablet-dt", "tablet", "capsule", "injection", "syrup",
-    "suspension", "solution", "eye-drop", "ear-drop", "nasal-spray", "drop",
-    "cream", "ointment", "gel", "lotion", "powder", "sachet", "granules",
-    "respule", "rotacap", "inhaler", "spray", "soap", "shampoo", "kit",
+    "tablet-md", "tablet-dt", "oral-solution", "oral-suspension", "oral-drops",
+    "eye-ointment", "eye-drop", "ear-drop", "nasal-spray", "nasal-drop",
+    "tablet", "capsule", "injection", "syrup", "suspension", "solution",
+    "drop", "cream", "ointment", "gel", "lotion", "powder", "sachet",
+    "granules", "respule", "rotacap", "inhaler", "spray", "soap", "shampoo",
+    "kit",
 ]
+
+# The unit inside "strip-of-15-tablets" names the dosage form as well as
+# counting it. Without this the pack pattern consumes the only occurrence of
+# "tablets" in the slug and the form comes back unknown - losing information
+# the URL plainly stated.
+_PE_UNIT_TO_FORM = {
+    "tablet": "Tablet", "tablets": "Tablet",
+    "capsule": "Capsule", "capsules": "Capsule",
+    "sachet": "Sachet", "sachets": "Sachet",
+    "vial": "Vial", "vials": "Vial",
+    "ampoule": "Ampoule", "ampoules": "Ampoule",
+    "injection": "Injection", "injections": "Injection",
+    "suppository": "Suppository", "suppositories": "Suppository",
+    "respule": "Respule", "respules": "Respule",
+}
+
+# PharmEasy spells the pack out in the URL - "strip-of-15-tablets",
+# "bottle-of-100-ml" - which is the units-per-pack figure the catalogue most
+# often lacks, available without fetching anything. 1mg's slugs never carry
+# it, so this is the one place the two sources differ materially.
+_PE_PACK_STRIP_RE = re.compile(
+    r"(?:strip|pack|box|bottle|jar|tube|packet|sachet)-of-(\d+)-([a-z]+)", re.IGNORECASE
+)
+_PE_PACK_MEASURE_RE = re.compile(r"-(\d+(?:\.\d+)?)-?(ml|gm|g|mg|l)(?:-|$)", re.IGNORECASE)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
@@ -63,23 +92,72 @@ CREATE TABLE IF NOT EXISTS listings (
     display     TEXT NOT NULL,
     brand_key   TEXT NOT NULL,
     strength    TEXT,
-    form        TEXT
+    form        TEXT,
+    pack_size   TEXT,
+    pack_multiplier INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_brand_key ON listings(brand_key);
 CREATE INDEX IF NOT EXISTS idx_source    ON listings(source);
 """
 
+# Columns added after the first version of this table shipped. SQLite has no
+# "ADD COLUMN IF NOT EXISTS", and an index built by an older version is worth
+# keeping rather than forcing a multi-hundred-thousand-row re-crawl.
+_MIGRATIONS = [
+    ("pack_size", "ALTER TABLE listings ADD COLUMN pack_size TEXT"),
+    ("pack_multiplier", "ALTER TABLE listings ADD COLUMN pack_multiplier INTEGER"),
+]
 
-def slug_to_fields(slug: str) -> dict:
-    """Reads brand, strength and form out of a product slug.
 
-    Order matters: the strength and form tokens are removed before what
+def _pharmeasy_pack(path: str) -> tuple[Optional[str], Optional[int], str, Optional[str]]:
+    """Reads the pack out of a PharmEasy slug.
+
+    Returns (pack_size, units_per_pack, remaining_text, form_hint).
+
+    "strip-of-15-tablets" is fifteen countable units; "bottle-of-100-ml" is
+    one container holding 100ml. Distinguishing them is the same
+    count-versus-measure question the invoice pack codes raise, with the same
+    consequence for getting it backwards - stock inflated or deflated by the
+    size of the pack.
+    """
+    strip = _PE_PACK_STRIP_RE.search(path)
+    if strip:
+        count = int(strip.group(1))
+        unit = strip.group(2).lower()
+        remainder = path.replace(strip.group(0), " ")
+        if unit.startswith(("ml", "gm", "g", "l")):
+            # A measure, not a count: one container of that size.
+            return f"{count}{unit.upper()}", 1, remainder, None
+        return f"{count}'S", count, remainder, _PE_UNIT_TO_FORM.get(unit)
+
+    measure = _PE_PACK_MEASURE_RE.search(path)
+    if measure:
+        unit = measure.group(2).upper()
+        # mg is a dose, not a container size - leave it for the strength
+        # pattern rather than reading it as a pack.
+        if unit != "MG":
+            return f"{measure.group(1)}{unit}", 1, path.replace(measure.group(0), "-"), None
+
+    return None, None, path, None
+
+
+def slug_to_fields(slug: str, source: str = "1mg") -> dict:
+    """Reads brand, strength, form and pack out of a product slug.
+
+    Order matters: the pack, strength and form tokens are removed before what
     remains is treated as the brand, otherwise "dulohox-20mg-tablet" would
     yield a brand of "dulohox 20mg tablet" and never match an invoice line
     that printed only "DULOHOX".
     """
     path = slug.rsplit("/", 1)[-1]
     path = _SLUG_ID_RE.sub("", path)
+    display_source = path
+
+    pack_size = None
+    pack_multiplier = None
+    pack_form_hint = None
+    if source.lower() == "pharmeasy":
+        pack_size, pack_multiplier, path, pack_form_hint = _pharmeasy_pack(path)
 
     strengths = _SLUG_STRENGTH_RE.findall(path)
     strength = "+".join(s.upper().replace(" ", "") for s in strengths) if strengths else None
@@ -89,6 +167,10 @@ def slug_to_fields(slug: str) -> dict:
         if re.search(rf"(?:^|-){re.escape(candidate)}(?:-|$)", path):
             form = candidate.replace("-", " ").title()
             break
+    # Falls back to what the pack itself named, for slugs where the pack
+    # pattern already consumed the only mention of the form.
+    if form is None:
+        form = pack_form_hint
 
     brand = path
     brand = _SLUG_STRENGTH_RE.sub(" ", brand)
@@ -111,10 +193,14 @@ def slug_to_fields(slug: str) -> dict:
     brand = re.sub(r"\s+", " ", brand).strip()
 
     return {
-        "display": re.sub(r"[-_]+", " ", path).strip(),
+        # Built from the slug BEFORE the pack was stripped, so the reviewer
+        # sees the listing as it is actually named.
+        "display": re.sub(r"[-_]+", " ", display_source).strip(),
         "brand_key": normalize_name(brand),
         "strength": strength,
         "form": form,
+        "pack_size": pack_size,
+        "pack_multiplier": pack_multiplier,
     }
 
 
@@ -127,7 +213,19 @@ class ReferenceIndex:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """Adds columns introduced after an index was first built.
+
+        Re-crawling several hundred thousand listings to gain two columns
+        would be a lot of pointless load on someone else's servers.
+        """
+        existing = {r["name"] for r in self.conn.execute("PRAGMA table_info(listings)")}
+        for column, statement in _MIGRATIONS:
+            if column not in existing:
+                self.conn.execute(statement)
 
     def close(self):
         self.conn.close()
@@ -143,12 +241,13 @@ class ReferenceIndex:
         rows = []
         for url in urls:
             slug = url.replace(base_url, "") if base_url else url
-            fields = slug_to_fields(slug)
+            fields = slug_to_fields(slug, source)
             if not fields["brand_key"]:
                 continue
             rows.append((
                 slug, source, url, fields["display"],
                 fields["brand_key"], fields["strength"], fields["form"],
+                fields.get("pack_size"), fields.get("pack_multiplier"),
             ))
 
         if not rows:
@@ -156,13 +255,17 @@ class ReferenceIndex:
 
         self.conn.executemany(
             """
-            INSERT INTO listings (slug, source, url, display, brand_key, strength, form)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO listings
+                (slug, source, url, display, brand_key, strength, form,
+                 pack_size, pack_multiplier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 display = excluded.display,
                 brand_key = excluded.brand_key,
                 strength = excluded.strength,
-                form = excluded.form
+                form = excluded.form,
+                pack_size = excluded.pack_size,
+                pack_multiplier = excluded.pack_multiplier
             """,
             rows,
         )
@@ -193,7 +296,8 @@ class ReferenceIndex:
 
         cur = self.conn.execute(
             """
-            SELECT slug, source, url, display, brand_key, strength, form
+            SELECT slug, source, url, display, brand_key, strength, form,
+                   pack_size, pack_multiplier
             FROM listings
             WHERE brand_key = ? OR brand_key LIKE ?
             LIMIT ?

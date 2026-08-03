@@ -51,6 +51,11 @@ class MatchCandidate(BaseModel):
     listing_brand: str
     listing_strength: Optional[str] = None
     listing_form: Optional[str] = None
+    # Read from the listing's URL during indexing, where some sources spell
+    # the pack out ("strip-of-15-tablets"). Carried through so the suggestion
+    # can offer units-per-pack without a second request.
+    pack_size: Optional[str] = None
+    pack_multiplier: Optional[int] = None
 
     score: float
     brand_score: float
@@ -179,6 +184,8 @@ def score_candidate(
         listing_brand=listing_brand,
         listing_strength=candidate.get("strength"),
         listing_form=candidate.get("form"),
+        pack_size=candidate.get("pack_size"),
+        pack_multiplier=candidate.get("pack_multiplier"),
         score=round(score, 1),
         brand_score=float(brand_score),
         strength_verified=strength_verified,

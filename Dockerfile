@@ -53,7 +53,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # directory needs to do on first request. Chowning the directory itself
     # here, before it has any contents, covers every subdirectory the app
     # creates later - datasets/ocr_results included - not just this one.
-    && chown app:app /app
+    && chown app:app /app \
+    # datasets/ is excluded by .dockerignore, so without this line the
+    # directory does not exist in the image at all. Docker then creates the
+    # mount point for the named volume itself, as root, and the app user
+    # cannot write to its own cache or reference index - the volume mount
+    # replaces whatever the chown above did. Creating it here, owned by app,
+    # gives Docker something to copy ownership FROM when it initialises the
+    # volume.
+    && mkdir -p /app/datasets \
+    && chown app:app /app/datasets
 
 COPY --from=builder --chown=app:app /root/.local /home/app/.local
 
