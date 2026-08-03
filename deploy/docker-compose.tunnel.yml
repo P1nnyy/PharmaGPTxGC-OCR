@@ -53,10 +53,16 @@ services:
     # serving live traffic is a surprise, not a feature. Update by pulling a
     # new image deliberately.
     command: tunnel --no-autoupdate run
-    environment:
-      # From Cloudflare Zero Trust -> Networks -> Tunnels. Treat as a
-      # credential: it authorises routing traffic to this machine.
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    # TUNNEL_TOKEN comes from .env.prod and must NOT also be declared under
+    # `environment:`. An `environment: TUNNEL_TOKEN=${TUNNEL_TOKEN}` entry
+    # takes precedence over env_file, and ${TUNNEL_TOKEN} reads the SHELL's
+    # environment - not the file - so with the token only in .env.prod it
+    # expands to an empty string and overrides the real value. The tunnel
+    # then starts with no credentials and fails with an error that points
+    # nowhere near the actual cause.
+    #
+    # From Cloudflare Zero Trust -> Networks -> Tunnels. Treat as a
+    # credential: it authorises routing traffic to this machine.
     env_file:
       - .env.prod
 
