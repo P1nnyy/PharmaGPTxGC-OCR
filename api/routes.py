@@ -95,6 +95,9 @@ class InvoiceUpdate(BaseModel):
     roundoff: Optional[float] = None
     status: Optional[str] = None
     line_items: Optional[List[LineItemUpdate]] = None
+    # Opt-in required to clear an invoice's table, so that an empty line_items
+    # array arriving by accident cannot delete rows. See EmptyLineItemsError.
+    allow_empty_line_items: Optional[bool] = False
 
 @router.patch("/invoices/{invoice_id}")
 def update_invoice(invoice_id: str, payload: InvoiceUpdate):
@@ -105,7 +108,19 @@ def update_invoice(invoice_id: str, payload: InvoiceUpdate):
         else None
     )
 
-    ok = invoice_repository.update_invoice(invoice_id, header, line_items, payload.status)
+    try:
+        ok = invoice_repository.update_invoice(
+            invoice_id,
+            header,
+            line_items,
+            payload.status,
+            allow_empty_line_items=bool(payload.allow_empty_line_items),
+        )
+    except invoice_repository.EmptyLineItemsError as exc:
+        # 409, not 400: the payload is well-formed, it just conflicts with the
+        # invoice's current state. Nothing was written.
+        raise HTTPException(status_code=409, detail=str(exc))
+
     if not ok:
         raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
 

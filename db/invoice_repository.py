@@ -329,18 +329,50 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
         )
 
 
+class EmptyLineItemsError(RuntimeError):
+    """A save asked to replace every line item on an invoice with nothing.
+
+    The review UI resends the whole table on every save, so an empty array is
+    indistinguishable at this layer from "the user deleted all 16 rows" and
+    "something went wrong upstream and sent us nothing" — a save fired before
+    the fetch resolved, a failed reload, a lost response. Those look identical
+    on the wire and one of them silently destroys a verified invoice.
+
+    So an empty replacement is refused by default and the caller must opt in
+    via allow_empty_line_items, which is the one thing an accidental payload
+    will not do.
+    """
+
+    def __init__(self, invoice_id: str, existing_count: int):
+        self.invoice_id = invoice_id
+        self.existing_count = existing_count
+        super().__init__(
+            f"Refusing to delete all {existing_count} line item(s) on invoice "
+            f"{invoice_id}: the update carried an empty line_items array. Pass "
+            f"allow_empty_line_items=True if clearing the table is intended."
+        )
+
+
 def update_invoice(
     invoice_id: str,
     header: dict,
     line_items: Optional[list] = None,
     status: Optional[str] = None,
+    allow_empty_line_items: bool = False,
 ) -> bool:
     """Applies a partial update to an invoice's header fields/status, and — if
     line_items is provided — replaces the invoice's line items wholesale (matching
-    how the review UI always resends the full edited table)."""
+    how the review UI always resends the full edited table).
+
+    Raises EmptyLineItemsError if that replacement would wipe existing items and
+    allow_empty_line_items is not set. Nothing is written in that case, header
+    fields included: the transaction is rolled back whole rather than leaving an
+    invoice whose totals no longer describe its rows."""
     driver = get_driver()
     with driver.session() as session:
-        return session.execute_write(_update_invoice_tx, invoice_id, header, line_items, status)
+        return session.execute_write(
+            _update_invoice_tx, invoice_id, header, line_items, status, allow_empty_line_items
+        )
 
 
 _EDITABLE_HEADER_FIELDS = {
@@ -350,10 +382,32 @@ _EDITABLE_HEADER_FIELDS = {
 }
 
 
-def _update_invoice_tx(tx, invoice_id: str, header: dict, line_items: Optional[list], status: Optional[str]) -> bool:
+def _update_invoice_tx(
+    tx,
+    invoice_id: str,
+    header: dict,
+    line_items: Optional[list],
+    status: Optional[str],
+    allow_empty_line_items: bool = False,
+) -> bool:
     exists = tx.run("MATCH (inv:Invoice {id: $id}) RETURN inv.id AS id", id=invoice_id).single()
     if not exists:
         return False
+
+    # Checked before any write so the raise below rolls back an untouched
+    # transaction rather than one that has already rewritten the header.
+    if line_items is not None and not line_items and not allow_empty_line_items:
+        existing_count = tx.run(
+            """
+            MATCH (:Invoice {id: $id})-[:CONTAINS]->(li:LineItem)
+            RETURN count(li) AS n
+            """,
+            id=invoice_id,
+        ).single()["n"]
+        # An invoice with no rows yet has nothing to lose; only a destructive
+        # replacement is worth blocking.
+        if existing_count > 0:
+            raise EmptyLineItemsError(invoice_id, existing_count)
 
     set_clauses = []
     params: dict = {"id": invoice_id}

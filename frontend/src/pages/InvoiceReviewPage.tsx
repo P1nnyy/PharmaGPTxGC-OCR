@@ -320,6 +320,10 @@ export const InvoiceReviewPage: React.FC = () => {
   });
 
   const [lineItems, setLineItems] = useState<TableLineItem[]>([]);
+  // True only when the user emptied the table themselves, row by row. Gates the
+  // backend's refusal to accept an empty line_items array (EmptyLineItemsError),
+  // so an empty array from any other cause cannot delete a saved invoice's rows.
+  const [clearedTableDeliberately, setClearedTableDeliberately] = useState(false);
   const [confidence, setConfidence] = useState(85);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -779,6 +783,8 @@ export const InvoiceReviewPage: React.FC = () => {
         });
 
         setLineItems(parsedItems);
+        // Fresh data on screen: any earlier intent to clear the table is spent.
+        setClearedTableDeliberately(false);
         setHeader((prev) => {
           if (!isPresent(prev.subtotal) && parsedItems.length > 0) {
             const sum = parsedItems.reduce((acc, it) => acc + (it.amount || 0), 0);
@@ -865,7 +871,17 @@ export const InvoiceReviewPage: React.FC = () => {
 
   // Delete line item row
   const handleDeleteRow = (itemId: string) => {
-    setLineItems((prev) => prev.filter((item) => item.id !== itemId));
+    setLineItems((prev) => {
+      const next = prev.filter((item) => item.id !== itemId);
+      // Emptying the table by deleting rows is a deliberate act, and the only
+      // way the backend will accept an empty line_items array. Any other route
+      // to an empty array — a save racing the initial fetch, a failed reload —
+      // leaves this false and is refused rather than wiping the invoice.
+      if (next.length === 0) {
+        setClearedTableDeliberately(true);
+      }
+      return next;
+    });
     if (selectedItemId === itemId) {
       setSelectedItemId(null);
     }
@@ -987,6 +1003,7 @@ export const InvoiceReviewPage: React.FC = () => {
     grand_total: header.grand_total,
     roundoff: header.roundoff,
     ...(status ? { status } : {}),
+    allow_empty_line_items: clearedTableDeliberately,
     line_items: lineItems.map((item) => ({
       name: item.product_name || null,
       pack: item.pack || null,
@@ -1324,7 +1341,14 @@ export const InvoiceReviewPage: React.FC = () => {
           marginRight: '-1.5rem',
           paddingLeft: '1.5rem',
           paddingRight: '1.5rem',
-          maxHeight: 'calc(100vh - 88px)',
+          // Never let the pinned scan/summary panel take the whole viewport:
+          // it stays put while the items scroll under it, so whatever it
+          // occupies is permanently unavailable to the table. Capping it at
+          // 62vh keeps at least a third of the screen on the line items at any
+          // window height. On a normal laptop the panel is shorter than the cap
+          // anyway, so this changes nothing there.
+          maxHeight: 'min(calc(100vh - 88px), 62vh)',
+          overflowY: 'auto',
         }}
       >
         {/* Two Panel Layout Grid */}
@@ -1637,13 +1661,24 @@ export const InvoiceReviewPage: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
+      {/* END STICKY HEADER BLOCK */}
 
-        {/* ===================================================================
-            LINE ITEMS CARD — title bar + table merged into one seamless,
-            flex-1 card so it fills whatever space remains under the sticky
-            scan/summary section, with only the row body scrolling internally.
-            ================================================================ */}
-        <div className="flex-1 min-h-0 flex flex-col bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden mb-8">
+      {/* ===================================================================
+          LINE ITEMS CARD — sits *outside* the sticky block on purpose.
+
+          It used to be the sticky block's last child, which capped it at
+          `calc(100vh - 88px)` minus the scan/summary grid above it. That grid
+          is shrink-0, so the card was the only thing able to absorb a
+          shortfall: on a short window, or when the summary grew (multi-page
+          invoices add page navigation), the card's share fell to 0px and every
+          row was clipped away while the shrink-0 title bar kept reporting the
+          real count — "Line Items Review (16)" over an empty table.
+
+          Sizing to content and letting <main> scroll means the row count and
+          the rows visible on screen can no longer disagree, at any height.
+          ================================================================ */}
+      <div className="flex flex-col bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden mb-8">
           <div className="shrink-0 p-4 flex items-center justify-between border-b border-[#e2e8f0]">
             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
               Line Items Review ({lineItems.length})
@@ -1657,7 +1692,7 @@ export const InvoiceReviewPage: React.FC = () => {
               <span>Add Row</span>
             </button>
           </div>
-          <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
+          <div className="overflow-x-auto custom-scrollbar">
           <table className="w-full min-w-[1160px] text-left text-xs border-collapse">
             <thead
               className="sticky top-0 z-20 bg-[#f8fafc] text-gray-500 font-semibold text-[10px] uppercase tracking-wider shadow-xs border-b border-[#e2e8f0]"
@@ -1925,8 +1960,7 @@ export const InvoiceReviewPage: React.FC = () => {
           </table>
         </div>
       </div>
-      </div>
-      {/* END STICKY HEADER BLOCK */}
+      {/* END LINE ITEMS CARD */}
 
       {/* Delete Invoice Confirmation Dialog */}
       {showDeleteConfirm && (
