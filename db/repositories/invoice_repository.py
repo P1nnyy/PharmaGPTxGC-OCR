@@ -3,6 +3,7 @@ import uuid
 from typing import Any, Optional
 
 from core.config import settings
+from core.dates import normalize_expiry, normalize_invoice_date
 from core.logger import logger
 from db.graph_db import get_driver
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
@@ -120,7 +121,10 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
         user_id=user_id,
         invoice_id=invoice_id,
         invoice_number=inv.invoice_number,
-        invoice_date=inv.invoice_date,
+        # Dates are canonicalised on the way in, not on the way out: reports
+        # filter periods with an ISO string comparison, so a row stored as
+        # "03/08/2026" would silently match no period at all.
+        invoice_date=normalize_invoice_date(inv.invoice_date),
         seller_name=inv.seller_name,
         seller_gstin=inv.seller_gstin,
         seller_address=inv.seller_address,
@@ -217,6 +221,10 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
     pack = item.get("pack")
     batch = item.get("batch")
     hsn = item.get("hsn")
+    # Pharma expiry is month-precision ("08/26" means good through August), so
+    # it resolves to the last day of that month. Storing the 1st instead would
+    # write stock off a month early in the near-expiry report.
+    expiry = normalize_expiry(item.get("expiry"))
 
     tx.run(
         """
@@ -245,7 +253,7 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
         item_id=item_id,
         hsn=str(hsn).strip() if hsn else None,
         batch=str(batch).strip() if batch else None,
-        expiry=item.get("expiry"),
+        expiry=expiry,
         quantity=_to_float(item.get("quantity")),
         free_quantity=_to_float(item.get("free_quantity")),
         mrp=_to_float(item.get("mrp")),
@@ -310,7 +318,7 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
             product_id=product_id,
             batch_key=batch_key,
             batch_number=batch_number,
-            expiry=item.get("expiry"),
+            expiry=expiry,
             item_id=item_id,
         )
 
@@ -346,7 +354,9 @@ def _update_invoice_tx(tx, invoice_id: str, header: dict, line_items: Optional[l
     for key, value in header.items():
         if key in _EDITABLE_HEADER_FIELDS:
             set_clauses.append(f"inv.{key} = ${key}")
-            params[key] = value
+            # The review UI is the other door values come in through, and a date
+            # typed by hand is no more canonical than one read by OCR.
+            params[key] = normalize_invoice_date(value) if key == "invoice_date" else value
 
     if status:
         set_clauses.append("inv.status = $status")

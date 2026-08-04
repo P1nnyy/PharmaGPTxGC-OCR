@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch, mock_open
 from fastapi import UploadFile, HTTPException
 
-from api.routes import upload_invoice
+from api.routers.uploads import upload_invoice
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
 from services.validators.content_validator import ContentAssessment
 
@@ -34,10 +34,10 @@ async def test_legacy_route_default(clean_env):
     
     # Mock legacy OCR process call and caching to avoid physical resource loading
     with patch.dict(os.environ, {"EXTRACTION_ENGINE": "legacy"}), \
-         patch("api.routes.ocr_engine.process_image", return_value=mock_ocr) as mock_process, \
-         patch("api.routes.cache_service.get_cached_result", return_value=None), \
-         patch("api.routes.cache_service.save_result"), \
-         patch("api.routes.content_validator.assess", return_value=PROCESSABLE), \
+         patch("api.routers.uploads.ocr_engine.process_image", return_value=mock_ocr) as mock_process, \
+         patch("api.routers.uploads.cache_service.get_cached_result", return_value=None), \
+         patch("api.routers.uploads.cache_service.save_result"), \
+         patch("services.invoices.ingestion.content_validator.assess", return_value=PROCESSABLE), \
          patch("services.validators.image_validator.ImageValidator.validate_image", return_value={
              "is_valid": True,
              "quality_score": 1.0,
@@ -73,7 +73,7 @@ async def test_azure_route_path(clean_env):
     with patch.dict(os.environ, {"EXTRACTION_ENGINE": "azure"}), \
          patch("extraction.engines.azure_document_intelligence_engine.load_dotenv"), \
          patch("extraction.engines.azure_document_intelligence_engine.AzureDocumentIntelligenceEngine.extract", return_value=mock_invoice) as mock_extract, \
-         patch("api.routes.content_validator.assess", return_value=PROCESSABLE), \
+         patch("services.invoices.ingestion.content_validator.assess", return_value=PROCESSABLE), \
          patch("services.validators.image_validator.ImageValidator.validate_image", return_value={
              "is_valid": True,
              "properties": {}
@@ -130,7 +130,7 @@ async def test_content_gate_can_be_disabled(clean_env):
     mock_file.read.return_value = b"GIF89a\x01\x00\x01\x00\x80\xff\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 
     with patch.dict(os.environ, {"EXTRACTION_ENGINE": "azure"}), \
-         patch("api.routes.settings.CONTENT_GATE_ENABLED", False), \
+         patch("services.invoices.ingestion.settings.CONTENT_GATE_ENABLED", False), \
          patch("extraction.engines.azure_document_intelligence_engine.load_dotenv"), \
          patch(
              "extraction.engines.azure_document_intelligence_engine.AzureDocumentIntelligenceEngine.extract",

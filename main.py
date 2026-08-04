@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from core.logger import logger
-from api.routes import router
+from api.routers import api_router
 from services import cache_service
 from db.graph_db import init_graph_db
 import uvicorn
@@ -11,7 +11,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
-app.include_router(router)
+app.include_router(api_router)
 
 @app.on_event("startup")
 async def startup_event():
