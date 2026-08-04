@@ -51,7 +51,9 @@ _TEXTUAL_LEADING_RE = re.compile(
     r"^([A-Za-z]{3,9})[\s\-]+(\d{1,2})(?:st|nd|rd|th)?[\s\-,]+(\d{2,4})$", re.I
 )
 
-_MONTH_YEAR_RE = re.compile(r"^(\d{1,2})[/\-.](\d{2,4})$")
+# The leading group allows four digits so a year-first expiry ("2026/08") is
+# captured and disambiguated below, rather than failing to match at all.
+_MONTH_YEAR_RE = re.compile(r"^(\d{1,4})[/\-.](\d{2,4})$")
 _MONTH_YEAR_TEXT_RE = re.compile(r"^([A-Za-z]{3,9})[\s\-/.]*(\d{2,4})$")
 
 

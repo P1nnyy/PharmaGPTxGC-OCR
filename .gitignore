@@ -8,13 +8,24 @@ datasets/
 # Verification workspace generated artifacts (keep scripts/ README)
 verification/debug_outputs/
 verification/visualizations/
-verification/benchmark_reports/
 verification/temp/
 verification/comparisons/
-*.png
-*.jpg
-*.jpeg
-*.json
+verification/benchmark_reports/
+
+# Generated images and JSON are scoped to the directories that produce them,
+# never matched globally. A blanket *.json here excluded frontend/package.json
+# and the tsconfigs from the repository entirely, so a fresh clone could not
+# build the frontend at all; *.png did the same to anything in frontend/public.
+local_runs/
+forensic_runs/
+datasets/
+benchmarks/
+results/
+ocr/
+test_images/
+item_rows_clean.json
+*.jsonl
+*.pkl
 
 # Export scripts
 # scripts/export_codebase.py
@@ -22,27 +33,15 @@ verification/comparisons/
 
 # Local/runtime artifacts
 venv/
-benchmarks/
-forensic_runs/
-ocr/
-datasets/ocr_results/
-results/
-test_images/
 working_requirements.txt
-__pycache__/
-*.pyc
-*.pkl
-*.jsonl
-
-# Local OCR/debug outputs
-local_runs/
-results/
-forensic_runs/
-datasets/debug/
-item_rows_clean.json
 
 .DS_Store
 **/.DS_Store
 
-frontend/node_modules/
+frontend/node_modules
 frontend/dist/
+
+# Agent workspace. Never tracked before either — the blanket *.json rule was
+# hiding it — so it stays out rather than silently starting to publish local
+# settings. worktrees/ especially: it contains checkouts of this same repo.
+.claude/

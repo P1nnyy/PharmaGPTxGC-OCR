@@ -13,7 +13,7 @@ import { UploadInvoicePage } from './pages/UploadInvoicePage';
 import { InvoiceReviewPage } from './pages/InvoiceReviewPage';
 import { InvoiceHistoryPage } from './pages/InvoiceHistoryPage';
 import { InventoryPage } from './pages/InventoryPage';
-import { ReportsPage } from './pages/ReportsPage';
+import { ReportsPage } from './features/reports';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
 
 // Old Developer Pages (under debug route)
