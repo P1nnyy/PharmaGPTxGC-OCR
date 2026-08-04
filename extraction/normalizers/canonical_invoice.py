@@ -8,6 +8,10 @@ class CanonicalLineItem(BaseModel):
     """
     name: Optional[str] = None
     pack: Optional[str] = None
+    # Maker as printed on the invoice ("Mfr"/"Company Name" column). Usually an
+    # abbreviation - ABBO, LEEFORD, INTAS - but it is the supplier's own
+    # statement of who makes the item, which no public listing can contradict.
+    manufacturer: Optional[str] = None
     batch: Optional[str] = None
     expiry: Optional[str] = None
     hsn: Optional[str] = None

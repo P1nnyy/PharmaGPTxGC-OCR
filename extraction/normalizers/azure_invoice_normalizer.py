@@ -248,6 +248,15 @@ _HEADER_LABELS: Dict[str, List[str]] = {
         "item name", "tiem description", "product description", "item description",
     ],
     "pack": ["ufc", "uom", "unit", "pack", "packing", "pkg"],
+    # Most Indian pharma invoices name the maker in their own column, headed
+    # "Mfr" or "Company Name". Reading it is the only way the catalogue learns
+    # a manufacturer for products the public listings don't match - and those
+    # are exactly the ones a lookup can't help with.
+    "manufacturer": [
+        "mfr", "mfr.", "mfg", "mfg.", "manufacturer", "manufacturer name",
+        "company", "company name", "comp", "marketed by", "mktd by", "made by",
+        "brand owner",
+    ],
     "quantity_total": ["total 0y", "total qy", "total qty"],
     "quantity_tes": ["t'es"],
     "quantity_pcs": [
@@ -897,6 +906,46 @@ def _map_row_to_data(
                     row_data[col_name] = val
     return row_data
 
+# A manufacturer cell holds a short code, not prose. Anything long is the
+# column having swallowed a neighbour's text, and storing that would put
+# rubbish on the catalogue record under a field a pharmacist trusts.
+_MAX_MANUFACTURER_LENGTH = 40
+
+
+def _clean_manufacturer(value: Any) -> Optional[str]:
+    """Normalizes the maker code from the invoice's Mfr/Company column.
+
+    Takes the first line only: a merged cell can pick up the row below, and
+    the maker for THIS row is the one printed on it.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    first_line = next((ln.strip() for ln in text.split("\n") if ln.strip()), "")
+    collapsed = re.sub(r"\s+", " ", first_line).strip(" .,-|")
+
+    # A neighbouring column's tail can run into this cell - a real case read
+    # "(50LEEFORD", where "(50" is the end of the product's pack size. Drop a
+    # leading non-alphabetic run when it looks like that spillover, but only
+    # if a substantial name survives, so a company genuinely starting with a
+    # digit ("3M") is not truncated to a single letter.
+    leading = re.match(r"^[^A-Za-z]+", collapsed)
+    if leading:
+        remainder = collapsed[leading.end():]
+        if len(remainder) >= 3:
+            collapsed = remainder
+
+    if not collapsed or len(collapsed) > _MAX_MANUFACTURER_LENGTH:
+        return None
+    # A purely numeric cell is a stray figure from an adjacent column, not a
+    # company. Names may contain digits, but never consist only of them.
+    if not any(ch.isalpha() for ch in collapsed):
+        return None
+    return collapsed.upper()
+
+
 def _build_line_item(
     row_data: Dict[str, Any],
     tbl_idx: int,
@@ -1048,6 +1097,7 @@ def _build_line_item(
     return CanonicalLineItem(
         name=product_name,
         pack=row_data.get("pack") if row_data.get("pack") else None,
+        manufacturer=_clean_manufacturer(row_data.get("manufacturer")),
         batch=batch_val if batch_val else None,
         expiry=clean_expiry_string(row_data.get("expiry")),
         hsn=hsn_val,

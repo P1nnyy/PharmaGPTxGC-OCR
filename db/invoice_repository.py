@@ -234,6 +234,7 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
             hsn: $hsn,
             batch: $batch,
             expiry: $expiry,
+            manufacturer: $manufacturer,
             pack: $pack
         })
         CREATE (inv)-[:CONTAINS]->(li)
@@ -249,6 +250,7 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
         hsn=str(hsn).strip() if hsn else None,
         batch=str(batch).strip() if batch else None,
         expiry=item.get("expiry"),
+        manufacturer=item.get("manufacturer"),
         quantity=_to_float(item.get("quantity")),
         free_quantity=_to_float(item.get("free_quantity")),
         mrp=_to_float(item.get("mrp")),
@@ -266,7 +268,9 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
     # Keeping the two apart is what lets "MONTICOPE SUSP" and "MONTICOPE
     # SUSPENSION 60 ML" become one item without hard-coding either spelling
     # as the truth. See db/product_repository for why.
-    alias_id, product_id = product_repository.resolve_alias_and_product(tx, name, pack, hsn)
+    alias_id, product_id = product_repository.resolve_alias_and_product(
+        tx, name, pack, hsn, manufacturer=item.get("manufacturer")
+    )
 
     if product_id:
         tx.run(

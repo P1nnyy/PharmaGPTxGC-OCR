@@ -769,8 +769,12 @@ const ProductDetailDrawer: React.FC<{
                   placeholder="e.g. 10"
                 />
                 <p className="text-[10px] text-gray-400 mt-1">
-                  Individual tablets, vials or sachets in one pack — this is what turns billed packs into
-                  countable stock.
+                  {/* A lotion has no "individual units" to count — it is one
+                      bottle whose size is a volume. Saying otherwise asks the
+                      reviewer a question their product doesn't have. */}
+                  {SINGLE_CONTAINER_FORMS.has(form.form)
+                    ? `A ${form.form.toLowerCase()} is sold as one container, so this is 1 — its size is recorded as the pack size.`
+                    : 'Individual tablets, vials or sachets in one pack — this is what turns billed packs into countable stock.'}
                 </p>
               </div>
 
@@ -928,7 +932,12 @@ const ProductDetailDrawer: React.FC<{
           <span className="text-[10px] text-gray-400">
             {product.total_base_units !== null
               ? `${product.total_base_units} ${(product.base_unit || 'unit').toLowerCase()} purchased in total`
-              : 'Set units per pack to track stock at tablet level'}
+              : product.base_unit
+                // Name the unit this product is actually dispensed in. Saying
+                // "tablet level" to someone editing a lotion describes a
+                // different product than the one in front of them.
+                ? `Set units per pack to track stock at ${product.base_unit.toLowerCase()} level`
+                : 'Set dosage form and units per pack to track stock at unit level'}
           </span>
           <div className="flex items-center gap-2 shrink-0">
             <button

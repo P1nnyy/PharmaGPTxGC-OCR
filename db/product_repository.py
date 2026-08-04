@@ -110,7 +110,11 @@ def _to_float(value: Any) -> Optional[float]:
 # --------------------------------------------------------------------------
 
 def resolve_alias_and_product(
-    tx, name: Optional[str], pack: Optional[str], hsn: Optional[str] = None
+    tx,
+    name: Optional[str],
+    pack: Optional[str],
+    hsn: Optional[str] = None,
+    manufacturer: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Records the spelling, finds or creates the SKU, returns (alias_id, product_id).
 
@@ -152,9 +156,13 @@ def resolve_alias_and_product(
     # human moved it. Re-deriving the identity on every invoice would silently
     # undo their correction the next time the same name arrives.
     if product_id:
+        _fill_missing_manufacturer(tx, product_id, manufacturer)
         return alias_id, product_id
 
-    product_id = _merge_product_by_identity(tx, parsed, raw, hsn)
+    product_id = _merge_product_by_identity(tx, parsed, raw, hsn, manufacturer)
+    # The identity may have resolved to a product that already existed, in
+    # which case ON CREATE did not run and the maker is still blank.
+    _fill_missing_manufacturer(tx, product_id, manufacturer)
 
     tx.run(
         """
@@ -168,7 +176,45 @@ def resolve_alias_and_product(
     return alias_id, product_id
 
 
-def _merge_product_by_identity(tx, parsed, raw_name: str, hsn: Optional[str]) -> str:
+# The supplier naming the maker in its own column is a direct statement rather
+# than an inference, so it is scored like a field the name stated outright. It
+# is still a proposal a reviewer confirms.
+MANUFACTURER_CONFIDENCE = 0.8
+
+
+def _fill_missing_manufacturer(
+    tx, product_id: Optional[str], manufacturer: Optional[str]
+) -> None:
+    """Records the maker on a product that has none.
+
+    Most of the catalogue predates this field, and those products are reached
+    through the alias shortcut above, which never runs the create path. Without
+    this they would read "Manufacturer not recorded" forever despite their
+    invoices stating it plainly.
+
+    Fills only - a value already present, or one the pharmacist confirmed, is
+    left alone. Same rule as everywhere else here: a parse never outranks a
+    human decision.
+    """
+    if not product_id or not manufacturer:
+        return
+    tx.run(
+        """
+        MATCH (p:Product {id: $product_id})
+        WHERE p.manufacturer IS NULL
+          AND NOT 'manufacturer' IN coalesce(p.confirmed_fields, [])
+        SET p.manufacturer = $manufacturer,
+            p.manufacturer_confidence = $confidence
+        """,
+        product_id=product_id,
+        manufacturer=manufacturer,
+        confidence=MANUFACTURER_CONFIDENCE,
+    )
+
+
+def _merge_product_by_identity(
+    tx, parsed, raw_name: str, hsn: Optional[str], manufacturer: Optional[str] = None
+) -> str:
     """Finds or creates the Product for a parse, seeding it with the guesses.
 
     ON CREATE only: an existing product's fields are never overwritten by a
@@ -187,6 +233,8 @@ def _merge_product_by_identity(tx, parsed, raw_name: str, hsn: Optional[str]) ->
                       p.pack_multiplier = $pack_multiplier,
                       p.base_unit = $base_unit,
                       p.hsn = $hsn,
+                      p.manufacturer = $manufacturer,
+                      p.manufacturer_confidence = $manufacturer_confidence,
                       p.brand_confidence = $brand_confidence,
                       p.strength_confidence = $strength_confidence,
                       p.form_confidence = $form_confidence,
@@ -207,6 +255,8 @@ def _merge_product_by_identity(tx, parsed, raw_name: str, hsn: Optional[str]) ->
         pack_multiplier=parsed.pack_multiplier.value,
         base_unit=parsed.base_unit.value,
         hsn=str(hsn).strip() if hsn else None,
+        manufacturer=manufacturer,
+        manufacturer_confidence=MANUFACTURER_CONFIDENCE if manufacturer else 0.0,
         brand_confidence=parsed.brand.confidence,
         strength_confidence=parsed.strength.confidence,
         form_confidence=parsed.form.confidence,
