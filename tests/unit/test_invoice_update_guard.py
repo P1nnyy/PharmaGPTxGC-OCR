@@ -126,11 +126,16 @@ def test_empty_array_is_fine_when_there_is_nothing_to_lose():
 
 
 def test_a_normal_save_is_untouched_by_the_guard():
-    tx = FakeTx(existing_item_count=16)
+    # How a row is written is _write_line_item's business and varies by branch;
+    # stub it so this stays a test of the guard letting the save through.
+    with patch("db.invoice_repository._write_line_item") as write_item:
+        tx = FakeTx(existing_item_count=16)
 
-    assert _update_invoice_tx(tx, "inv-1", {"grand_total": 2278.0}, [ITEM], None) is True
+        assert _update_invoice_tx(tx, "inv-1", {"grand_total": 2278.0}, [ITEM], None) is True
+
     assert tx.deleted_line_items
     assert tx.ran("SET inv.grand_total")
+    assert write_item.call_count == 1
 
 
 def test_omitting_line_items_still_updates_only_the_header():
