@@ -32,6 +32,11 @@ class FakeResult:
     def single(self):
         return self._row
 
+    def __iter__(self):
+        # Verifying an invoice also walks its lines to write vendor
+        # cross-references; this fake has no lines to offer.
+        return iter([])
+
 
 class FakeTx:
     """Records every Cypher statement so a test can assert what was written."""

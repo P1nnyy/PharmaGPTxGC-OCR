@@ -72,7 +72,66 @@ interface TableLineItem {
     reason: string;
     billed_verified: boolean;
   } | null;
+  // How this row found its catalogue item. Carried so the reviewer can see
+  // WHY a row was filled in for them - an auto-applied value with no visible
+  // justification is just an unexplained value.
+  match_tier?: string | null;
+  match_status?: string | null;
+  match_note?: string | null;
+  match_times_seen?: number | null;
 }
+
+const ordinal = (n: number): string => {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
+    : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th';
+  return `${n}${suffix}`;
+};
+
+/**
+ * Says why a row was matched to a catalogue item.
+ *
+ * Auto-applying a value is only defensible if the reviewer can see what it
+ * rests on, so the badge names the evidence ("4th purchase from this vendor")
+ * rather than just asserting confidence. The amber variant is the opposite
+ * case: the vendor changed something, and the row is asking rather than
+ * telling.
+ */
+const MatchBadge: React.FC<{ item: TableLineItem }> = ({ item }) => {
+  if (item.match_status === 'needs_confirmation') {
+    return (
+      <span
+        title={item.match_note || 'An indicator changed since this vendor last billed this item'}
+        className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-700 align-middle"
+      >
+        <AlertTriangle size={10} />
+        Confirm{item.match_note ? `: ${item.match_note}` : ''}
+      </span>
+    );
+  }
+  if (item.match_tier === 'vendor_exact') {
+    const seen = item.match_times_seen ?? 0;
+    return (
+      <span
+        title={seen > 0 ? `Matched automatically — this vendor has billed this exact item ${seen} time(s) before` : undefined}
+        className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 align-middle"
+      >
+        <CheckCircle size={10} />
+        Auto-matched{seen > 0 ? ` · ${ordinal(seen + 1)} purchase` : ''}
+      </span>
+    );
+  }
+  if (item.match_tier === 'new') {
+    return (
+      <span
+        title="Not billed before — this will be added to the catalogue"
+        className="ml-2 inline-flex items-center gap-1 rounded-full bg-sky-50 border border-sky-200 px-2 py-0.5 text-[10px] font-semibold text-sky-700 align-middle"
+      >
+        New item
+      </span>
+    );
+  }
+  return null;
+};
 
 // Helper: Check if a value is present (non-empty string, non-null, non-undefined)
 const isPresent = (value: any): boolean => {
@@ -642,6 +701,16 @@ export const InvoiceReviewPage: React.FC = () => {
     [lineItems]
   );
 
+  const matchSummary = React.useMemo(() => {
+    const counted = lineItems.filter((item) => isPresent(item.match_tier));
+    return {
+      total: counted.length,
+      auto: counted.filter((i) => i.match_tier === 'vendor_exact').length,
+      confirm: counted.filter((i) => i.match_status === 'needs_confirmation').length,
+      fresh: counted.filter((i) => i.match_tier === 'new').length,
+    };
+  }, [lineItems]);
+
   const isCriticalItemMissing = (item: TableLineItem, field: keyof TableLineItem) => {
     let val: any = item[field];
     if (field === 'quantity') {
@@ -779,6 +848,10 @@ export const InvoiceReviewPage: React.FC = () => {
             is_suggested_amount: is_suggested_amount,
             quantity_suggestion: item.quantity_suggestion ?? null,
             bounding_box: Array.isArray(item.bounding_box) ? item.bounding_box : undefined,
+            match_tier: item.match_tier ?? null,
+            match_status: item.match_status ?? null,
+            match_note: item.match_note ?? null,
+            match_times_seen: item.match_times_seen ?? null,
           };
         });
 
@@ -1680,8 +1753,26 @@ export const InvoiceReviewPage: React.FC = () => {
           ================================================================ */}
       <div className="flex flex-col bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden mb-8">
           <div className="shrink-0 p-4 flex items-center justify-between border-b border-[#e2e8f0]">
-            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-              Line Items Review ({lineItems.length})
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2 flex-wrap">
+              <span>Line Items Review ({lineItems.length})</span>
+              {/* What the catalogue did on this invoice, stated up front — the
+                  reviewer should learn how much was decided for them before
+                  they start reading rows, not by noticing badges. */}
+              {matchSummary.total > 0 && (
+                <span className="normal-case tracking-normal font-medium text-[11px] text-gray-400">
+                  {matchSummary.auto > 0 && (
+                    <span className="text-emerald-600">{matchSummary.auto} auto-matched</span>
+                  )}
+                  {matchSummary.confirm > 0 && (
+                    <>{matchSummary.auto > 0 && ' · '}
+                      <span className="text-amber-600">{matchSummary.confirm} to confirm</span></>
+                  )}
+                  {matchSummary.fresh > 0 && (
+                    <>{(matchSummary.auto > 0 || matchSummary.confirm > 0) && ' · '}
+                      <span className="text-sky-600">{matchSummary.fresh} new</span></>
+                  )}
+                </span>
+              )}
             </h3>
             <button
               onClick={handleAddRow}
@@ -1757,7 +1848,10 @@ export const InvoiceReviewPage: React.FC = () => {
                       <td className="p-3 pl-5 align-top">
                         <TruncatedCell value={item.product_name}>
                           {isLocked ? (
-                            <ReadOnlyCell value={item.product_name} />
+                            <span className="inline-flex items-center flex-wrap">
+                              <ReadOnlyCell value={item.product_name} />
+                              <MatchBadge item={item} />
+                            </span>
                           ) : (
                             <input
                               id={`item-name-${item.id}`}

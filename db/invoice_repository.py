@@ -162,7 +162,7 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
         )
 
     for row_index, item in enumerate(inv.line_items):
-        _write_line_item(tx, invoice_id, item.model_dump(), row_index)
+        _write_line_item(tx, invoice_id, item.model_dump(), row_index, vendor_id)
 
 
 def _resolve_vendor(tx, inv: CanonicalInvoice) -> Optional[str]:
@@ -184,14 +184,21 @@ def _resolve_vendor(tx, inv: CanonicalInvoice) -> Optional[str]:
         return record["id"]
 
     if inv.seller_name:
+        # MERGE on the name, not CREATE. A supplier that prints no GSTIN used to
+        # get a fresh Vendor node per invoice, so "the same vendor" was never the
+        # same node twice - which silently defeats anything keyed on vendor
+        # identity, the item cross-reference below most of all.
         record = tx.run(
             """
-            CREATE (v:Vendor {
-                id: randomUUID(), name: $name, address: $address,
-                phone: $phone, drug_license: $drug_license
-            })
+            MERGE (v:Vendor {name_key: $name_key})
+            ON CREATE SET v.id = randomUUID(), v.name = $name, v.address = $address,
+                          v.phone = $phone, v.drug_license = $drug_license
+            ON MATCH SET v.address = coalesce(v.address, $address),
+                         v.phone = coalesce(v.phone, $phone),
+                         v.drug_license = coalesce(v.drug_license, $drug_license)
             RETURN v.id AS id
             """,
+            name_key=product_repository.vendor_name_key(inv.seller_name),
             name=inv.seller_name,
             address=inv.seller_address,
             phone=inv.seller_phone,
@@ -202,7 +209,8 @@ def _resolve_vendor(tx, inv: CanonicalInvoice) -> Optional[str]:
     return None
 
 
-def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
+def _write_line_item(tx, invoice_id: str, item: dict, row_index: int,
+                     vendor_id: Optional[str] = None):
     """item is a plain dict with CanonicalLineItem-shaped keys (name, pack, batch,
     expiry, hsn, quantity, free_quantity, mrp, rate, discount, gst_percent, amount,
     bounding_box) — shared by both the initial extraction write and PATCH updates.
@@ -268,8 +276,29 @@ def _write_line_item(tx, invoice_id: str, item: dict, row_index: int):
     # Keeping the two apart is what lets "MONTICOPE SUSP" and "MONTICOPE
     # SUSPENSION 60 ML" become one item without hard-coding either spelling
     # as the truth. See db/product_repository for why.
-    alias_id, product_id = product_repository.resolve_alias_and_product(
-        tx, name, pack, hsn, manufacturer=item.get("manufacturer")
+    match = product_repository.resolve_line_item_product(
+        tx,
+        vendor_id=vendor_id,
+        name=name,
+        pack=pack,
+        hsn=hsn,
+        manufacturer=item.get("manufacturer"),
+    )
+    alias_id, product_id = match.alias_id, match.product_id
+
+    # Recorded on the line, not just returned, so the review page can say why a
+    # row was filled in for you - and so "auto-matched" survives a page reload.
+    tx.run(
+        """
+        MATCH (li:LineItem {id: $item_id})
+        SET li.match_tier = $tier, li.match_status = $status,
+            li.match_note = $note, li.match_times_seen = $times_seen
+        """,
+        item_id=item_id,
+        tier=match.tier,
+        status=match.status,
+        note=match.note,
+        times_seen=match.times_seen,
     )
 
     if product_id:
@@ -431,10 +460,53 @@ def _update_invoice_tx(
             """,
             id=invoice_id,
         )
+        vendor_record = tx.run(
+            """
+            MATCH (:Invoice {id: $id})-[:SUPPLIED_BY]->(v:Vendor)
+            RETURN v.id AS id
+            """,
+            id=invoice_id,
+        ).single()
+        vendor_id = vendor_record["id"] if vendor_record else None
         for row_index, item in enumerate(line_items):
-            _write_line_item(tx, invoice_id, item, row_index)
+            _write_line_item(tx, invoice_id, item, row_index, vendor_id)
+
+    if status == "verified":
+        _record_vendor_items(tx, invoice_id)
 
     return True
+
+
+def _record_vendor_items(tx, invoice_id: str) -> None:
+    """Teaches the catalogue this vendor's names, once a human has signed off.
+
+    Verification is the trigger rather than upload, because the cross-reference
+    is the user's judgement made reusable. Writing it from an unreviewed scan
+    would let a single OCR misread teach itself to every future invoice from
+    that supplier - the failure mode being automated away here, reintroduced
+    one layer down.
+    """
+    rows = tx.run(
+        """
+        MATCH (inv:Invoice {id: $id})-[:SUPPLIED_BY]->(v:Vendor)
+        MATCH (inv)-[:CONTAINS]->(li:LineItem)-[:OF_PRODUCT]->(p:Product)
+        OPTIONAL MATCH (li)-[:OF_ALIAS]->(a:ProductAlias)
+        RETURN v.id AS vendor_id, p.id AS product_id,
+               coalesce(a.raw_name, p.canonical_name) AS name,
+               li.pack AS pack, li.manufacturer AS manufacturer, li.hsn AS hsn
+        """,
+        id=invoice_id,
+    )
+    for row in rows:
+        product_repository.record_vendor_item(
+            tx,
+            vendor_id=row["vendor_id"],
+            product_id=row["product_id"],
+            name=row["name"],
+            pack=row["pack"],
+            manufacturer=row["manufacturer"],
+            hsn=row["hsn"],
+        )
 
 
 def update_line_item_amounts(amounts: dict[str, float]) -> int:

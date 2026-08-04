@@ -44,7 +44,9 @@ so the UI can always distinguish "we guessed Tablet" from "the pharmacist
 said Tablet".
 """
 
+import re
 import uuid
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.config import settings
@@ -108,6 +110,299 @@ def _to_float(value: Any) -> Optional[float]:
 # --------------------------------------------------------------------------
 # Write path - called from the invoice save transaction
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Vendor item cross-reference - "the same item, arriving a second time"
+# --------------------------------------------------------------------------
+#
+# This is the supplier item cross-reference every ERP keeps (SAP's vendor
+# material number, JD Edwards' supplier cross-reference, Business Central's
+# item references): a mapping from what one supplier calls a thing to what we
+# call it. Map it once by hand, match it automatically ever after.
+#
+# Those systems key the mapping on the supplier's own item code. Our suppliers
+# print none - none of the invoice formats in the corpus carries a code column
+# - so the key is the supplier's printed description instead. That works
+# because a distributor's software prints the same string for the same product
+# every time; the variation this system fights is between vendors, not within
+# one vendor's own bills.
+#
+# The key is deliberately the whole set of indicators the vendor showed, not
+# just the name, because vendors differ in WHERE they put things: one spells
+# the pack inside the item name, the next gives it its own column. Keying on
+# the name alone would make
+#
+#     STERIVON H/S 100 ML   and   STERIVON H/S 200 ML
+#
+# the same item as soon as one vendor moved the size out of the name - a
+# silent, confident match onto the wrong SKU, which then corrupts every stock
+# and rate figure derived from it. So a changed indicator does not auto-match;
+# it asks.
+
+VENDOR_EXACT = "vendor_exact"          # same vendor, every indicator identical
+VENDOR_CHANGED = "vendor_changed"      # same vendor + name, an indicator moved
+ALIAS_MATCH = "alias"                  # spelling already routed to a SKU
+NEW_PRODUCT = "new"                    # nothing matched
+
+AUTO_CONFIRMED = "auto_confirmed"
+NEEDS_CONFIRMATION = "needs_confirmation"
+UNSEEN = "new"
+
+
+@dataclass
+class ProductMatch:
+    """How a line item found its SKU, so the UI can say why."""
+
+    alias_id: Optional[str] = None
+    product_id: Optional[str] = None
+    tier: str = NEW_PRODUCT
+    status: str = UNSEEN
+    note: Optional[str] = None
+    times_seen: int = 0
+
+
+def vendor_name_key(name: Optional[str]) -> str:
+    """Stable identity for a supplier that prints no GSTIN."""
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
+def _indicator(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().upper())
+
+
+def vendor_item_fingerprint(
+    name: Optional[str],
+    pack: Optional[str],
+    manufacturer: Optional[str],
+    hsn: Optional[str],
+) -> tuple[str, str]:
+    """(name_key, fingerprint) - the cross-reference's two lookup keys.
+
+    name_key alone finds "this vendor has billed this name before"; the
+    fingerprint additionally pins every other indicator the vendor printed, and
+    only an exact fingerprint hit is safe to apply without asking.
+    """
+    name_key = normalize_name(name or "")
+    fingerprint = "|".join([
+        name_key,
+        _indicator(pack),
+        _indicator(manufacturer),
+        _indicator(hsn),
+    ])
+    return name_key, fingerprint
+
+
+def _describe_change(previous: dict, pack, manufacturer, hsn) -> str:
+    """Names the indicator that moved, for the confirmation prompt."""
+    changes = []
+    for label, was, now in (
+        ("pack", previous.get("pack"), _indicator(pack)),
+        ("manufacturer", previous.get("manufacturer"), _indicator(manufacturer)),
+        ("HSN", previous.get("hsn"), _indicator(hsn)),
+    ):
+        if (was or "") != (now or ""):
+            changes.append(f"{label} {was or '—'} → {now or '—'}")
+    return "; ".join(changes) or "an indicator changed"
+
+
+def _lookup_vendor_item(tx, vendor_id: str, name_key: str) -> list[dict]:
+    result = tx.run(
+        """
+        MATCH (v:Vendor {id: $vendor_id})-[s:SUPPLIES]->(p:Product)
+        WHERE s.name_key = $name_key
+        RETURN p.id AS product_id, s.fingerprint AS fingerprint,
+               s.pack AS pack, s.manufacturer AS manufacturer, s.hsn AS hsn,
+               coalesce(s.times_seen, 0) AS times_seen
+        """,
+        vendor_id=vendor_id,
+        name_key=name_key,
+    )
+    return [dict(record) for record in result]
+
+
+def record_vendor_item(
+    tx,
+    vendor_id: Optional[str],
+    product_id: Optional[str],
+    name: Optional[str],
+    pack: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    hsn: Optional[str] = None,
+) -> None:
+    """Writes the cross-reference. Called when a human verifies an invoice.
+
+    Verification is the whole trigger: this mapping is the user's judgement
+    made reusable, so it must not be created by merely uploading a scan. An
+    unreviewed OCR misread that wrote a cross-reference would auto-apply itself
+    to every future invoice from that vendor.
+    """
+    if not (vendor_id and product_id and name):
+        return
+
+    name_key, fingerprint = vendor_item_fingerprint(name, pack, manufacturer, hsn)
+    if not name_key:
+        return
+
+    tx.run(
+        """
+        MATCH (v:Vendor {id: $vendor_id})
+        MATCH (p:Product {id: $product_id})
+        MERGE (v)-[s:SUPPLIES {fingerprint: $fingerprint}]->(p)
+        ON CREATE SET s.name_key = $name_key, s.pack = $pack,
+                      s.manufacturer = $manufacturer, s.hsn = $hsn,
+                      s.first_confirmed = datetime(), s.times_seen = 0
+        SET s.times_seen = coalesce(s.times_seen, 0) + 1,
+            s.last_confirmed = datetime()
+        """,
+        vendor_id=vendor_id,
+        product_id=product_id,
+        fingerprint=fingerprint,
+        name_key=name_key,
+        pack=_indicator(pack),
+        manufacturer=_indicator(manufacturer),
+        hsn=_indicator(hsn),
+    )
+
+
+def unlink_vendor_item(tx, vendor_id: str, name: str, pack=None, manufacturer=None, hsn=None) -> bool:
+    """Undoes one cross-reference - the escape hatch behind "not this item".
+
+    An automatic action the user cannot reverse is worse than no automation.
+    """
+    _, fingerprint = vendor_item_fingerprint(name, pack, manufacturer, hsn)
+    record = tx.run(
+        """
+        MATCH (:Vendor {id: $vendor_id})-[s:SUPPLIES {fingerprint: $fingerprint}]->(:Product)
+        DELETE s
+        RETURN count(*) AS removed
+        """,
+        vendor_id=vendor_id,
+        fingerprint=fingerprint,
+    ).single()
+    return bool(record and record["removed"])
+
+
+def resolve_line_item_product(
+    tx,
+    vendor_id: Optional[str],
+    name: Optional[str],
+    pack: Optional[str] = None,
+    hsn: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+) -> ProductMatch:
+    """The match funnel, most certain evidence first.
+
+    Tier 1  same vendor, identical indicators  -> apply, tell the user
+    Tier 2  same vendor, an indicator moved    -> resolve normally, ASK
+    Tier 3  spelling already routed to a SKU   -> apply
+    Tier 4  nothing matched                    -> new SKU, for review
+    """
+    if not name or not str(name).strip():
+        return ProductMatch()
+
+    name_key, fingerprint = vendor_item_fingerprint(name, pack, manufacturer, hsn)
+
+    if vendor_id and name_key:
+        rows = _lookup_vendor_item(tx, vendor_id, name_key)
+        exact = next((r for r in rows if r["fingerprint"] == fingerprint), None)
+        if exact:
+            alias_id, _ = _upsert_alias(tx, name)
+            _bind_alias(tx, alias_id, exact["product_id"])
+            _fill_missing_manufacturer(tx, exact["product_id"], manufacturer)
+            return ProductMatch(
+                alias_id=alias_id,
+                product_id=exact["product_id"],
+                tier=VENDOR_EXACT,
+                status=AUTO_CONFIRMED,
+                note=None,
+                times_seen=exact["times_seen"],
+            )
+        if rows:
+            # The vendor has billed this name before, but something about it
+            # moved. Resolving normally is right - identity_key already splits
+            # on pack, so a genuinely new size lands on its own SKU - but the
+            # user is told rather than the change being absorbed in silence.
+            alias_id, product_id = resolve_alias_and_product(tx, name, pack, hsn, manufacturer)
+            return ProductMatch(
+                alias_id=alias_id,
+                product_id=product_id,
+                tier=VENDOR_CHANGED,
+                status=NEEDS_CONFIRMATION,
+                note=_describe_change(rows[0], pack, manufacturer, hsn),
+            )
+
+    existing = _alias_target(tx, name)
+    alias_id, product_id = resolve_alias_and_product(tx, name, pack, hsn, manufacturer)
+    if existing:
+        return ProductMatch(
+            alias_id=alias_id, product_id=product_id,
+            tier=ALIAS_MATCH, status=AUTO_CONFIRMED,
+        )
+    return ProductMatch(
+        alias_id=alias_id, product_id=product_id,
+        tier=NEW_PRODUCT, status=UNSEEN,
+    )
+
+
+def _alias_target(tx, name: str) -> Optional[str]:
+    """The SKU this spelling already routes to, if any - read before writing."""
+    normalized = normalize_name(str(name).strip())
+    if not normalized:
+        return None
+    record = tx.run(
+        """
+        MATCH (a:ProductAlias {normalized_name: $normalized})-[:RESOLVES_TO]->(p:Product)
+        RETURN p.id AS product_id
+        """,
+        normalized=normalized,
+    ).single()
+    return record["product_id"] if record else None
+
+
+def _upsert_alias(tx, name: str) -> tuple[Optional[str], Optional[str]]:
+    raw = str(name).strip()
+    normalized = normalize_name(raw)
+    if not normalized:
+        return None, None
+    record = tx.run(
+        """
+        MERGE (a:ProductAlias {normalized_name: $normalized})
+        ON CREATE SET a.id = randomUUID(), a.raw_name = $raw,
+                      a.status = 'new', a.first_seen = datetime(), a.times_seen = 0
+        SET a.times_seen = coalesce(a.times_seen, 0) + 1, a.last_seen = datetime()
+        WITH a
+        OPTIONAL MATCH (a)-[:RESOLVES_TO]->(p:Product)
+        RETURN a.id AS alias_id, p.id AS product_id
+        """,
+        normalized=normalized,
+        raw=raw,
+    ).single()
+    return record["alias_id"], record["product_id"]
+
+
+def _bind_alias(tx, alias_id: Optional[str], product_id: Optional[str]) -> None:
+    """Routes a spelling to a SKU, but only if it is not already routed.
+
+    An alias resolving to two Products is a corrupt state - reads pick one
+    arbitrarily, so stock and history silently split. A plain MERGE would not
+    stop it, because MERGE only dedupes the edge to the SAME product: a
+    cross-reference pointing somewhere other than where this spelling already
+    resolves would quietly add a second edge. Where the two disagree the
+    existing routing wins, since a human may have set it deliberately.
+    """
+    if not (alias_id and product_id):
+        return
+    tx.run(
+        """
+        MATCH (a:ProductAlias {id: $alias_id})
+        WHERE NOT (a)-[:RESOLVES_TO]->(:Product)
+        MATCH (p:Product {id: $product_id})
+        MERGE (a)-[:RESOLVES_TO]->(p)
+        """,
+        alias_id=alias_id,
+        product_id=product_id,
+    )
+
 
 def resolve_alias_and_product(
     tx,
