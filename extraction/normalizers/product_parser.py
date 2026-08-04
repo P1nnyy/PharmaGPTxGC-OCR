@@ -79,14 +79,20 @@ _FORMS: List[tuple[str, str, str]] = [
     (r"SACHETS?|SACH\b", "Sachet", "SACHET"),
     (r"GRANULES?", "Granules", "SACHET"),
     (r"OINTMENTS?|OINT\b", "Ointment", "GM"),
+    # Deliberately NOT "CR": in a pack column CR is cream, but after a brand
+    # name it is controlled release, and reading it as a form here would
+    # relabel controlled-release tablets as creams. The pack-column
+    # vocabulary in form_indicators handles that sense separately.
     (r"CREAMS?|CRM\b", "Cream", "GM"),
-    (r"LOTIONS?", "Lotion", "ML"),
-    (r"SHAMPOO", "Shampoo", "ML"),
+    # LT is how these invoices abbreviate lotion ("SUNSHADE ULTRA BLOCK LT").
+    # Anchored on word boundaries so it cannot fire inside SALT or MALT.
+    (r"LOTIONS?|LOT\b|LT\b", "Lotion", "ML"),
+    (r"SHAMPOO|SHAMP\b", "Shampoo", "ML"),
     (r"SOAPS?", "Soap", "UNIT"),
-    (r"POWDERS?|PWD\b", "Powder", "GM"),
-    (r"SOLUTIONS?|SOLN\b", "Solution", "ML"),
-    (r"DROPS?\b", "Drops", "ML"),
-    (r"SPRAYS?", "Spray", "ML"),
+    (r"POWDERS?|PWD\b|POW\b", "Powder", "GM"),
+    (r"SOLUTIONS?|SOLN\b|SOL\b", "Solution", "ML"),
+    (r"DROPS?\b|DRP\b", "Drops", "ML"),
+    (r"SPRAYS?|SPR\b", "Spray", "ML"),
     (r"GELS?\b", "Gel", "GM"),
     (r"KITS?\b", "Kit", "KIT"),
 ]
@@ -126,6 +132,17 @@ _PACK_COUNT_RE = re.compile(r"\b(?P<count>\d+)\s*['’]?\s*S\b", re.IGNORECASE)
 _HYPHEN_NUMBER_RE = re.compile(r"-\s*(?P<value>\d+(?:\.\d+)?)\b")
 
 _SCHEDULES = ["Schedule H", "Schedule H1", "Schedule X", "Schedule G", "Narcotic", "OTC"]
+
+# Forms sold as a single container whose size is a volume or a weight, not a
+# count of dispensable items. A 100ml lotion is one bottle - the "100" says
+# how much is inside it, not how many of them there are. Tablets and capsules
+# are deliberately absent: a strip genuinely holds a countable number, and
+# assuming 1 there would understate stock by the size of the strip.
+_SINGLE_CONTAINER_FORMS = {
+    "Lotion", "Cream", "Ointment", "Gel", "Syrup", "Suspension", "Solution",
+    "Drops", "Eye Drops", "Ear Drops", "Nasal Drops", "Eye/Ear Drops",
+    "Powder", "Shampoo", "Spray", "Nasal Spray", "Mouthwash", "Inhaler",
+}
 
 
 class ParsedField(BaseModel):
@@ -292,11 +309,19 @@ def _parse_numeric_pack(
 
 
 def _strip_spans(text: str, spans: List[str]) -> str:
-    """Removes already-claimed substrings so what remains can serve as the brand."""
+    """Removes already-claimed substrings so what remains can serve as the brand.
+
+    Whole tokens only. A plain string replace removes the span wherever it
+    appears, including inside a longer word - stripping the form code "LT"
+    from "SUNSHADE ULTRA BLOCK LT" also gutted ULTRA, leaving a brand of
+    "SUNSHADE U RA BLOCK". Short abbreviations are common in this vocabulary
+    (LT, SOL, CAP, INJ, POW), so every one of them carried that risk.
+    """
     result = text
     for span in spans:
-        if span:
-            result = result.replace(span, " ")
+        if not span:
+            continue
+        result = re.sub(rf"\b{re.escape(span)}\b", " ", result)
     return re.sub(r"\s+", " ", result).strip(" -*/")
 
 
@@ -437,6 +462,20 @@ def parse_product_name(name: Optional[str], pack_column: Optional[str] = None) -
         if implied:
             parsed.base_unit = ParsedField(
                 value=implied.group(1).upper(), confidence=0.5, evidence=pack_display
+            )
+
+    # A lotion, cream, syrup or ointment is dispensed as ONE container, whose
+    # size is a volume or a weight rather than a count. So the units-per-pack
+    # that tablet-level stock needs is simply 1, and it follows from the form
+    # alone - no pack column required. Without this these items sit in the
+    # catalogue permanently flagged "units per pack unknown", which is a
+    # question with only one possible answer.
+    if not parsed.pack_multiplier.known and parsed.form.known:
+        if parsed.form.value in _SINGLE_CONTAINER_FORMS:
+            parsed.pack_multiplier = ParsedField(
+                value=1,
+                confidence=min(parsed.form.confidence, 0.7),
+                evidence=f"a {parsed.form.value.lower()} is dispensed as one container",
             )
 
     # --- brand ------------------------------------------------------------

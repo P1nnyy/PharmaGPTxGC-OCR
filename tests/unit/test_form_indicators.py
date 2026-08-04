@@ -130,6 +130,68 @@ class TestNameModifiers:
         assert parsed.form.confidence < 0.6
 
 
+class TestNameAbbreviations:
+    """Forms abbreviated in the product name rather than the pack column."""
+
+    @pytest.mark.parametrize("name,form,unit", [
+        ("SUNSHADE ULTRA BLOCK LT-50", "Lotion", "ML"),
+        ("XYZ LOT 100ML", "Lotion", "ML"),
+        ("BETADINE SOL", "Solution", "ML"),
+        ("ABC SPR", "Spray", "ML"),
+        ("DEF DRP", "Drops", "ML"),
+        ("GHI POW", "Powder", "GM"),
+        ("JKL INJ", "Injection", "VIAL"),
+        ("MNO CAP", "Capsule", "CAPSULE"),
+        ("PQR TAB", "Tablet", "TABLET"),
+    ])
+    def test_reads_the_abbreviation(self, name, form, unit):
+        parsed = parse_product_name(name)
+        assert parsed.form.value == form
+        assert parsed.base_unit.value == unit
+
+    @pytest.mark.parametrize("name,brand", [
+        # The form code must be removed as a WHOLE TOKEN. Stripping "LT" as a
+        # substring gutted ULTRA and produced a brand of "SUNSHADE U RA BLOCK".
+        ("SUNSHADE ULTRA BLOCK LT-50", "SUNSHADE ULTRA BLOCK"),
+        ("ULTRACET TAB", "ULTRACET"),
+        ("CAPSTAR CAP", "CAPSTAR"),
+        ("INJECTAMOL INJ", "INJECTAMOL"),
+        ("SALT LOT", "SALT"),
+    ])
+    def test_abbreviation_is_not_stripped_from_inside_a_word(self, name, brand):
+        assert parse_product_name(name).brand.value == brand
+
+    def test_cr_in_a_name_is_release_not_cream(self):
+        # The pack column and the product name use CR for different things;
+        # reading the name's CR as cream would relabel controlled-release
+        # tablets as topicals.
+        assert parse_product_name("PANTOCID CR 40").form.value == "Tablet"
+
+
+class TestSingleContainerForms:
+    @pytest.mark.parametrize("name", [
+        "SUNSHADE ULTRA BLOCK LT-50", "XYZ CREAM", "BETADINE SOL",
+        "RACIRAFT SYRUP", "MOXITOB E/DROPS",
+    ])
+    def test_container_forms_are_one_unit_per_pack(self, name):
+        # A 100ml lotion is one bottle; the number says how much is inside,
+        # not how many there are. Left unset these sit in the catalogue
+        # permanently flagged for a question with one possible answer.
+        assert parse_product_name(name).pack_multiplier.value == 1
+
+    @pytest.mark.parametrize("name,pack", [
+        ("CALCIDEF", "1x10TA"),
+        ("SILODAL D 8", "1X10CA"),
+    ])
+    def test_counted_forms_keep_their_real_pack(self, name, pack):
+        assert parse_product_name(name, pack).pack_multiplier.value == 10
+
+    def test_a_tablet_with_no_pack_is_not_assumed_to_be_one(self):
+        # A strip holds a genuinely countable number. Defaulting to 1 would
+        # understate stock by the size of the strip.
+        assert parse_product_name("NUROKIND LC TAB").pack_multiplier.value is None
+
+
 class TestPrecedenceAndConflict:
     def test_spelled_out_form_beats_the_pack_code(self):
         parsed = parse_product_name("RACIRAFT SYRUP", "1X200M")

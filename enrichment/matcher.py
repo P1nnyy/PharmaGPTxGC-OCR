@@ -42,6 +42,13 @@ STRONG_SCORE = 88.0
 # listing without indicating a different product.
 _NOISE_TOKENS = {"TAB", "TABS", "TABLET", "CAP", "CAPS", "CAPSULE", "INJ", "INJECTION", "SUSP", "SYP"}
 
+# See rule 2 below. The first unexplained token is the dangerous one; further
+# ones increasingly read as marketing copy on the same product rather than as
+# a different SKU.
+_FIRST_EXTRA_PENALTY = 18.0
+_FURTHER_EXTRA_PENALTY = 4.0
+_MAX_EXTRA_PENALTY = 32.0
+
 
 class MatchCandidate(BaseModel):
     slug: str
@@ -142,9 +149,26 @@ def score_candidate(
     reasons: list[str] = []
 
     # Rule 2. A qualifier the invoice never mentioned usually means a
-    # different product in the same family.
+    # different product in the same family - but the penalty has to
+    # distinguish two very different situations that both "add tokens":
+    #
+    #   MAHAFLOX          -> MAHAFLOX LP            one short code, likely a
+    #                                               DIFFERENT medicine
+    #   SUNSHADE ULTRA    -> SUNSHADE ULTRA BLOCK   six words of marketing
+    #   BLOCK                MINERAL GLOW SUNSCREEN copy on the SAME product
+    #                        SPF 50 PA
+    #
+    # A flat per-token charge treats the second as six times worse than the
+    # first and drives a correct listing below the threshold, so the retail
+    # site's own product page gets discarded while a weaker match survives.
+    # The first extra token therefore keeps the full charge - that is where
+    # the real risk lives - and each further one costs much less, on the
+    # reasoning that a pile of extra words reads as description rather than
+    # as a different SKU. The total is capped for the same reason.
     if extra:
-        score -= 18.0 * len(extra)
+        penalty = min(_FIRST_EXTRA_PENALTY + _FURTHER_EXTRA_PENALTY * (len(extra) - 1),
+                      _MAX_EXTRA_PENALTY)
+        score -= penalty
         reasons.append(f"listing adds {', '.join(sorted(extra))} — check this is the same product")
     if missing:
         score -= 12.0 * len(missing)

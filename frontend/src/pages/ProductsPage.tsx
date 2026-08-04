@@ -38,6 +38,33 @@ const FORMS = [
 
 const BASE_UNITS = ['TABLET', 'CAPSULE', 'ML', 'GM', 'SACHET', 'VIAL', 'AMPOULE', 'RESPULE', 'UNIT', 'KIT'];
 
+// The unit a form is dispensed in follows from the form itself — a cream is
+// counted in grams, a syrup in millilitres. Asking for both separately makes
+// the reviewer answer the same question twice and lets the two disagree.
+// Mirrors _FORM_TO_UNIT on the backend so a value typed here and a value
+// parsed there cannot drift apart.
+const FORM_TO_UNIT: Record<string, string> = {
+  Tablet: 'TABLET', Capsule: 'CAPSULE', Rotacap: 'CAPSULE',
+  Suspension: 'ML', Syrup: 'ML', Solution: 'ML', Lotion: 'ML',
+  Drops: 'ML', 'Eye Drops': 'ML', 'Ear Drops': 'ML', 'Nasal Drops': 'ML',
+  'Nasal Spray': 'ML', Spray: 'ML', Mouthwash: 'ML',
+  Cream: 'GM', Ointment: 'GM', Gel: 'GM', Powder: 'GM',
+  Injection: 'VIAL', Vial: 'VIAL', Ampoule: 'AMPOULE',
+  Sachet: 'SACHET', Granules: 'SACHET', Respule: 'RESPULE',
+  Inhaler: 'UNIT', Suppository: 'UNIT', Kit: 'KIT',
+};
+
+// Forms sold as one container whose size is a volume or weight rather than a
+// count. Units per pack is 1 for these and there is no second answer, so the
+// field is filled rather than left as an open question. Tablets and capsules
+// are absent on purpose: a strip holds a genuinely countable number, and
+// defaulting to 1 there would understate stock by the size of the strip.
+const SINGLE_CONTAINER_FORMS = new Set([
+  'Lotion', 'Cream', 'Ointment', 'Gel', 'Syrup', 'Suspension', 'Solution',
+  'Drops', 'Eye Drops', 'Ear Drops', 'Nasal Drops', 'Powder', 'Spray',
+  'Nasal Spray', 'Mouthwash', 'Inhaler',
+]);
+
 const SCHEDULES = ['Schedule H', 'Schedule H1', 'Schedule X', 'Schedule G', 'Narcotic', 'OTC', 'General'];
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -489,6 +516,26 @@ const ProductDetailDrawer: React.FC<{
   const confirmed = new Set(product.confirmed_fields || []);
   const set = (key: keyof typeof form) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
 
+  // Choosing a dosage form answers two other questions at the same time: what
+  // the item is counted in, and — for anything sold as a single container —
+  // how many units are in a pack. Filling them here saves the reviewer
+  // restating what they just said, and stops the three fields contradicting
+  // each other.
+  //
+  // Only fills what is still blank. A value already on the record was either
+  // read from the invoice or typed by a person, and neither should be
+  // overwritten as a side effect of picking from a dropdown.
+  const setDosageForm = (value: string) =>
+    setForm((f) => {
+      const next = { ...f, form: value };
+      const unit = FORM_TO_UNIT[value];
+      if (unit && !f.base_unit) next.base_unit = unit;
+      if (value && SINGLE_CONTAINER_FORMS.has(value) && !f.pack_multiplier) {
+        next.pack_multiplier = '1';
+      }
+      return next;
+    });
+
   const payload = () => ({
     ...form,
     // An empty box means "no value", not the empty string — otherwise the
@@ -697,7 +744,7 @@ const ProductDetailDrawer: React.FC<{
 
               <div>
                 <FieldLabel label="Dosage form" confirmed={confirmed.has('form')} confidence={product.form_confidence} hasValue={!!form.form} />
-                <select className={inputClass} value={form.form} onChange={(e) => set('form')(e.target.value)}>
+                <select className={inputClass} value={form.form} onChange={(e) => setDosageForm(e.target.value)}>
                   <option value="">Not set</option>
                   {FORMS.map((f) => (
                     <option key={f} value={f}>{f}</option>

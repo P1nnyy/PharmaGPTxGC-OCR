@@ -113,6 +113,71 @@ class TestQualifierTokens:
         assert not any("adds" in r.lower() for r in c.reasons)
 
 
+class TestMarketingCopyVersusVariant:
+    """Both "add tokens", and the penalty has to tell them apart.
+
+    A single extra short code usually means a DIFFERENT medicine
+    (MAHAFLOX vs MAHAFLOX-LP). A pile of extra words usually means the same
+    product described at retail ("SUNSHADE ULTRA BLOCK" vs "SUNSHADE ULTRA
+    BLOCK MINERAL GLOW SUNSCREEN SPF 50 PA"). A flat per-token charge treated
+    the second as six times worse and threw the correct listing away while a
+    weaker one survived.
+    """
+
+    def test_long_marketing_listing_still_matches(self):
+        c = score_candidate(
+            "SUNSHADE ULTRA BLOCK", None, None,
+            listing("SUNSHADE ULTRA BLOCK MINERAL GLOW SUNSCREEN SPF 50 PA"),
+        )
+        assert c is not None
+        assert c.score >= MIN_SCORE
+
+    def test_single_extra_token_still_ranks_below_the_exact_match(self):
+        exact = score_candidate("MAHAFLOX", None, None, listing("MAHAFLOX"))
+        variant = score_candidate("MAHAFLOX", None, None, listing("MAHAFLOX LP"))
+        assert exact.score == 100.0
+        assert variant is not None
+        assert variant.score < exact.score - 10
+
+    def test_a_very_verbose_listing_is_not_penalised_out_of_existence(self):
+        # The cap exists so that piling on descriptive words cannot drive a
+        # genuine match below the threshold. Asserting the surviving score
+        # rather than equality between two listings: their base brand
+        # similarity differs with length, so the totals legitimately differ
+        # even where the penalty component is identical.
+        verbose = score_candidate(
+            "BRAND", None, None,
+            listing("BRAND ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT"),
+        )
+        assert verbose is not None
+        assert verbose.score >= MIN_SCORE
+
+    def test_penalty_stops_growing_once_capped(self):
+        from enrichment.matcher import (
+            _FIRST_EXTRA_PENALTY,
+            _FURTHER_EXTRA_PENALTY,
+            _MAX_EXTRA_PENALTY,
+        )
+
+        def penalty(n_extra: int) -> float:
+            return min(
+                _FIRST_EXTRA_PENALTY + _FURTHER_EXTRA_PENALTY * (n_extra - 1),
+                _MAX_EXTRA_PENALTY,
+            )
+
+        assert penalty(1) == _FIRST_EXTRA_PENALTY
+        assert penalty(2) > penalty(1)
+        assert penalty(20) == _MAX_EXTRA_PENALTY
+        assert penalty(50) == penalty(20)
+
+    def test_the_exact_match_still_wins_over_the_verbose_one(self):
+        exact = score_candidate("SUNSHADE", None, None, listing("SUNSHADE"))
+        verbose = score_candidate(
+            "SUNSHADE", None, None, listing("SUNSHADE ULTRA BLOCK MINERAL GLOW SUNSCREEN")
+        )
+        assert exact.score > verbose.score
+
+
 class TestFormAndThreshold:
     def test_form_disagreement_penalised_and_explained(self):
         tablet = score_candidate("NUROKIND LC", None, "Tablet", listing("NUROKIND LC", None, "Tablet"))
