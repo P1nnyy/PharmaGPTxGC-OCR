@@ -337,3 +337,34 @@ export interface CanonicalInvoice {
   extraction_engine: string;
   raw_engine_metadata?: any;
 }
+
+/**
+ * An item type: what a product IS, plus the units it can be measured in.
+ *
+ * This vocabulary used to be hardcoded in five places — the parser's form
+ * table, its single-container set, and three lists in the UI — which had to
+ * be edited together and had already drifted apart. It is data now, so a
+ * pharmacy can add what it actually stocks.
+ */
+export interface ItemType {
+  id: string;
+  name: string;
+  /** The unit a single dispensable item is counted in. Always one of supported_units. */
+  base_unit: string;
+  supported_units: string[];
+  /** True when pack size means "one container of this size", not a count. */
+  single_container: boolean;
+  /** Words in a product name that suggest this type. Optional. */
+  keywords: string[];
+  /** Seeded types can be switched off, but never renamed or deleted. */
+  builtin: boolean;
+  active: boolean;
+  sort_order?: number;
+}
+
+export interface ItemTypesResponse {
+  item_types: ItemType[];
+  known_units: string[];
+  count_units: string[];
+  measure_units: string[];
+}

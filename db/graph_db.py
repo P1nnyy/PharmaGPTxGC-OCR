@@ -27,6 +27,10 @@ CONSTRAINTS = [
     # since composite constraints require an Aura tier that may not be available.
     "CREATE CONSTRAINT batch_id IF NOT EXISTS FOR (n:Batch) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT hsn_code IF NOT EXISTS FOR (n:HSNCode) REQUIRE n.code IS UNIQUE",
+    # Products refer to their item type by name, so two types sharing one name
+    # would make a product's form ambiguous.
+    "CREATE CONSTRAINT item_type_id IF NOT EXISTS FOR (n:ItemType) REQUIRE n.id IS UNIQUE",
+    "CREATE CONSTRAINT item_type_name IF NOT EXISTS FOR (n:ItemType) REQUIRE n.name IS UNIQUE",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key

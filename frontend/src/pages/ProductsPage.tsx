@@ -23,47 +23,15 @@ import type {
   ProductFlag,
   ProductAlias,
   EnrichmentResult,
-  Suggestion
+  Suggestion,
+  ItemType,
 } from '../api/types';
 
-// Vocabulary the pharmacist picks from rather than types, so the catalogue
-// doesn't accumulate TAB / Tab / Tablet / TABLET as four different forms —
-// which is the same normalization problem one level down.
-const FORMS = [
-  'Tablet', 'Capsule', 'Suspension', 'Syrup', 'Injection', 'Vial', 'Ampoule',
-  'Sachet', 'Granules', 'Eye Drops', 'Ear Drops', 'Nasal Drops', 'Nasal Spray',
-  'Drops', 'Ointment', 'Cream', 'Gel', 'Lotion', 'Solution', 'Powder',
-  'Spray', 'Inhaler', 'Respule', 'Rotacap', 'Suppository', 'Mouthwash', 'Kit'
-];
-
-const BASE_UNITS = ['TABLET', 'CAPSULE', 'ML', 'GM', 'SACHET', 'VIAL', 'AMPOULE', 'RESPULE', 'UNIT', 'KIT'];
-
-// The unit a form is dispensed in follows from the form itself — a cream is
-// counted in grams, a syrup in millilitres. Asking for both separately makes
-// the reviewer answer the same question twice and lets the two disagree.
-// Mirrors _FORM_TO_UNIT on the backend so a value typed here and a value
-// parsed there cannot drift apart.
-const FORM_TO_UNIT: Record<string, string> = {
-  Tablet: 'TABLET', Capsule: 'CAPSULE', Rotacap: 'CAPSULE',
-  Suspension: 'ML', Syrup: 'ML', Solution: 'ML', Lotion: 'ML',
-  Drops: 'ML', 'Eye Drops': 'ML', 'Ear Drops': 'ML', 'Nasal Drops': 'ML',
-  'Nasal Spray': 'ML', Spray: 'ML', Mouthwash: 'ML',
-  Cream: 'GM', Ointment: 'GM', Gel: 'GM', Powder: 'GM',
-  Injection: 'VIAL', Vial: 'VIAL', Ampoule: 'AMPOULE',
-  Sachet: 'SACHET', Granules: 'SACHET', Respule: 'RESPULE',
-  Inhaler: 'UNIT', Suppository: 'UNIT', Kit: 'KIT',
-};
-
-// Forms sold as one container whose size is a volume or weight rather than a
-// count. Units per pack is 1 for these and there is no second answer, so the
-// field is filled rather than left as an open question. Tablets and capsules
-// are absent on purpose: a strip holds a genuinely countable number, and
-// defaulting to 1 there would understate stock by the size of the strip.
-const SINGLE_CONTAINER_FORMS = new Set([
-  'Lotion', 'Cream', 'Ointment', 'Gel', 'Syrup', 'Suspension', 'Solution',
-  'Drops', 'Eye Drops', 'Ear Drops', 'Nasal Drops', 'Powder', 'Spray',
-  'Nasal Spray', 'Mouthwash', 'Inhaler',
-]);
+// The item-type vocabulary is NOT hardcoded here any more. It lives in the
+// catalogue (Settings -> Catalogue), because a pharmacy stocks things this
+// list never anticipated, and because the same names were previously repeated
+// in five places that had to be edited together and had already drifted.
+// The drawer loads it and derives the pickers from it below.
 
 const SCHEDULES = ['Schedule H', 'Schedule H1', 'Schedule X', 'Schedule G', 'Narcotic', 'OTC', 'General'];
 
@@ -495,6 +463,22 @@ const ProductDetailDrawer: React.FC<{
   onSaved: (message: string) => Promise<void>;
   onReplace: (product: Product) => void;
 }> = ({ product, onClose, onSaved, onReplace }) => {
+  // Only the active types are offered, but the product's own form is kept in
+  // the list even if that type has since been switched off — otherwise opening
+  // an older product would silently blank its form on the next save.
+  const [vocabulary, setVocabulary] = useState<ItemType[]>([]);
+  const [knownUnits, setKnownUnits] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.listItemTypes(true).then((data) => {
+      if (cancelled) return;
+      setVocabulary(data.item_types);
+      setKnownUnits(data.known_units);
+    }).catch(() => { /* pickers fall back to whatever the product already has */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const [form, setForm] = useState({
     brand: product.brand || '',
     strength: product.strength || '',
@@ -528,13 +512,34 @@ const ProductDetailDrawer: React.FC<{
   const setDosageForm = (value: string) =>
     setForm((f) => {
       const next = { ...f, form: value };
-      const unit = FORM_TO_UNIT[value];
-      if (unit && !f.base_unit) next.base_unit = unit;
-      if (value && SINGLE_CONTAINER_FORMS.has(value) && !f.pack_multiplier) {
+      const type = vocabulary.find((t) => t.name === value);
+      if (type?.base_unit && !f.base_unit) next.base_unit = type.base_unit;
+      // A unit carried over from a different form may not be valid for this
+      // one; the server refuses those, so correct it here rather than letting
+      // the save fail.
+      if (type && f.base_unit && !type.supported_units.includes(f.base_unit)) {
+        next.base_unit = type.base_unit;
+      }
+      if (type?.single_container && !f.pack_multiplier) {
         next.pack_multiplier = '1';
       }
       return next;
     });
+
+  // Active types, plus this product's own form if its type was switched off.
+  const formOptions = React.useMemo(() => {
+    const names = vocabulary.filter((t) => t.active).map((t) => t.name);
+    if (form.form && !names.includes(form.form)) names.push(form.form);
+    return names;
+  }, [vocabulary, form.form]);
+
+  // Only the units this form supports. With no matching type (an unknown or
+  // retired form) every known unit is offered rather than none.
+  const unitOptions = React.useMemo(() => {
+    const type = vocabulary.find((t) => t.name === form.form);
+    if (type?.supported_units?.length) return type.supported_units;
+    return knownUnits;
+  }, [vocabulary, knownUnits, form.form]);
 
   const payload = () => ({
     ...form,
@@ -746,7 +751,7 @@ const ProductDetailDrawer: React.FC<{
                 <FieldLabel label="Dosage form" confirmed={confirmed.has('form')} confidence={product.form_confidence} hasValue={!!form.form} />
                 <select className={inputClass} value={form.form} onChange={(e) => setDosageForm(e.target.value)}>
                   <option value="">Not set</option>
-                  {FORMS.map((f) => (
+                  {formOptions.map((f) => (
                     <option key={f} value={f}>{f}</option>
                   ))}
                 </select>
@@ -772,7 +777,7 @@ const ProductDetailDrawer: React.FC<{
                   {/* A lotion has no "individual units" to count — it is one
                       bottle whose size is a volume. Saying otherwise asks the
                       reviewer a question their product doesn't have. */}
-                  {SINGLE_CONTAINER_FORMS.has(form.form)
+                  {vocabulary.find((t) => t.name === form.form)?.single_container
                     ? `A ${form.form.toLowerCase()} is sold as one container, so this is 1 — its size is recorded as the pack size.`
                     : 'Individual tablets, vials or sachets in one pack — this is what turns billed packs into countable stock.'}
                 </p>
@@ -782,7 +787,7 @@ const ProductDetailDrawer: React.FC<{
                 <FieldLabel label="Dispensing unit" confirmed={confirmed.has('base_unit')} confidence={product.base_unit_confidence} hasValue={!!form.base_unit} />
                 <select className={inputClass} value={form.base_unit} onChange={(e) => set('base_unit')(e.target.value)}>
                   <option value="">Not set</option>
-                  {BASE_UNITS.map((u) => (
+                  {unitOptions.map((u: string) => (
                     <option key={u} value={u}>{u}</option>
                   ))}
                 </select>

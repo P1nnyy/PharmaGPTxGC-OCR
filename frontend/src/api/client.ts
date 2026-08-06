@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -283,6 +283,53 @@ export const apiClient = {
       throw new Error(err.detail || 'Failed to save product.');
     }
     return response.json();
+  },
+
+  // ---- Item types: the catalogue's vocabulary ----------------------------
+  // What a product can be, and the units it may be measured in. Read from the
+  // server rather than hardcoded in the UI, so a pharmacy stocking something
+  // the original list never anticipated can say so without a code change.
+
+  async listItemTypes(includeInactive = false): Promise<ItemTypesResponse> {
+    const response = await fetch(`/item-types?include_inactive=${includeInactive}`);
+    if (!response.ok) throw new Error('Failed to load item types.');
+    return response.json();
+  },
+
+  async createItemType(payload: Record<string, any>): Promise<ItemType> {
+    const response = await fetch('/item-types', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create item type.');
+    }
+    return response.json();
+  },
+
+  async updateItemType(typeId: string, payload: Record<string, any>): Promise<ItemType> {
+    const response = await fetch(`/item-types/${typeId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to save item type.');
+    }
+    return response.json();
+  },
+
+  async deleteItemType(typeId: string): Promise<void> {
+    const response = await fetch(`/item-types/${typeId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      // The server explains why (built-in, or still in use) — surface that
+      // rather than a generic failure, since the reason names the way out.
+      throw new Error(err.detail || 'Failed to delete item type.');
+    }
   },
 
   // Looks the product up against public drug listings. Read-only: it returns

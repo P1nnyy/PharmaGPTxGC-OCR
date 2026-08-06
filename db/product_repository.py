@@ -922,6 +922,49 @@ def update_product(
     return get_product(result["id"])
 
 
+def _apply_item_type_rules(tx, updates: dict, merged: dict) -> None:
+    """Makes the admin's item-type definitions bind on the product itself.
+
+    Two rules, both derived from the type rather than hardcoded here:
+
+      * the dispensing unit must be one the type actually supports - a cream
+        measured in TABLET is not a data-entry preference, it is wrong, and it
+        silently corrupts every stock figure derived from it;
+      * changing the form to one whose current unit no longer fits adopts that
+        type's own unit instead of leaving a stale one behind.
+
+    A form with no matching item type is left alone. Types can be switched off
+    while products still carry their name, and refusing to save those products
+    would strand them.
+    """
+    from db import item_type_repository
+
+    form = merged.get("form")
+    if not form:
+        return
+
+    rules = item_type_repository.units_for_form(tx, form)
+    if not rules:
+        return
+
+    supported = rules.get("supported_units") or []
+    if not supported:
+        return
+
+    unit = merged.get("base_unit")
+    if "base_unit" in updates and unit and unit not in supported:
+        raise ValueError(
+            f"{form} is measured in {', '.join(supported)} — {unit} is not one of them. "
+            f"Add {unit} to the {form} item type in Settings if that is intended."
+        )
+
+    # Form changed (or the unit was never set) and what is there does not fit:
+    # take the type's own unit rather than keeping a unit from a different form.
+    if unit not in supported:
+        updates["base_unit"] = rules.get("base_unit") or supported[0]
+        merged["base_unit"] = updates["base_unit"]
+
+
 def _update_product_tx(tx, product_id: str, fields: dict, confirm: bool, allow_merge: bool):
     existing = tx.run("MATCH (p:Product {id: $id}) RETURN p", id=product_id).single()
     if not existing:
@@ -930,6 +973,8 @@ def _update_product_tx(tx, product_id: str, fields: dict, confirm: bool, allow_m
 
     updates = {k: v for k, v in fields.items() if k in EDITABLE_FIELDS}
     merged = {**current, **updates}
+
+    _apply_item_type_rules(tx, updates, merged)
 
     new_key = build_identity_key(
         merged.get("brand"), merged.get("strength"), merged.get("form"), merged.get("pack_size")

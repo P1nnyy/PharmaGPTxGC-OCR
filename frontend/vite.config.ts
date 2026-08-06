@@ -31,6 +31,14 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
         secure: false,
+      },
+      // Each API prefix needs an entry here AND a handle block in
+      // deploy/Caddyfile*, or it falls through to the SPA and the client gets
+      // index.html where it expected JSON.
+      '/item-types': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
       }
     }
   }
