@@ -48,6 +48,10 @@ www.{$DOMAIN} {
 	handle /invoices* {
 		reverse_proxy backend:8000
 	}
+	handle /item-types* {
+		reverse_proxy backend:8000
+	}
+
 	handle /products* {
 		reverse_proxy backend:8000
 	}
