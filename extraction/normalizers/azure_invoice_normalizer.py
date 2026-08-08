@@ -1457,7 +1457,15 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     if raw_content:
         import re
         if not seller_phone:
-            phone_match = re.search(r'(?:PHONE|Phone|Ph\.?|Mob\.?|Mobile|Contact)[\s\:\.\-]*([0-9\-\,\ ]{8,})', raw_content, re.IGNORECASE)
+            # "NO." commonly sits between the label and the digits - "PH
+            # NO.0186-2224274", "MOb NO. 9855024274" - and without allowing
+            # for it the pattern died on the N and the invoice showed no
+            # phone at all, on a bill that prints two.
+            phone_match = re.search(
+                r'(?:PHONE|Phone|Ph\.?|Mob\.?|Mobile|Contact)[\s\.\:\-]*'
+                r'(?:N[O0]\.?|NUM(?:BER)?\.?)?[\s\:\.\-]*'
+                r'([0-9][0-9\-\,\ ]{7,})',
+                raw_content, re.IGNORECASE)
             if phone_match:
                 seller_phone = phone_match.group(1).split('\n')[0].strip()
         if not drug_license:
