@@ -1409,7 +1409,19 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                     if any(k in lbl for k in _SUBTOTAL_LABELS):
                         footer_data["subtotal"] = val
                     elif is_discount_label(lbl):
-                        footer_data["discount"] = val
+                        # Summed, not overwritten: Mahajan Medicos prints a
+                        # "1st Discount" and a "2nd Discount" as two separate
+                        # footer rows, and taking the last one silently
+                        # dropped the first - the invoice showed only the
+                        # smaller of the two and its totals never balanced.
+                        # Each is also kept on its own so the review screen
+                        # can show the reviewer what actually adds up to the
+                        # figure, not just the sum.
+                        if val is not None:
+                            footer_data["discount"] = (footer_data.get("discount") or 0.0) + val
+                            footer_data.setdefault("discount_breakdown", []).append(
+                                {"label": lbl_raw.strip(), "amount": val}
+                            )
                     elif "sgst" in lbl:
                         footer_data["sgst"] = val
                     elif "cgst" in lbl:
@@ -1759,6 +1771,11 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # invoice actually printed can serve as evidence for the line formula.
     printed_subtotal = subtotal
     discount = footer_data.get("discount")
+    # The individual discount rows behind that sum, when the footer printed
+    # more than one - "1st Discount 139.09" and "2nd Discount 10.00" rather
+    # than a single figure. Kept so the reviewer can see what the total is
+    # made of instead of trusting an opaque number.
+    discount_breakdown = footer_data.get("discount_breakdown") or []
     cgst = footer_data.get("cgst")
     sgst = footer_data.get("sgst")
     igst = footer_data.get("igst")
@@ -1824,8 +1841,15 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # subtracts it (subtotal - discount + tax = total). Invoices that print
     # the deduction as "-151.42" would otherwise be added back, turning a
     # discount into a surcharge and failing the review screen's math check.
+    # The breakdown entries are normalised the same way, so a component never
+    # disagrees in sign with the total it was summed into - a row reading
+    # "DISCOUNT -₹151.42" under a "Discount -" heading reads as a double
+    # negative and looks like the figure is wrong rather than explaining it.
     if isinstance(discount, (int, float)) and discount < 0:
         discount = abs(discount)
+    discount_breakdown = [
+        {"label": d["label"], "amount": abs(d["amount"])} for d in discount_breakdown
+    ]
 
 
     # 8. Calculate extraction confidence
@@ -1895,6 +1919,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         drug_license=str(drug_license) if drug_license else None,
         subtotal=subtotal,
         discount=discount,
+        discount_breakdown=discount_breakdown,
         cgst=cgst,
         sgst=sgst,
         igst=igst,

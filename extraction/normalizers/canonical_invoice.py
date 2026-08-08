@@ -53,6 +53,11 @@ class CanonicalInvoice(BaseModel):
     drug_license: Optional[str] = None
     subtotal: Optional[float] = None
     discount: Optional[float] = None
+    # The individual rows behind `discount`, when the invoice printed more
+    # than one - "1st Discount" and "2nd Discount" as separate footer lines,
+    # say. Each item is {"label": str, "amount": float}. Empty when the
+    # invoice states a single figure, so a UI need only branch on length.
+    discount_breakdown: List[Dict[str, Any]] = []
     cgst: Optional[float] = None
     sgst: Optional[float] = None
     igst: Optional[float] = None

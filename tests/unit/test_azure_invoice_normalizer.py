@@ -1312,3 +1312,102 @@ class TestDiscountLabels:
     def test_tax_labels_are_not_discounts(self):
         for label in ("SGST PAYBLE", "CGST PAYBLE", "TOTAL GST", "CR/DR NOTE"):
             assert is_discount_label(label) is False, label
+
+
+class TestMultipleDiscounts:
+    """An invoice that prints its discount as more than one footer row.
+
+    Mahajan Medicos states "1st Discount 139.09" and "2nd Discount 10.00" as
+    two separate lines, not one. Taking only the last label-value pair seen
+    kept the second and silently dropped the first, so the invoice showed a
+    discount of 10.00 against a printed total of 149.09 and its totals never
+    reconciled - the reviewer saw "Formula mismatch" with no way to tell why.
+    """
+
+    def _invoice_with_two_discount_rows(self):
+        item_cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "ITEM"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "AMOUNT"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "MOOV CREAM"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "281.14"},
+        ]
+        footer_cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "2703.80"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "1st Discount"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "139.09"},
+            {"rowIndex": 2, "columnIndex": 0, "content": "2nd Discount"},
+            {"rowIndex": 2, "columnIndex": 1, "content": "10.00"},
+            {"rowIndex": 3, "columnIndex": 0, "content": "SGST"},
+            {"rowIndex": 3, "columnIndex": 1, "content": "152.69"},
+            {"rowIndex": 4, "columnIndex": 0, "content": "CGST"},
+            {"rowIndex": 4, "columnIndex": 1, "content": "152.69"},
+            {"rowIndex": 5, "columnIndex": 0, "content": "GRAND TOTAL"},
+            {"rowIndex": 5, "columnIndex": 1, "content": "2860.00"},
+        ]
+        return {
+            "modelId": "prebuilt-invoice",
+            "documents": [],
+            "tables": [
+                {"rowCount": 2, "columnCount": 2, "cells": item_cells},
+                {"rowCount": 6, "columnCount": 2, "cells": footer_cells},
+            ],
+        }
+
+    def test_both_rows_are_summed_into_the_total(self):
+        invoice = normalize_azure_invoice(self._invoice_with_two_discount_rows())
+        assert invoice.discount == 149.09
+
+    def test_the_breakdown_names_both_rows(self):
+        invoice = normalize_azure_invoice(self._invoice_with_two_discount_rows())
+        assert invoice.discount_breakdown == [
+            {"label": "1st Discount", "amount": 139.09},
+            {"label": "2nd Discount", "amount": 10.0},
+        ]
+
+    def test_a_single_discount_row_produces_a_one_item_breakdown(self):
+        """Most invoices state one figure; the breakdown still carries it,
+        so the frontend need only branch on length rather than on presence."""
+        cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "100.00"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "Discount"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "5.00"},
+            {"rowIndex": 2, "columnIndex": 0, "content": "GRAND TOTAL"},
+            {"rowIndex": 2, "columnIndex": 1, "content": "95.00"},
+        ]
+        raw = {"modelId": "prebuilt-invoice", "documents": [],
+               "tables": [{"rowCount": 3, "columnCount": 2, "cells": cells}]}
+        invoice = normalize_azure_invoice(raw)
+        assert invoice.discount == 5.0
+        assert invoice.discount_breakdown == [{"label": "Discount", "amount": 5.0}]
+
+    def test_no_discount_row_leaves_an_empty_breakdown(self):
+        cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "100.00"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "GRAND TOTAL"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "100.00"},
+        ]
+        raw = {"modelId": "prebuilt-invoice", "documents": [],
+               "tables": [{"rowCount": 2, "columnCount": 2, "cells": cells}]}
+        invoice = normalize_azure_invoice(raw)
+        assert invoice.discount_breakdown == []
+
+    def test_a_negative_discount_row_is_normalised_like_the_total(self):
+        """A component must not disagree in sign with the total it was summed
+        into - "DISCOUNT -151.42" under a "Discount -" heading reads as a
+        double negative and looks like the figure is wrong."""
+        cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "1000.00"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "DISCOUNT"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "-151.42"},
+            {"rowIndex": 2, "columnIndex": 0, "content": "GRAND TOTAL"},
+            {"rowIndex": 2, "columnIndex": 1, "content": "848.58"},
+        ]
+        raw = {"modelId": "prebuilt-invoice", "documents": [],
+               "tables": [{"rowCount": 3, "columnCount": 2, "cells": cells}]}
+        invoice = normalize_azure_invoice(raw)
+        assert invoice.discount == 151.42
+        assert invoice.discount_breakdown == [{"label": "DISCOUNT", "amount": 151.42}]

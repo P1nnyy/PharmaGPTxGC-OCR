@@ -95,6 +95,8 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
             buyer_gstin: $buyer_gstin,
             subtotal: $subtotal,
             discount: $discount,
+            discount_breakdown_labels: $discount_breakdown_labels,
+            discount_breakdown_amounts: $discount_breakdown_amounts,
             cgst: $cgst,
             sgst: $sgst,
             igst: $igst,
@@ -131,6 +133,11 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
         buyer_gstin=inv.buyer_gstin,
         subtotal=inv.subtotal,
         discount=inv.discount,
+        # Neo4j properties can't hold a list of maps, so the breakdown travels
+        # as two parallel lists and is zipped back into {label, amount} pairs
+        # on read (_get_invoice_tx).
+        discount_breakdown_labels=[str(d.get("label")) for d in (inv.discount_breakdown or [])],
+        discount_breakdown_amounts=[float(d.get("amount")) for d in (inv.discount_breakdown or [])],
         cgst=inv.cgst,
         sgst=inv.sgst,
         igst=inv.igst,
@@ -702,6 +709,16 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
     data["seller"] = vendor
     if not data.get("seller_name") and vendor:
         data["seller_name"] = vendor.get("name")
+
+    # Rebuild {label, amount} pairs from the two parallel lists they were
+    # stored as (see save_invoice). zip stops at the shorter list, so a
+    # count mismatch degrades to fewer rows rather than an index error.
+    breakdown_labels = data.pop("discount_breakdown_labels", None) or []
+    breakdown_amounts = data.pop("discount_breakdown_amounts", None) or []
+    data["discount_breakdown"] = [
+        {"label": label, "amount": amount}
+        for label, amount in zip(breakdown_labels, breakdown_amounts)
+    ]
 
     line_items = []
     for row in record["rows"]:

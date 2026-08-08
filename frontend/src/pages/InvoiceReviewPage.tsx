@@ -42,6 +42,12 @@ interface InvoiceHeader {
   seller_phone?: string;
   drug_license?: string;
   buyer_gstin?: string;
+  // The rows behind `discount`, when the invoice printed more than one -
+  // Mahajan Medicos states a "1st Discount" and a "2nd Discount" as separate
+  // footer lines. Read-only: editing the total in Discount - does not rewrite
+  // this, since it is evidence of what was found, not a value to keep in
+  // sync. Empty when the invoice states a single figure.
+  discount_breakdown?: { label: string; amount: number }[];
 }
 
 // Type definition for spreadsheet row attributes (allowing nulls for clean validation)
@@ -106,22 +112,39 @@ const CHECK_DOTS: Record<CheckStatus, string> = {
  * Right-aligned and borderless until touched, so the block still reads as a
  * summary rather than a form - the reviewer's eye should land on the numbers,
  * not on five input boxes.
+ *
+ * Shows two decimal places at rest — "10.00" rather than "10" — so every
+ * figure in the block reads as money, whether or not it happens to be a whole
+ * number. Only at rest: while the field is focused it shows exactly what was
+ * typed, because reformatting on every keystroke would rewrite "149.0" to
+ * "149.00" mid-edit and fight the cursor as a decimal is being typed.
  */
 const TotalsInput: React.FC<{
   value: any;
   onChange: (value: string) => void;
   placeholder?: string;
   className?: string;
-}> = ({ value, onChange, placeholder = '—', className = '' }) => (
-  <input
-    type="text"
-    inputMode="decimal"
-    value={value ?? ''}
-    placeholder={placeholder}
-    onChange={(e) => onChange(e.target.value)}
-    className={`w-24 bg-transparent text-right font-semibold text-slate-800 rounded-md px-1.5 py-0.5 border border-transparent hover:border-slate-300 focus:border-[#1b5dfc] focus:bg-white focus:outline-none transition-colors ${className}`}
-  />
-);
+}> = ({ value, onChange, placeholder = '—', className = '' }) => {
+  const [focused, setFocused] = useState(false);
+  const display = focused
+    ? (value ?? '')
+    : (() => {
+        const num = toNumberOrNull(value);
+        return num === null ? '' : num.toFixed(2);
+      })();
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={display}
+      placeholder={placeholder}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onChange={(e) => onChange(e.target.value)}
+      className={`w-24 bg-transparent text-right font-semibold text-slate-800 rounded-md px-1.5 py-0.5 border border-transparent hover:border-slate-300 focus:border-[#1b5dfc] focus:bg-white focus:outline-none transition-colors ${className}`}
+    />
+  );
+};
 
 const ordinal = (n: number): string => {
   const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
@@ -852,6 +875,7 @@ export const InvoiceReviewPage: React.FC = () => {
           seller_phone: detail.seller_phone || detail.seller?.phone || '',
           drug_license: detail.drug_license || detail.seller?.drug_license || '',
           buyer_gstin: detail.buyer_gstin || '',
+          discount_breakdown: Array.isArray(detail.discount_breakdown) ? detail.discount_breakdown : [],
         });
 
         // ---- Auto Rotation from Azure Page Angles ----
@@ -1675,6 +1699,21 @@ export const InvoiceReviewPage: React.FC = () => {
                   />
                 )}
               </div>
+
+              {/* What the discount is made of, when the invoice printed more
+                  than one - Mahajan Medicos states a "1st Discount" and a
+                  "2nd Discount" as two separate footer rows, and summing them
+                  without saying so would leave a total on screen that matches
+                  no single line the reviewer can check against the paper.
+                  Read-only: it is evidence of what was found, not a value to
+                  keep in sync with a manual edit to the total above. */}
+              {(header.discount_breakdown?.length ?? 0) > 1 && (
+                <div className="text-[10px] text-gray-500 text-right -mt-1">
+                  {header.discount_breakdown!
+                    .map((d) => `${d.label} ${formatCurrencyOrDash(d.amount)}`)
+                    .join(' + ')}
+                </div>
+              )}
 
               {(roundoff !== null || !isLocked) && (
                 <div className="flex items-center justify-between">
