@@ -1,5 +1,9 @@
 import pytest
 from extraction.normalizers.azure_invoice_normalizer import (
+    is_discount_label,
+    resolve_gstin_owners,
+    _strip_border_artifacts,
+    _footer_pairs,
     score_footer_table,
     _footer_label_and_value,
     normalize_azure_invoice,
@@ -1154,9 +1158,25 @@ class TestHybridFooterRow:
         return list(cells)
 
     def test_the_real_pair_is_found_past_a_count_label(self):
+        """A row carrying both a count and a money figure must surrender both.
+
+        Reporting only one pair per row is what hid the discount on S.G.
+        Pharma: "Total Items" sat to the left of "DIS AMT" in the same row and
+        won. The caller keeps the pairs naming a money field and ignores the
+        counts, so handing it everything is both correct and sufficient.
+        """
         row = self._row("GST 5,00%", "2530.86", "0.00", "191,45", "58.49", "58.49",
                         "116.98", "Total Qty\n26", "SGST PAYBLE", "58.49")
-        assert _footer_label_and_value(row) == ("SGST PAYBLE", "58.49")
+        assert ("SGST PAYBLE", "58.49") in _footer_pairs(row)
+
+    def test_a_label_and_its_amount_in_one_cell_are_split(self):
+        """S.G. Pharma packs both into a single cell on two lines, so no
+        amount of looking at neighbouring cells would find the figure."""
+        assert ("DIS AMT.", "87.83") in _footer_pairs(["Total Items :-\n3", "DIS AMT.\n87.83"])
+
+    def test_a_count_label_does_not_shadow_the_discount_beside_it(self):
+        pairs = dict(_footer_pairs(["Total Items :-\n3", "DIS AMT.\n87.83"]))
+        assert pairs.get("DIS AMT.") == "87.83"
 
     def test_a_matrix_header_does_not_swallow_the_row(self):
         """TOTAL/SCHEME are column headings, not a label and its amount."""
@@ -1212,3 +1232,83 @@ class TestHybridFooterRow:
         invoice = normalize_azure_invoice(raw)
         assert invoice.sgst == 58.49
         assert invoice.cgst == 58.49
+
+
+class TestBorderArtifactsInNames:
+    """A printed column rule read as part of the product name.
+
+    Azure returns "|SIZODON MD 0.5" when the border sits tight against the
+    first letter. The pipe then travels into the catalogue, where it makes one
+    product look like two depending on how close the ink was to the rule.
+    """
+
+    def test_a_leading_rule_is_removed(self):
+        assert _strip_border_artifacts("|SIZODON MD 0.5") == "SIZODON MD 0.5"
+
+    def test_a_pipe_inside_the_name_is_left_alone(self):
+        """It may be separating something the invoice meant to keep apart."""
+        assert _strip_border_artifacts("VITAMIN A|D") == "VITAMIN A|D"
+
+    def test_a_cell_that_is_only_a_rule_yields_nothing(self):
+        assert _strip_border_artifacts("|") is None
+
+    def test_nothing_is_invented_for_a_blank(self):
+        assert _strip_border_artifacts(None) is None
+        assert _strip_border_artifacts("   ") is None
+
+
+class TestGstinOwnership:
+    """Which registration belongs to the supplier.
+
+    Azure labels these VendorTaxId and CustomerTaxId and, on invoices printing
+    both parties side by side, can label them the wrong way round - Mahajan
+    Medicine Co. came back with the buyer's number as the vendor's. A purchase
+    register is keyed on the supplier's GSTIN, so this is not cosmetic.
+    """
+
+    def _fields(self, vendor_xy, seller_xy, buyer_xy):
+        def box(point):
+            x, y = point
+            return {"boundingRegions": [{"polygon": [x, y, x, y, x, y, x, y]}]}
+        return {"VendorName": box(vendor_xy), "VendorTaxId": box(seller_xy),
+                "CustomerTaxId": box(buyer_xy)}
+
+    def test_the_number_nearer_the_vendor_name_is_the_sellers(self):
+        # Azure's "customer" number sits beside the vendor name; its "vendor"
+        # number is far away in the party block. The labels are swapped.
+        fields = self._fields((1147, 2011), (1271, 597), (1297, 2060))
+        seller, buyer = resolve_gstin_owners(fields, "BUYERS_GSTIN", "SELLERS_GSTIN")
+        assert seller == "SELLERS_GSTIN"
+        assert buyer == "BUYERS_GSTIN"
+
+    def test_azures_labelling_stands_when_it_agrees_with_the_page(self):
+        fields = self._fields((100, 100), (120, 110), (900, 900))
+        seller, buyer = resolve_gstin_owners(fields, "SELLER", "BUYER")
+        assert (seller, buyer) == ("SELLER", "BUYER")
+
+    def test_an_ambiguous_layout_is_left_alone(self):
+        """Both parties stacked in one block gives no usable signal, and
+        guessing there trades a rare error for a common one."""
+        fields = self._fields((100, 100), (120, 120), (130, 130))
+        assert resolve_gstin_owners(fields, "SELLER", "BUYER") == ("SELLER", "BUYER")
+
+    def test_without_geometry_nothing_is_reassigned(self):
+        assert resolve_gstin_owners({}, "SELLER", "BUYER") == ("SELLER", "BUYER")
+
+    def test_a_single_gstin_is_never_reassigned(self):
+        assert resolve_gstin_owners({}, "SELLER", None) == ("SELLER", None)
+
+
+class TestDiscountLabels:
+    def test_a_leading_qualifier_does_not_hide_the_discount(self):
+        """Kumar Brothers heads its discount "BILL DIS." - the qualifier comes
+        first, so the dis-/disc- prefix rules never fired and the invoice
+        showed no discount at all."""
+        assert is_discount_label("BILL DIS.") is True
+
+    def test_dispatch_is_not_a_discount(self):
+        assert is_discount_label("Dispatch") is False
+
+    def test_tax_labels_are_not_discounts(self):
+        for label in ("SGST PAYBLE", "CGST PAYBLE", "TOTAL GST", "CR/DR NOTE"):
+            assert is_discount_label(label) is False, label

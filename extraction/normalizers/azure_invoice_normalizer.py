@@ -2,6 +2,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional
 from core.dates import normalize_invoice_date
+from core.logger import logger
 from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem
 from extraction.normalizers.amount_inference import fill_missing_amounts
 
@@ -169,6 +170,79 @@ def parse_split_quantity(value: Any) -> Optional[Dict[str, float]]:
         "free_quantity": free_qty,
     }
 
+def _strip_border_artifacts(text: Optional[str]) -> Optional[str]:
+    """Removes ruled-line characters the OCR read as part of the text.
+
+    A printed column border sitting tight against the first letter comes back
+    as a leading pipe - "|SIZODON MD 0.5", "|PRAMIPEX ER 1.5" - and that pipe
+    then travels into the catalogue as part of the name, where it makes the
+    same product look like two different ones depending on how close the ink
+    was to the rule.
+
+    Only the outer edges are touched. A pipe inside the text is left alone,
+    since it may be separating something the invoice meant to keep apart.
+    """
+    if not text:
+        return text
+    cleaned = text.strip().strip("|¦￨/\\").strip()
+    # Never hand back an empty name just because the cell was only a rule.
+    return cleaned or None
+
+
+def _field_centroid(fields: dict, name: str) -> "Optional[tuple[float, float]]":
+    """Middle of a field's box on the page, or None if it has no geometry."""
+    field = fields.get(name) or {}
+    regions = field.get("boundingRegions") or []
+    polygon = (regions[0].get("polygon") or regions[0].get("boundingBox")) if regions else None
+    if not polygon or len(polygon) < 4:
+        return None
+    xs = polygon[0::2]
+    ys = polygon[1::2]
+    return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+
+def resolve_gstin_owners(
+    fields: dict,
+    seller_gstin: Optional[str],
+    buyer_gstin: Optional[str],
+) -> "tuple[Optional[str], Optional[str]]":
+    """Decides which GSTIN belongs to the seller, by where it sits on the page.
+
+    Azure labels these VendorTaxId and CustomerTaxId, and on invoices that
+    print both parties side by side it can label them the wrong way round -
+    Mahajan Medicine Co. came back with the buyer's number as VendorTaxId, so
+    the review screen showed a customer's registration as the supplier's. That
+    is not a cosmetic error: the GSTIN is what a purchase register is keyed on.
+
+    The page settles it. A supplier's registration is printed with the
+    supplier's name, so of the two numbers the seller's is the one nearer the
+    vendor-name box. The swap is only applied when the difference is decisive -
+    the other number at least twice as far - because a layout that stacks both
+    parties in one block gives no useful signal, and guessing there would trade
+    a rare error for a common one.
+    """
+    if not (seller_gstin and buyer_gstin) or seller_gstin == buyer_gstin:
+        return seller_gstin, buyer_gstin
+
+    anchor = _field_centroid(fields, "VendorName")
+    seller_at = _field_centroid(fields, "VendorTaxId")
+    buyer_at = _field_centroid(fields, "CustomerTaxId")
+    if not (anchor and seller_at and buyer_at):
+        return seller_gstin, buyer_gstin
+
+    def distance(point):
+        return ((point[0] - anchor[0]) ** 2 + (point[1] - anchor[1]) ** 2) ** 0.5
+
+    to_seller, to_buyer = distance(seller_at), distance(buyer_at)
+    if to_buyer * 2 < to_seller:
+        logger.info(
+            "[GSTIN] Swapping seller/buyer: the number Azure called the customer's "
+            f"sits {to_buyer:.0f}px from the vendor name, the vendor's {to_seller:.0f}px."
+        )
+        return buyer_gstin, seller_gstin
+    return seller_gstin, buyer_gstin
+
+
 def is_discount_label(label: str) -> bool:
     """Detects footer/header discount aliases without treating unrelated text as discount."""
     normalized = re.sub(r'[^a-z0-9]+', ' ', label.lower()).strip()
@@ -180,10 +254,18 @@ def is_discount_label(label: str) -> bool:
         "scheme discount",
         "sch discount",
         "oth disc amt",
+        # Kumar Brothers heads its discount "BILL DIS." - the qualifier comes
+        # first, so neither the dis-/disc- prefix rules nor "discount" match.
+        "bill dis",
+        "bill disc",
+        "bill discount",
     }
     if normalized in aliases:
         return True
-    return "discount" in normalized or normalized.startswith("disc ") or normalized.startswith("dis ")
+    if "discount" in normalized or normalized.startswith("disc ") or normalized.startswith("dis "):
+        return True
+    # " dis " / " disc " anywhere, so a leading qualifier does not hide it.
+    return bool(re.search(r"\b(dis|disc)\b", normalized)) and "dispatch" not in normalized
 
 _SUBTOTAL_LABELS = [
     "sub total", "subtotal", "taxable amount", "taxable value", "taxable total",
@@ -205,6 +287,44 @@ def _is_footer_label(text: str) -> bool:
     if is_discount_label(t):
         return True
     return any(k in t for k in ("sgst", "cgst", "igst", "round", "total"))
+
+
+def _footer_pairs(row: List[str]) -> "List[tuple[str, str]]":
+    """Every label/amount pair a totals row carries, not just the first.
+
+    One row can hold more than one. S.G. Pharma prints a rate matrix and a
+    totals list side by side, and packs each totals entry into a single cell as
+    two lines, so one row reads:
+
+        ... | Total Items :-\n3 | DIS AMT.\n87.83
+
+    Returning a single pair meant whichever came first won, and "Total Items"
+    wins on the left. The discount sat in the same row, already parsed, and was
+    thrown away. Reporting every pair lets the caller keep the ones that name a
+    money field and ignore the counts, which is what it was already doing.
+    """
+    pairs: "List[tuple[str, str]]" = []
+
+    for idx, cell in enumerate(row):
+        text = (cell or "").strip()
+        if not text:
+            continue
+
+        # A cell holding its own answer on a second line.
+        if "\n" in text:
+            head, _, tail = text.partition("\n")
+            head, tail = head.strip(), tail.strip()
+            if head and tail and _is_footer_label(head) and try_parse_float(tail) is not None:
+                pairs.append((head, tail))
+                continue
+
+        # A label whose amount is the next populated cell along.
+        if _is_footer_label(text):
+            value = next((n.strip() for n in row[idx + 1:] if n and n.strip()), None)
+            if value is not None and try_parse_float(value) is not None:
+                pairs.append((text, value))
+
+    return pairs
 
 
 def _footer_label_and_value(row: List[str]) -> "tuple[Optional[str], Optional[str]]":
@@ -231,6 +351,20 @@ def _footer_label_and_value(row: List[str]) -> "tuple[Optional[str], Optional[st
     as a pair and then simply matches no money field downstream.
     """
     fallback: "tuple[Optional[str], Optional[str]]" = (None, None)
+
+    # A cell can hold the whole pair on two lines - S.G. Pharma prints
+    # "DIS AMT.\n87.83", "SGST PAYBLE\n35.98" - in which case no amount of
+    # looking at neighbouring cells will find the figure, because it is in
+    # this one. Checked first: a cell that answers for itself needs no
+    # neighbour, and pairing it with the next cell along would be wrong.
+    for cell in row:
+        text = (cell or "").strip()
+        if "\n" not in text:
+            continue
+        head, _, tail = text.partition("\n")
+        head, tail = head.strip(), tail.strip()
+        if head and tail and _is_footer_label(head) and try_parse_float(tail) is not None:
+            return head, tail
 
     for idx, cell in enumerate(row):
         text = (cell or "").strip()
@@ -644,9 +778,9 @@ def score_footer_table(grid: List[List[str]]) -> int:
         "sgst", "cgst", "igst", "roundoff", "round off", "net amt", "net payable", "payable amount",
     ]
     for row in grid:
-        lbl, val = _footer_label_and_value(row)
-        if lbl and val and (any(k in lbl.lower() for k in footer_keys) or is_discount_label(lbl.lower())):
-            score += 1
+        for lbl, val in _footer_pairs(row) or [_footer_label_and_value(row)]:
+            if lbl and val and (any(k in lbl.lower() for k in footer_keys) or is_discount_label(lbl.lower())):
+                score += 1
     return score
 
 def parse_horizontal_summary_table(grid: List[List[str]]) -> Optional[Dict[str, float]]:
@@ -1097,6 +1231,7 @@ def _build_line_item(
         if len(name_lines) > 1 and re.fullmatch(r'\d+\.?', name_lines[0]):
             name_lines = name_lines[1:]
         product_name = " ".join(name_lines).strip() or None
+        product_name = _strip_border_artifacts(product_name)
 
     # HSN is a single code; if the cell also picked up a trailing UOM/qty
     # fragment on its own line (same merged-cell artifact), keep the first line.
@@ -1256,29 +1391,35 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         else:
             footer_grid = grids[selected_footer_table_idx]
             for row in footer_grid:
-                # Label and value are typically in columns 0/1, but some
-                # invoices leave a blank leading column, shifting the real
-                # pair rightward - scan for the first two non-empty cells
-                # instead of assuming a fixed position.
-                lbl_raw, val_str = _footer_label_and_value(row)
-                if not lbl_raw:
-                    continue
-                lbl = lbl_raw.lower().strip()
-                val = try_parse_float(val_str) if val_str else None
-                if any(k in lbl for k in _SUBTOTAL_LABELS):
-                    footer_data["subtotal"] = val
-                elif is_discount_label(lbl):
-                    footer_data["discount"] = val
-                elif "sgst" in lbl:
-                    footer_data["sgst"] = val
-                elif "cgst" in lbl:
-                    footer_data["cgst"] = val
-                elif "igst" in lbl:
-                    footer_data["igst"] = val
-                elif any(x in lbl for x in _GRAND_TOTAL_LABELS):
-                    footer_data["grand_total"] = val
-                elif "round" in lbl:
-                    footer_data["roundoff"] = val
+                # Every pair in the row, because one row can carry more than
+                # one - a rate matrix and a totals list share rows on some
+                # formats, and packing label and amount into a single cell as
+                # two lines is common. Taking only the first pair let a count
+                # label shadow the discount sitting beside it.
+                row_pairs = _footer_pairs(row)
+                if not row_pairs:
+                    lbl_raw, val_str = _footer_label_and_value(row)
+                    row_pairs = [(lbl_raw, val_str)] if lbl_raw else []
+
+                for lbl_raw, val_str in row_pairs:
+                    if not lbl_raw:
+                        continue
+                    lbl = lbl_raw.lower().strip()
+                    val = try_parse_float(val_str) if val_str else None
+                    if any(k in lbl for k in _SUBTOTAL_LABELS):
+                        footer_data["subtotal"] = val
+                    elif is_discount_label(lbl):
+                        footer_data["discount"] = val
+                    elif "sgst" in lbl:
+                        footer_data["sgst"] = val
+                    elif "cgst" in lbl:
+                        footer_data["cgst"] = val
+                    elif "igst" in lbl:
+                        footer_data["igst"] = val
+                    elif any(x in lbl for x in _GRAND_TOTAL_LABELS):
+                        footer_data["grand_total"] = val
+                    elif "round" in lbl:
+                        footer_data["roundoff"] = val
 
     # 5. Extract document header fields
     doc = documents[0] if documents else {}
@@ -1297,6 +1438,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # Extended metadata fields: GST, address, phone, drug license
     seller_gstin = extract_field_value(fields, ["VendorTaxId", "VendorGSTIN"])
     buyer_gstin = extract_field_value(fields, ["CustomerTaxId", "CustomerGSTIN"])
+    seller_gstin, buyer_gstin = resolve_gstin_owners(fields, seller_gstin, buyer_gstin)
     seller_address = extract_field_value(fields, ["VendorAddress"])
     buyer_address = extract_field_value(fields, ["CustomerAddress"])
     seller_phone = extract_field_value(fields, ["VendorPhone", "VendorTelephone"])
