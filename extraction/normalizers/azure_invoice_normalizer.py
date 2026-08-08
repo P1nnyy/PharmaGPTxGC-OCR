@@ -1,6 +1,7 @@
 import math
 import re
 from typing import Any, Dict, List, Optional
+from core.dates import normalize_invoice_date
 from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem
 from extraction.normalizers.amount_inference import fill_missing_amounts
 
@@ -1254,7 +1255,12 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     fields = doc.get("fields", {})
     
     invoice_number = extract_field_value(fields, ["InvoiceId", "InvoiceNumber"])
-    invoice_date = extract_field_value(fields, ["InvoiceDate"])
+    # Canonicalised to YYYY-MM-DD here, at the boundary where supplier text
+    # becomes structured data. Reports filter periods by string comparison on
+    # this field, so a DD/MM/YYYY value that slipped through would bucket into
+    # a month that does not exist. An unreadable date stays None rather than
+    # being guessed at, and surfaces in the data-quality report.
+    invoice_date = normalize_invoice_date(extract_field_value(fields, ["InvoiceDate"]))
     seller_name = extract_field_value(fields, ["VendorName"])
     buyer_name = extract_field_value(fields, ["CustomerName"])
     

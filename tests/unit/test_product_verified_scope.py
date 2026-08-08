@@ -51,6 +51,6 @@ class TestSharedConstant:
     def test_matches_the_status_the_api_writes(self):
         # api/routes.py PATCHes status='verified' from the review screen's
         # "Mark as Verified"; a mismatch here would mean nothing ever appears.
-        from api.routes import InvoiceUpdate
+        from api.schemas.invoices import InvoiceUpdate
 
         assert "status" in InvoiceUpdate.model_fields

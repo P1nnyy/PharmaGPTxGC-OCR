@@ -240,13 +240,14 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-import api.routes as routes
+import api.routers.item_types as routes
+import api.routers.products as product_routes
 
 
 def test_list_returns_the_vocabulary_and_the_unit_families():
     """The UI needs the unit list to render the picker, so it ships with the
     types rather than being hardcoded a second time in the frontend."""
-    with patch("api.routes.item_type_repository.list_item_types", return_value=[]):
+    with patch("api.routers.item_types.item_type_repository.list_item_types", return_value=[]):
         payload = routes.list_item_types()
 
     assert payload["known_units"] == KNOWN_UNITS
@@ -254,7 +255,7 @@ def test_list_returns_the_vocabulary_and_the_unit_families():
 
 
 def test_deleting_a_builtin_answers_409_and_names_the_alternative():
-    with patch("api.routes.item_type_repository.delete_item_type",
+    with patch("api.routers.item_types.item_type_repository.delete_item_type",
                return_value={"deleted": False, "reason": "builtin", "products": 0}):
         with pytest.raises(HTTPException) as exc:
             routes.delete_item_type("t1")
@@ -264,7 +265,7 @@ def test_deleting_a_builtin_answers_409_and_names_the_alternative():
 
 
 def test_deleting_a_type_in_use_says_how_many_products_block_it():
-    with patch("api.routes.item_type_repository.delete_item_type",
+    with patch("api.routers.item_types.item_type_repository.delete_item_type",
                return_value={"deleted": False, "reason": "in_use", "products": 12}):
         with pytest.raises(HTTPException) as exc:
             routes.delete_item_type("t2")
@@ -274,7 +275,7 @@ def test_deleting_a_type_in_use_says_how_many_products_block_it():
 
 
 def test_deleting_a_missing_type_is_404_not_409():
-    with patch("api.routes.item_type_repository.delete_item_type",
+    with patch("api.routers.item_types.item_type_repository.delete_item_type",
                return_value={"deleted": False, "reason": "not_found", "products": 0}):
         with pytest.raises(HTTPException) as exc:
             routes.delete_item_type("nope")
@@ -283,7 +284,7 @@ def test_deleting_a_missing_type_is_404_not_409():
 
 
 def test_an_invalid_definition_is_400_with_the_reason():
-    with patch("api.routes.item_type_repository.create_item_type",
+    with patch("api.routers.item_types.item_type_repository.create_item_type",
                side_effect=ValueError("An item type needs a name.")):
         with pytest.raises(HTTPException) as exc:
             routes.create_item_type(routes.ItemTypeCreate(name="x", supported_units=[]))
@@ -296,9 +297,9 @@ def test_a_rejected_product_unit_reaches_the_client_as_400():
     """The message names the type's own units and where to change them, so it
     has to survive the route rather than becoming a generic 500."""
     message = "Cream is measured in GM, ML — TABLET is not one of them."
-    with patch("api.routes.product_repository.update_product", side_effect=ValueError(message)):
+    with patch("api.routers.products.product_repository.update_product", side_effect=ValueError(message)):
         with pytest.raises(HTTPException) as exc:
-            routes.update_product("p1", routes.ProductUpdate(base_unit="TABLET"))
+            product_routes.update_product("p1", product_routes.ProductUpdate(base_unit="TABLET"))
 
     assert exc.value.status_code == 400
     assert exc.value.detail == message

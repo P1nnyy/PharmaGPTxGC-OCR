@@ -19,7 +19,7 @@ will never do.
 import pytest
 from unittest.mock import patch
 
-from db.invoice_repository import (
+from db.repositories.invoice_repository import (
     EmptyLineItemsError,
     _update_invoice_tx,
 )
@@ -133,7 +133,7 @@ def test_empty_array_is_fine_when_there_is_nothing_to_lose():
 def test_a_normal_save_is_untouched_by_the_guard():
     # How a row is written is _write_line_item's business and varies by branch;
     # stub it so this stays a test of the guard letting the save through.
-    with patch("db.invoice_repository._write_line_item") as write_item:
+    with patch("db.repositories.invoice_repository._write_line_item") as write_item:
         tx = FakeTx(existing_item_count=16)
 
         assert _update_invoice_tx(tx, "inv-1", {"grand_total": 2278.0}, [ITEM], None) is True
@@ -175,10 +175,11 @@ def test_route_turns_the_refusal_into_409():
     """409, not 500: the request is well-formed, it conflicts with the invoice's
     current state, and the client can act on it."""
     from fastapi import HTTPException
-    from api.routes import update_invoice, InvoiceUpdate
+    from api.routers.invoices import update_invoice
+    from api.schemas.invoices import InvoiceUpdate
 
     with patch(
-        "api.routes.invoice_repository.update_invoice",
+        "api.routers.invoices.invoice_repository.update_invoice",
         side_effect=EmptyLineItemsError("inv-1", 16),
     ):
         with pytest.raises(HTTPException) as exc:
@@ -190,22 +191,24 @@ def test_route_turns_the_refusal_into_409():
 
 def test_route_defaults_the_opt_in_to_false():
     """A client that has never heard of the flag gets the safe behaviour."""
-    from api.routes import update_invoice, InvoiceUpdate
+    from api.routers.invoices import update_invoice
+    from api.schemas.invoices import InvoiceUpdate
 
-    with patch("api.routes.invoice_repository.update_invoice", return_value=True) as mock_update, \
-         patch("api.routes.invoice_repository.get_invoice", return_value={}), \
-         patch("api.routes._attach_image_urls"):
+    with patch("api.routers.invoices.invoice_repository.update_invoice", return_value=True) as mock_update, \
+         patch("api.routers.invoices.invoice_repository.get_invoice", return_value={}), \
+         patch("api.routers.invoices.attach_image_urls"):
         update_invoice("inv-1", InvoiceUpdate(line_items=[]))
 
     assert mock_update.call_args.kwargs["allow_empty_line_items"] is False
 
 
 def test_route_forwards_an_explicit_opt_in():
-    from api.routes import update_invoice, InvoiceUpdate
+    from api.routers.invoices import update_invoice
+    from api.schemas.invoices import InvoiceUpdate
 
-    with patch("api.routes.invoice_repository.update_invoice", return_value=True) as mock_update, \
-         patch("api.routes.invoice_repository.get_invoice", return_value={}), \
-         patch("api.routes._attach_image_urls"):
+    with patch("api.routers.invoices.invoice_repository.update_invoice", return_value=True) as mock_update, \
+         patch("api.routers.invoices.invoice_repository.get_invoice", return_value={}), \
+         patch("api.routers.invoices.attach_image_urls"):
         update_invoice("inv-1", InvoiceUpdate(line_items=[], allow_empty_line_items=True))
 
     assert mock_update.call_args.kwargs["allow_empty_line_items"] is True
