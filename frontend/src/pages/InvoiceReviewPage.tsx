@@ -391,6 +391,26 @@ export const InvoiceReviewPage: React.FC = () => {
   // Multi-page invoices carry one presigned URL per page, in page order.
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [activePage, setActivePage] = useState(0);
+  // Whether the viewer should ease into its next transform. True while the
+  // user is working on one page — rotating or zooming it, where the movement
+  // is the feedback — and switched off for the frame in which a page change
+  // rewrites every part of the transform at once. See goToPage.
+  const [animateViewer, setAnimateViewer] = useState(true);
+
+  useEffect(() => {
+    if (animateViewer) return;
+    // Two frames, not one: the first lets React commit the new transform with
+    // transitions off, the second re-arms them. Re-enabling in the same frame
+    // would let the browser coalesce both changes and animate anyway.
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => setAnimateViewer(true));
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [animateViewer]);
 
   const rotation = pageRotations[activePage] ?? 0;
   const setRotation = (next: number | ((current: number) => number)) => {
@@ -1224,6 +1244,12 @@ export const InvoiceReviewPage: React.FC = () => {
   // nothing on the next, which may be a different size or orientation.
   const goToPage = (index: number) => {
     if (index < 0 || index >= pageCount) return;
+    // Turning to the next sheet is not a movement of the current one, so the
+    // viewer must not animate its way there. Rotation, zoom and pan all change
+    // at once here, and under a live transition the new page visibly spins and
+    // slides into place - as though the paper were being turned over on the
+    // desk. The next page should simply be there.
+    setAnimateViewer(false);
     setActivePage(index);
     // Zoom and pan are position-specific and meaningless on another sheet,
     // but rotation belongs to the page and is preserved.
@@ -1523,7 +1549,9 @@ export const InvoiceReviewPage: React.FC = () => {
                 style={{
                   transform: `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`,
                   transformOrigin: 'center center',
-                  transition: 'transform 0.15s ease-out',
+                  // Dragging is already suppressed: easing a pan that is
+                  // tracking the cursor makes the image lag behind the mouse.
+                  transition: animateViewer && !isDragging ? 'transform 0.15s ease-out' : 'none',
                   willChange: 'transform',
                 }}
               >
