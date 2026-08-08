@@ -1,5 +1,7 @@
 import pytest
 from extraction.normalizers.azure_invoice_normalizer import (
+    score_footer_table,
+    _footer_label_and_value,
     normalize_azure_invoice,
     normalize_header,
     parse_split_quantity,
@@ -1128,3 +1130,85 @@ def test_missing_cgst_cell_still_yields_full_rate_end_to_end():
     raw = {"modelId": "prebuilt-invoice", "documents": [], "tables": [{"rowCount": 2, "columnCount": 5, "cells": cells}]}
     invoice = normalize_azure_invoice(raw)
     assert invoice.line_items[0].gst_percent == 18.0
+
+
+# --------------------------------------------------------------------------
+# Totals printed beside a GST-class matrix (S.G. Pharma Traders)
+# --------------------------------------------------------------------------
+
+class TestHybridFooterRow:
+    """A footer row carrying two things at once.
+
+    S.G. Pharma prints a GST-rate matrix and a totals list side by side in one
+    table, so a single row holds both a class breakdown and a label/value pair:
+
+        GST 5,00% | 2530.86 | ... | 116.98 | Total Qty 26 | SGST PAYBLE | 58.49
+
+    Taking the first label-ish cell paired "Total Qty" - it contains "total" -
+    with the literal text "SGST PAYBLE", and the row's actual figure was never
+    reached. The tax silently came out empty on an invoice that states it
+    plainly twice over.
+    """
+
+    def _row(self, *cells):
+        return list(cells)
+
+    def test_the_real_pair_is_found_past_a_count_label(self):
+        row = self._row("GST 5,00%", "2530.86", "0.00", "191,45", "58.49", "58.49",
+                        "116.98", "Total Qty\n26", "SGST PAYBLE", "58.49")
+        assert _footer_label_and_value(row) == ("SGST PAYBLE", "58.49")
+
+    def test_a_matrix_header_does_not_swallow_the_row(self):
+        """TOTAL/SCHEME are column headings, not a label and its amount."""
+        row = self._row("CLASS", "TOTAL", "SCHEME", "DISCOUNT", "SGST", "CGST",
+                        "TOTAL GST", "", "TOTAL .", "2530.86")
+        assert _footer_label_and_value(row) == ("TOTAL .", "2530.86")
+
+    def test_a_label_with_no_number_anywhere_still_reports_itself(self):
+        """Rows that genuinely have no figure must not regress to silence."""
+        label, value = _footer_label_and_value(self._row("Round Off", "in words only"))
+        assert label == "Round Off"
+
+    def test_such_a_table_scores_as_a_footer(self):
+        """Selection has to agree with extraction about where a label is, or
+        the table is never handed to the reader that could parse it."""
+        grid = [
+            ["CLASS", "TOTAL", "SCHEME", "DISCOUNT", "SGST", "CGST", "TOTAL GST", "", "TOTAL .", "2530.86"],
+            ["GST 0.00%", "0.00", "0.00", "0.00", "0.00", "0.00", "0.00", "Total Items :-\n8", "DIS AMT", "191.45"],
+            ["GST 5,00%", "2530.86", "0.00", "191,45", "58.49", "58.49", "116.98", "Total Qty\n26", "SGST PAYBLE", "58.49"],
+            ["GST 12.00%", "0.00", "0.00", "0.00", "0.00", "0.00", "0.00", "", "CGST PAYBLE", "58.49"],
+        ]
+        assert score_footer_table(grid) >= 3
+
+    def test_tax_reaches_the_invoice_end_to_end(self):
+        cells = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "ITEM"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "QTY"},
+            {"rowIndex": 0, "columnIndex": 2, "content": "AMOUNT"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "ALPHA TAB"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "2"},
+            {"rowIndex": 1, "columnIndex": 2, "content": "100.00"},
+        ]
+        footer = [
+            {"rowIndex": 0, "columnIndex": 0, "content": "GST 5,00%"},
+            {"rowIndex": 0, "columnIndex": 1, "content": "2530.86"},
+            {"rowIndex": 0, "columnIndex": 2, "content": "Total Qty\n26"},
+            {"rowIndex": 0, "columnIndex": 3, "content": "SGST PAYBLE"},
+            {"rowIndex": 0, "columnIndex": 4, "content": "58.49"},
+            {"rowIndex": 1, "columnIndex": 0, "content": "GST 12.00%"},
+            {"rowIndex": 1, "columnIndex": 1, "content": "0.00"},
+            {"rowIndex": 1, "columnIndex": 2, "content": ""},
+            {"rowIndex": 1, "columnIndex": 3, "content": "CGST PAYBLE"},
+            {"rowIndex": 1, "columnIndex": 4, "content": "58.49"},
+        ]
+        raw = {
+            "modelId": "prebuilt-invoice",
+            "documents": [],
+            "tables": [
+                {"rowCount": 2, "columnCount": 3, "cells": cells},
+                {"rowCount": 2, "columnCount": 5, "cells": footer},
+            ],
+        }
+        invoice = normalize_azure_invoice(raw)
+        assert invoice.sgst == 58.49
+        assert invoice.cgst == 58.49

@@ -1565,7 +1565,14 @@ export const InvoiceReviewPage: React.FC = () => {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-gray-500 font-medium">Tax ({header.cgst !== null || header.sgst !== null || header.igst !== null ? 'GST' : '12%'}) +</span>
+                {/* Just "Tax". The bracket used to hold a rate, defaulting to
+                    a hardcoded "12%" whenever no tax had been extracted — so
+                    the one invoice where the figure was missing was also the
+                    one asserting a rate, and asserting the wrong one. A single
+                    rate is not a fact this row can state in any case: an
+                    invoice can carry several GST slabs at once, and the amount
+                    beside it is their sum. */}
+                <span className="text-gray-500 font-medium">Tax +</span>
                 <span className="font-semibold text-slate-800">{formatCurrencyOrDash(computedGstTotal)}</span>
               </div>
 

@@ -215,14 +215,37 @@ def _footer_label_and_value(row: List[str]) -> "tuple[Optional[str], Optional[st
     first two populated columns. Real footers put stray text beside the
     figures - the amount-in-words line often shares a row with "Round Off",
     which would otherwise be read as that row's value.
+
+    The value must parse as a number, and that is what makes the rule hold on
+    a row carrying more than one thing. S.G. Pharma prints a GST-class matrix
+    and a totals list side by side:
+
+        GST 5,00% | 2530.86 | ... | 116.98 | Total Qty 26 | SGST PAYBLE | 58.49
+
+    "Total Qty" reads like a label - it contains "total" - so taking the first
+    label-ish cell paired it with the text "SGST PAYBLE" and the row's real
+    figure was never reached. Requiring a numeric value rejects that pairing
+    and keeps looking, which also rejects the matrix header's TOTAL/SCHEME on
+    the row above. A count label like "Total Items :- 8" is not special-cased
+    because it does not need to be: it is followed by a number, so it is read
+    as a pair and then simply matches no money field downstream.
     """
+    fallback: "tuple[Optional[str], Optional[str]]" = (None, None)
+
     for idx, cell in enumerate(row):
         text = (cell or "").strip()
-        if text and _is_footer_label(text):
-            for nxt in row[idx + 1:]:
-                if nxt and nxt.strip():
-                    return text, nxt.strip()
-            return text, None
+        if not text or not _is_footer_label(text):
+            continue
+        value = next((nxt.strip() for nxt in row[idx + 1:] if nxt and nxt.strip()), None)
+        if value is not None and try_parse_float(value) is not None:
+            return text, value
+        # Remember the first label seen even without a usable figure, so a
+        # genuinely value-less totals row still reports its label as before.
+        if fallback == (None, None):
+            fallback = (text, value)
+
+    if fallback != (None, None):
+        return fallback
     return _first_two_nonempty(row)
 
 
@@ -605,6 +628,15 @@ def score_footer_table(grid: List[List[str]]) -> int:
     """
     Scores a grid based on matches with common invoice footer/totals labels.
     Helps locate the totals section of the invoice.
+
+    Finds each row's label/value pair the same way the extractor does. When the
+    two disagreed, a table could be unreachable: S.G. Pharma prints its totals
+    beside a GST-class matrix, so the naive "first two populated cells" saw
+    CLASS/TOTAL and GST 5,00%/2530.86, matched no totals label, and scored the
+    table zero - while the extractor, had it ever been handed that table, would
+    have read SGST PAYBLE and CGST PAYBLE from it perfectly well. Selection and
+    extraction have to agree on where a label is, or the better reader never
+    gets the chance.
     """
     score = 0
     footer_keys = [
@@ -612,9 +644,7 @@ def score_footer_table(grid: List[List[str]]) -> int:
         "sgst", "cgst", "igst", "roundoff", "round off", "net amt", "net payable", "payable amount",
     ]
     for row in grid:
-        # Label and value aren't always in columns 0/1 - some invoices leave
-        # a blank leading column, shifting the real pair rightward.
-        lbl, val = _first_two_nonempty(row)
+        lbl, val = _footer_label_and_value(row)
         if lbl and val and (any(k in lbl.lower() for k in footer_keys) or is_discount_label(lbl.lower())):
             score += 1
     return score
