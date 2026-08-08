@@ -44,6 +44,14 @@
 	handle /invoices* {
 		reverse_proxy backend:8000
 	}
+	# /reports/* with the slash, NOT /reports* — the SPA owns the page route
+	# /reports and the API owns /reports/<report>. Routing the bare prefix would
+	# hand the page itself to the backend, which answers 404. Mirrors the
+	# trailing slash in the frontend's dev proxy for the same reason.
+	handle /reports/* {
+		reverse_proxy backend:8000
+	}
+
 	handle /item-types* {
 		reverse_proxy backend:8000
 	}
