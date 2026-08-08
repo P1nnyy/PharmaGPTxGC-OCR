@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { buildInvoiceChecks, type CheckStatus } from './invoiceChecks';
 import { apiClient } from '../api/client';
 import { useRun } from '../context/RunContext';
 import {
@@ -80,6 +81,47 @@ interface TableLineItem {
   match_note?: string | null;
   match_times_seen?: number | null;
 }
+
+// Chip colours, matching the Confidence/Verified badges already on this bar.
+// 'unknown' is deliberately grey rather than amber: a check whose inputs the
+// invoice never printed has not failed, and colouring it as a warning teaches
+// the reviewer to ignore warnings.
+const CHECK_STYLES: Record<CheckStatus, string> = {
+  pass: 'bg-green-50 text-green-700 border-green-200',
+  fail: 'bg-red-50 text-red-700 border-red-200',
+  warn: 'bg-amber-50 text-amber-700 border-amber-200',
+  unknown: 'bg-slate-50 text-slate-500 border-slate-200',
+};
+
+const CHECK_DOTS: Record<CheckStatus, string> = {
+  pass: 'bg-green-500',
+  fail: 'bg-red-500',
+  warn: 'bg-amber-500',
+  unknown: 'bg-slate-300',
+};
+
+/**
+ * One editable figure in the totals block.
+ *
+ * Right-aligned and borderless until touched, so the block still reads as a
+ * summary rather than a form - the reviewer's eye should land on the numbers,
+ * not on five input boxes.
+ */
+const TotalsInput: React.FC<{
+  value: any;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  className?: string;
+}> = ({ value, onChange, placeholder = '—', className = '' }) => (
+  <input
+    type="text"
+    inputMode="decimal"
+    value={value ?? ''}
+    placeholder={placeholder}
+    onChange={(e) => onChange(e.target.value)}
+    className={`w-24 bg-transparent text-right font-semibold text-slate-800 rounded-md px-1.5 py-0.5 border border-transparent hover:border-slate-300 focus:border-[#1b5dfc] focus:bg-white focus:outline-none transition-colors ${className}`}
+  />
+);
 
 const ordinal = (n: number): string => {
   const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
@@ -908,6 +950,41 @@ export const InvoiceReviewPage: React.FC = () => {
     }));
   };
 
+  /**
+   * Edits a figure in the totals block and carries the change through to the
+   * grand total.
+   *
+   * Correcting a misread subtotal used to leave the grand total stating the
+   * old arithmetic, so the reviewer fixed one number and the totals still did
+   * not add up - the indicator stayed red and the fix looked ineffective. The
+   * grand total is the sum of the parts, so when a part changes it follows.
+   *
+   * Typing directly into the grand total still wins: that field is the figure
+   * printed on the bill, and a reviewer who enters it is stating what the
+   * supplier is owed rather than deriving it.
+   */
+  const handleTotalsChange = (key: 'subtotal' | 'discount' | 'roundoff', raw: string) => {
+    setHeader((prev) => {
+      const next: any = { ...prev, [key]: raw };
+
+      const num = (value: any) => {
+        const parsed = parseFloat(String(value ?? '').replace(/[^0-9.\-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const subtotal = num(next.subtotal);
+      const discount = num(next.discount);
+      const tax = num(prev.cgst) + num(prev.sgst) + num(prev.igst);
+      const roundoff = num(next.roundoff);
+
+      // Only when there is a subtotal to build on. Deriving a grand total from
+      // an empty box would replace a figure read off the invoice with zero.
+      if (String(next.subtotal ?? '').trim() !== '') {
+        next.grand_total = parseFloat((subtotal - discount + tax + roundoff).toFixed(2));
+      }
+      return next;
+    });
+  };
+
   // Handle line item field edits and auto-recompute amount totals
   const handleItemChange = (itemId: string, key: keyof TableLineItem, value: any) => {
     setLineItems((prev) =>
@@ -1006,76 +1083,46 @@ export const InvoiceReviewPage: React.FC = () => {
 
   const roundoff = toNumberOrNull(header.roundoff);
 
-  // Math validation logic (ensures we don't calculate false mismatches)
-  const isSuggestedAmtPresent = lineItems.some(item => item.is_suggested_amount);
+  // A row with no amount cannot be totalled, which is a different answer from
+  // "the rows total the wrong thing" - the checks distinguish the two.
   const isAnyAmountMissing = lineItems.some(item => !isPresent(getItemAmount(item)));
-  const hasMissingGrandTotal = !isPresent(header.grand_total);
   const effectiveSubtotal = isPresent(header.subtotal) ? toNumberOrNull(header.subtotal) : computedSubtotal;
-  const hasMissingSubtotal = !isPresent(effectiveSubtotal);
 
-  let mathStatus: 'matched' | 'mismatch' | 'missing_fields';
-  let mathStatusMessage: string;
-
-  if (isAnyAmountMissing) {
-    mathStatus = 'missing_fields';
-    mathStatusMessage = 'Missing item amounts';
-  } else if (isSuggestedAmtPresent) {
-    // Present, but worked out rather than read off the page. Saying "missing"
-    // here contradicts the amounts visible in the table right beside it, and
-    // sends the reviewer looking for a blank that isn't there — the thing
-    // actually worth their attention is that these are derived.
-    mathStatus = 'missing_fields';
-    mathStatusMessage = 'Item amounts derived — verify';
-  } else if (hasMissingGrandTotal || hasMissingSubtotal) {
-    mathStatus = 'missing_fields';
-    mathStatusMessage = 'Needs manual review';
-  } else {
-    const subVal = effectiveSubtotal;
-    const discVal = discountVal !== null ? discountVal : 0;
-    const gstTotal = computedGstTotal !== null ? computedGstTotal : 0;
-    const rOff = roundoff !== null ? roundoff : 0;
-    const grandVal = toNumberOrNull(header.grand_total) || 0;
-
-    let isFormulaMatched = true;
-    if (subVal !== null) {
-      const calculatedGrand = subVal - discVal + gstTotal + rOff;
-      if (Math.abs(calculatedGrand - grandVal) > 2.0) {
-        isFormulaMatched = false;
-      }
-    }
-
-    let isLineTotalMatched = true;
-    if (subVal !== null && computedSubtotal !== null) {
-      const diffWithSubtotal = Math.abs(computedSubtotal - subVal);
-      const diffWithTaxable = Math.abs(computedSubtotal - (subVal - discVal));
-      // Some invoice formats print a per-item "Amount" that's already
-      // tax-inclusive (Taxable + CGST + SGST for that line), rather than a
-      // pre-tax gross figure - there, line items sum to grand_total (minus
-      // roundoff) instead of to subtotal or the taxable amount. Line items
-      // aren't wrong just because they don't match one particular formula;
-      // matching any of the three is a genuine reconciliation.
-      const diffWithGrandTotal = Math.abs(computedSubtotal - (grandVal - rOff));
-      if (diffWithSubtotal > 2.0 && diffWithTaxable > 2.0 && diffWithGrandTotal > 2.0) {
-        isLineTotalMatched = false;
-      }
-    }
-
-    if (!isFormulaMatched) {
-      if (subVal !== null && discountVal === null && Math.abs(subVal + gstTotal + rOff - grandVal) > 2.0) {
-        mathStatus = 'mismatch';
-        mathStatusMessage = 'Missing discount';
-      } else {
-        mathStatus = 'mismatch';
-        mathStatusMessage = 'Formula mismatch';
-      }
-    } else if (!isLineTotalMatched) {
-      mathStatus = 'mismatch';
-      mathStatusMessage = 'Line total differs from subtotal';
-    } else {
-      mathStatus = 'matched';
-      mathStatusMessage = 'Matched';
-    }
-  }
+  // Each question the reviewer would otherwise ask by hand, answered
+  // separately. Computed straight from what is on screen, so correcting a
+  // figure flips its indicator in the same keystroke — see invoiceChecks.ts
+  // for why one collapsed "Math" verdict was worse than several precise ones.
+  const checks = React.useMemo(() => buildInvoiceChecks({
+    // Coerced here, not trusted: these fields hold whatever the reviewer has
+    // typed, so a half-entered "14." is a string until it parses.
+    subtotal: toNumberOrNull(effectiveSubtotal),
+    lineTotal: isAnyAmountMissing ? null : computedSubtotal,
+    discount: toNumberOrNull(discountVal),
+    taxTotal: toNumberOrNull(computedGstTotal),
+    cgst: toNumberOrNull(cgstVal),
+    sgst: toNumberOrNull(sgstVal),
+    igst: toNumberOrNull(igstVal),
+    roundoff: toNumberOrNull(roundoff),
+    grandTotal: toNumberOrNull(header.grand_total),
+    itemCount: lineItems.length,
+    itemsWithGaps: lineItems.filter((item) =>
+      isCriticalItemMissing(item, 'product_name') ||
+      isCriticalItemMissing(item, 'batch') ||
+      isCriticalItemMissing(item, 'hsn') ||
+      isCriticalItemMissing(item, 'quantity') ||
+      isCriticalItemMissing(item, 'amount')
+    ).length,
+    derivedAmounts: lineItems.filter((item) => item.is_suggested_amount).length,
+    sellerName: header.seller_name ?? null,
+    sellerGstin: header.seller_gstin ?? null,
+    invoiceNumber: header.invoice_number ?? null,
+    invoiceDate: header.invoice_date ?? null,
+  }), [
+    effectiveSubtotal, isAnyAmountMissing, computedSubtotal, discountVal, computedGstTotal,
+    cgstVal, sgstVal, igstVal, roundoff, header.grand_total, lineItems,
+    header.seller_name, header.seller_gstin, header.invoice_number, header.invoice_date,
+    invoiceHasMrpColumn,
+  ]);
 
   // Builds the PATCH payload shared by Save Draft / Mark as Verified — the
   // backend is the single source of truth, so both actions just persist the
@@ -1317,15 +1364,20 @@ export const InvoiceReviewPage: React.FC = () => {
             </span>
           )}
 
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-            mathStatus === 'matched'
-              ? 'bg-green-50 text-green-700 border-green-200'
-              : mathStatus === 'missing_fields'
-                ? 'bg-amber-50 text-amber-700 border-amber-200'
-                : 'bg-red-50 text-red-700 border-red-200'
-          }`}>
-            Math: {mathStatusMessage}
-          </span>
+          {/* One chip per question, in place of a single "Math" verdict that
+              collapsed five unrelated checks into one word. Each carries its
+              own numbers in the tooltip, so a red chip says what to look at
+              rather than only that something is wrong. */}
+          {checks.map((check) => (
+            <span
+              key={check.id}
+              title={check.detail}
+              className={`px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center space-x-1 cursor-help ${CHECK_STYLES[check.status]}`}
+            >
+              <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${CHECK_DOTS[check.status]}`} />
+              <span>{check.label}</span>
+            </span>
+          ))}
 
           {getMissingFieldsCount() > 0 && (
             <span
@@ -1589,7 +1641,15 @@ export const InvoiceReviewPage: React.FC = () => {
             <div className="space-y-2 text-xs">
               <div className="flex items-center justify-between">
                 <span className="text-gray-500 font-medium">Subtotal</span>
-                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(effectiveSubtotal)}</span>
+                {isLocked ? (
+                  <span className="font-semibold text-slate-800">{formatCurrencyOrDash(effectiveSubtotal)}</span>
+                ) : (
+                  <TotalsInput
+                    value={header.subtotal}
+                    placeholder={effectiveSubtotal !== null ? String(effectiveSubtotal) : '—'}
+                    onChange={(v) => handleTotalsChange('subtotal', v)}
+                  />
+                )}
               </div>
 
               <div className="flex items-center justify-between">
@@ -1606,19 +1666,41 @@ export const InvoiceReviewPage: React.FC = () => {
 
               <div className="flex items-center justify-between">
                 <span className="text-gray-500 font-medium">Discount -</span>
-                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(discountVal)}</span>
+                {isLocked ? (
+                  <span className="font-semibold text-slate-800">{formatCurrencyOrDash(discountVal)}</span>
+                ) : (
+                  <TotalsInput
+                    value={header.discount}
+                    onChange={(v) => handleTotalsChange('discount', v)}
+                  />
+                )}
               </div>
 
-              {roundoff !== null && (
+              {(roundoff !== null || !isLocked) && (
                 <div className="flex items-center justify-between">
                   <span className="text-gray-500 font-medium">Round Off</span>
-                  <span className="font-semibold text-slate-800">{formatSignedCurrency(roundoff)}</span>
+                  {isLocked ? (
+                    <span className="font-semibold text-slate-800">{formatSignedCurrency(roundoff)}</span>
+                  ) : (
+                    <TotalsInput
+                      value={header.roundoff}
+                      onChange={(v) => handleTotalsChange('roundoff', v)}
+                    />
+                  )}
                 </div>
               )}
 
               <div className="border-t border-slate-200/80 pt-2 flex items-center justify-between">
                 <span className="font-bold text-slate-900 text-sm">Grand Total</span>
-                <span className="font-extrabold text-[#1b5dfc] text-base">{formatCurrencyOrDash(header.grand_total)}</span>
+                {isLocked ? (
+                  <span className="font-extrabold text-[#1b5dfc] text-base">{formatCurrencyOrDash(header.grand_total)}</span>
+                ) : (
+                  <TotalsInput
+                    value={header.grand_total}
+                    onChange={(v) => handleHeaderChange('grand_total', v)}
+                    className="text-base font-extrabold text-[#1b5dfc] w-28"
+                  />
+                )}
               </div>
             </div>
 
