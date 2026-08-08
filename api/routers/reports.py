@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from db.repositories import reports_repository
+from db.repositories import scan_repository
 from services.reports import expiry, gst, overview, procurement, quality
 from services.reports.periods import Period, PeriodError, resolve
 
@@ -188,3 +189,20 @@ def data_quality(
     GSTIN is exactly the one to catch before somebody verifies it.
     """
     return quality.build(_period(kind, fy, quarter, month, start, end))
+
+
+@router.get("/scans")
+def scans(granularity: str = "month", limit: int = 24):
+    """How many scans have been run, bucketed by day, month or year.
+
+    Deliberately not filtered by the period selector the other reports share.
+    Those answer "what did this financial year cost"; this answers "how much
+    work has gone through the system", which is a lifetime figure and must not
+    move when someone changes the period dropdown.
+    """
+    if granularity not in scan_repository.GRANULARITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"granularity must be one of {', '.join(scan_repository.GRANULARITIES)}.",
+        )
+    return scan_repository.scan_activity(granularity=granularity, limit=max(1, min(limit, 120)))

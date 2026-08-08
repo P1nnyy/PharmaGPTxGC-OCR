@@ -12,6 +12,8 @@ import type {
   PeriodQuery,
   PriceVariance,
   SpendTrend,
+  ScanActivity,
+  ScanGranularity,
   Summary,
   VendorScorecard
 } from './types';
@@ -71,3 +73,12 @@ export const reportsApi = {
   expiry: (horizonDays = 180, statuses?: string) =>
     getReport<ExpiryExposure>('expiry', { horizon_days: horizonDays, statuses })
 };
+
+/**
+ * Scanning activity. Takes no period: this is a lifetime figure, and tying it
+ * to the page's period selector would make "total scans" change meaning
+ * depending on a dropdown intended for the GST register.
+ */
+export function getScanActivity(granularity: ScanGranularity, limit: number): Promise<ScanActivity> {
+  return getReport<ScanActivity>('scans', { granularity, limit });
+}

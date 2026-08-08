@@ -258,3 +258,27 @@ export interface DataQuality {
   duplicate_group_count: number;
   invoices_checked: number;
 }
+
+/** Bucket sizes the scan-activity panel offers. Mirrors GRANULARITIES on the server. */
+export type ScanGranularity = 'day' | 'month' | 'year' | 'all';
+
+export interface ScanBucket {
+  bucket: string;
+  scans: number;
+  pages: number;
+}
+
+/**
+ * Scanning activity, read from an append-only ledger rather than counted from
+ * invoices — so a scan whose invoice was deleted still counts as work done.
+ */
+export interface ScanActivity {
+  granularity: ScanGranularity;
+  total_scans: number;
+  total_pages: number;
+  scans_with_invoice: number;
+  scans_without_invoice: number;
+  first_scan: string | null;
+  last_scan: string | null;
+  series: ScanBucket[];
+}

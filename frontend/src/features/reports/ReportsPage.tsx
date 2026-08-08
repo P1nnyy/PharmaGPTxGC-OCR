@@ -1,18 +1,20 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, BarChart3, CalendarClock, Receipt, Truck } from 'lucide-react';
+import { AlertTriangle, BarChart3, CalendarClock, Receipt, ScanLine, Truck } from 'lucide-react';
 
 import { ExpiryPanel } from './components/ExpiryPanel';
 import { GstPanel } from './components/GstPanel';
 import { OverviewPanel } from './components/OverviewPanel';
 import { PeriodSelector } from './components/PeriodSelector';
 import { QualityPanel } from './components/QualityPanel';
+import { ScansPanel } from './components/ScansPanel';
 import { SuppliersPanel } from './components/SuppliersPanel';
 import type { PeriodQuery } from './types';
 
-type TabId = 'overview' | 'gst' | 'expiry' | 'suppliers' | 'quality';
+type TabId = 'overview' | 'activity' | 'gst' | 'expiry' | 'suppliers' | 'quality';
 
 const TABS: { id: TabId; label: string; icon: React.ElementType; hint: string }[] = [
   { id: 'overview', label: 'Overview', icon: BarChart3, hint: 'Spend and tax totals' },
+  { id: 'activity', label: 'Activity', icon: ScanLine, hint: 'Scans run, by day, month or year' },
   { id: 'gst', label: 'GST & ITC', icon: Receipt, hint: 'Purchase register and HSN summary' },
   { id: 'expiry', label: 'Expiry risk', icon: CalendarClock, hint: 'Value at risk by batch' },
   { id: 'suppliers', label: 'Suppliers', icon: Truck, hint: 'Landed cost and price movement' },
@@ -79,6 +81,7 @@ export const ReportsPage: React.FC = () => {
       </nav>
 
       {tab === 'overview' && <OverviewPanel query={query} />}
+      {tab === 'activity' && <ScansPanel />}
       {tab === 'gst' && <GstPanel query={query} />}
       {tab === 'expiry' && <ExpiryPanel statuses={period.statuses} />}
       {tab === 'suppliers' && <SuppliersPanel query={query} />}

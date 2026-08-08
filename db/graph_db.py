@@ -31,6 +31,9 @@ CONSTRAINTS = [
     # would make a product's form ambiguous.
     "CREATE CONSTRAINT item_type_id IF NOT EXISTS FOR (n:ItemType) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT item_type_name IF NOT EXISTS FOR (n:ItemType) REQUIRE n.name IS UNIQUE",
+    # The scan ledger. Append-only and never deleted, so that "how many scans
+    # have I run" does not fall when an invoice is tidied away.
+    "CREATE CONSTRAINT scan_event_id IF NOT EXISTS FOR (n:ScanEvent) REQUIRE n.id IS UNIQUE",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key

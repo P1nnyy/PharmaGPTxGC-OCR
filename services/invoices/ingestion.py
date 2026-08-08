@@ -20,7 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from core.config import settings
 from core.logger import logger
-from db.repositories import invoice_repository
+from db.repositories import invoice_repository, scan_repository
 from services import image_storage
 from services.invoices.presentation import presign_or_none
 from services.validators import content_validator
@@ -106,6 +106,21 @@ async def persist(
     """
     invoice_id = invoice_id or str(uuid.uuid4())
 
+    # Recorded before the save is attempted, and never deleted afterwards.
+    # The scan happened - it cost an API call and a minute of someone's
+    # attention - whether or not the invoice it produced survives, or is even
+    # created. Counting invoices instead would make the number fall every time
+    # a mistake is tidied up.
+    scan_id = await run_in_threadpool(
+        scan_repository.record_scan,
+        settings.DEFAULT_PHARMACY_ID,
+        len(pages),
+        None,
+        "extracted",
+        getattr(invoice, "extraction_engine", None),
+        (pages[0].get("filename") if pages else None),
+    )
+
     try:
         object_keys = []
         for index, page in enumerate(pages, start=1):
@@ -133,6 +148,8 @@ async def persist(
             invoice_id,
         )
 
+        await run_in_threadpool(scan_repository.link_invoice, scan_id, saved_id)
+
         urls = [u for u in (presign_or_none(key) for key in object_keys) if u]
         return {
             "id": saved_id,
@@ -147,4 +164,7 @@ async def persist(
         }
     except Exception as persist_err:
         logger.error(f"Failed to persist invoice to R2/Neo4j: {persist_err}")
+        # The ledger row stays, marked failed. A scan that cost an API call and
+        # produced nothing is the one most worth being able to see.
+        await run_in_threadpool(scan_repository.mark_failed, scan_id, str(persist_err))
         return {"persisted": False, "persist_error": str(persist_err)}
