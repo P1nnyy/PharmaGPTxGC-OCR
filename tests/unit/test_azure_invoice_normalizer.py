@@ -1446,3 +1446,110 @@ class TestMultipleDiscounts:
         invoice = normalize_azure_invoice(raw)
         assert invoice.discount == 151.42
         assert invoice.discount_breakdown == [{"label": "DISCOUNT", "amount": 151.42}]
+
+
+# ==========================================================================
+# Which column is the Amount, when the header cannot say
+# ==========================================================================
+
+def _deepak_agencies_table(header_overrides=None):
+    """A GST-breakout layout whose tax and amount headers OCR'd badly.
+
+    Taken from a real Deepak Agencies invoice: Azure returned "SUST" for SGST,
+    "CUST" for CGST and "Amnulint" for Amount, so both "Value" columns claimed
+    to be the Amount and the real Amount column mapped to nothing.
+    """
+    header = ["S", "Qty.", "Product Name", "Batch", "HSN", "M.R.P", "Rate",
+              "SUST", "Value", "CUST", "Value", "Amnulint"]
+    for idx, text in (header_overrides or {}).items():
+        header[idx] = text
+    # qty, name, batch, mrp, rate, tax value, amount
+    items = [
+        ("1", "GUDUCHI TAB 60", "372401160", "240.00", "176.00", "4.14", "176.00"),
+        ("1", "BABY HAIR OIL", "592600093", "266.00", "195.12", "4.59", "195.12"),
+        ("1", "GENTLE BABY SHAMPOO", "B992600307", "213.00", "158.10", "3.72", "158.10"),
+        ("4", "ZERODOL P", "KVB0326017AS", "75.94", "57.86", "5.44", "231.44"),
+        ("4", "ZERODOL-SP TAB", "FND0726002BH", "139.69", "106.43", "10.00", "425.72"),
+        ("2", "OPTHACARE EYEDROPS", "762500071", "93.75", "71.43", "3.36", "142.86"),
+    ]
+    cells = [{"rowIndex": 0, "columnIndex": c, "content": v} for c, v in enumerate(header)]
+    for r, (qty, name, batch, mrp, rate, tax, amount) in enumerate(items, start=1):
+        row = [str(r), qty, name, batch, "30049069", mrp, rate, "2.50", tax, "2.50", tax, amount]
+        cells += [{"rowIndex": r, "columnIndex": c, "content": v} for c, v in enumerate(row)]
+
+    footer = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "TOTAL"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "1329.24"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "SGST PAYBLE"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "31.25"},
+        {"rowIndex": 2, "columnIndex": 0, "content": "CGST PAYBLE"},
+        {"rowIndex": 2, "columnIndex": 1, "content": "31.25"},
+    ]
+    return {
+        "modelId": "prebuilt-invoice",
+        "documents": [{"fields": {"InvoiceId": {"value": "A000865"}}}],
+        "tables": [
+            {"rowCount": len(items) + 1, "columnCount": len(header), "cells": cells},
+            {"rowCount": 3, "columnCount": 2, "cells": footer},
+        ],
+    }
+
+
+def test_misread_amount_header_is_recovered_from_the_arithmetic():
+    """The Amount column is found by what reproduces qty x rate, not by its
+    header - which here reads "Amnulint"."""
+    invoice = normalize_azure_invoice(_deepak_agencies_table())
+    amounts = [i.amount for i in invoice.line_items]
+    assert amounts == [176.00, 195.12, 158.10, 231.44, 425.72, 142.86]
+
+
+def test_tax_value_column_is_never_billed_as_the_line_amount():
+    """Both "Value" columns are the GST breakout. Reading one as the Amount
+    put the invoice's SGST figure on every line and understated it tenfold."""
+    invoice = normalize_azure_invoice(_deepak_agencies_table())
+    line_total = round(sum(i.amount for i in invoice.line_items), 2)
+    assert line_total == 1329.24
+    assert not any(i.amount in (4.14, 4.59, 3.72, 5.44, 10.00, 3.36) for i in invoice.line_items)
+
+
+def test_scribble_in_a_tax_column_does_not_become_a_line_item():
+    """A handwritten total lands in whatever column it sits over. It only
+    became a phantom row because that column was being read as the Amount."""
+    raw = _deepak_agencies_table()
+    table = raw["tables"][0]
+    table["rowCount"] += 1
+    table["cells"].append({"rowIndex": 7, "columnIndex": 8, "content": "1798\n217\n3015"})
+    invoice = normalize_azure_invoice(raw)
+    assert len(invoice.line_items) == 6
+    assert all(i.name for i in invoice.line_items)
+
+
+def test_readable_amount_header_keeps_its_column():
+    """With the header intact the arithmetic must agree with it, not move it -
+    the formats already read correctly take an unchanged path."""
+    invoice = normalize_azure_invoice(
+        _deepak_agencies_table({7: "SGST", 9: "CGST", 11: "Amount"})
+    )
+    amounts = [i.amount for i in invoice.line_items]
+    assert amounts == [176.00, 195.12, 158.10, 231.44, 425.72, 142.86]
+
+
+def test_amount_column_is_left_alone_when_there_is_nothing_to_check_it_against():
+    """No rate column and no footer means no evidence. The header's decision
+    stands rather than being replaced by a guess."""
+    header = ["Product Name", "Batch", "Value", "Serial"]
+    rows = [
+        ["ALPHA TAB", "BATCH-A", "100.00", "9001"],
+        ["BETA CAP", "BATCH-B", "200.00", "9002"],
+        ["GAMMA SYP", "BATCH-C", "300.00", "9003"],
+    ]
+    cells = [{"rowIndex": 0, "columnIndex": c, "content": v} for c, v in enumerate(header)]
+    for r, row in enumerate(rows, start=1):
+        cells += [{"rowIndex": r, "columnIndex": c, "content": v} for c, v in enumerate(row)]
+    raw = {
+        "modelId": "prebuilt-invoice",
+        "documents": [],
+        "tables": [{"rowCount": 4, "columnCount": 4, "cells": cells}],
+    }
+    invoice = normalize_azure_invoice(raw)
+    assert [i.amount for i in invoice.line_items] == [100.00, 200.00, 300.00]

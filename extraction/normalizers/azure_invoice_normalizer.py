@@ -4,7 +4,10 @@ from typing import Any, Dict, List, Optional
 from core.dates import normalize_invoice_date
 from core.logger import logger
 from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem
-from extraction.normalizers.amount_inference import fill_missing_amounts
+from extraction.normalizers.amount_inference import (
+    count_best_formula_agreements,
+    fill_missing_amounts,
+)
 
 def _row_reading_order_key(bbox: List[float], angle_rad: float) -> float:
     """
@@ -1103,6 +1106,204 @@ def _map_row_to_data(
                     row_data[col_name] = val
     return row_data
 
+
+# A column has to be numeric on at least this many rows before it is worth
+# considering as the Amount, and the table needs at least this many rows
+# before column-wide agreement means anything - on a two-row invoice a tax
+# column can reproduce qty x rate by luck.
+_AMOUNT_COLUMN_MIN_NUMERIC_ROWS = 2
+_AMOUNT_RESOLUTION_MIN_ROWS = 3
+# Same thresholds the per-row formula inference uses: a column has to be
+# explained on several rows, and on most of the rows it could have explained,
+# before that counts as evidence rather than coincidence.
+_AMOUNT_COLUMN_MIN_AGREEMENTS = 2
+_AMOUNT_COLUMN_MIN_AGREEMENT_RATIO = 0.6
+
+_QTY_CONCEPTS = ("quantity_pcs", "quantity", "quantity_total", "quantity_tes")
+
+
+def _column_floats(data_rows: List[List[str]], c_idx: int) -> List[Optional[float]]:
+    """One entry per row: the cell as a float, or None where it is blank or
+    unreadable."""
+    out: List[Optional[float]] = []
+    for row in data_rows:
+        raw = row[c_idx] if c_idx < len(row) else ""
+        out.append(try_parse_float(raw) if raw and raw.strip() else None)
+    return out
+
+
+def _first_index(col_names: List[Optional[str]], concepts) -> Optional[int]:
+    for concept in concepts:
+        if concept in col_names:
+            return col_names.index(concept)
+    return None
+
+
+def resolve_amount_column(
+    item_grid: List[List[str]],
+    hdr_idx: int,
+    col_names: List[Optional[str]],
+    footer_data: Dict[str, Any],
+    skip_cols: Optional[set] = None,
+) -> List[str]:
+    """Decides which column holds the line Amount using the invoice's own
+    arithmetic, for the tables where the header text cannot settle it.
+
+    Two header spellings collide on these layouts. A GST breakout prints its
+    rate and its rupee figure as "SGST | Value | CGST | Value", and "Value" is
+    also what many distributors head their Amount column with - so the mapping
+    has to read the neighbouring cell to tell a tax Value from a money Value.
+    That works until OCR damages the neighbour: on a Deepak Agencies invoice
+    Azure returned "SUST", "CUST" and "Amnulint" for SGST, CGST and Amount, at
+    which point both Value columns claimed to be the Amount, the real Amount
+    column mapped to nothing, and every line came through carrying its SGST
+    figure - nine rows totalling 42.82 against a printed subtotal of 1821.63.
+    Adding those three spellings to the header table would fix that invoice
+    and not the next one, because there is no end to the ways OCR can damage
+    a word.
+
+    The figures beside the column are undamaged, though, and they identify it:
+    the Amount column is the one the invoice's own qty/rate/discount
+    arithmetic reproduces, and whose rows sum to a total the footer prints.
+    A tax column matches neither. So candidates - the columns claiming to be
+    the Amount, plus any unmapped numeric column, which is how a column whose
+    header was destroyed gets back into contention - are scored on that
+    evidence and the best one wins.
+
+    Nothing changes without positive evidence. Where the arithmetic is silent
+    (no rate column, too few rows, nothing in the footer to reconcile
+    against), the header's decision stands, so the formats this already reads
+    correctly take an unchanged path. Mutates col_names in place; returns
+    warnings describing anything it moved.
+    """
+    warnings: List[str] = []
+    skipped = skip_cols or set()
+
+    data_rows = [
+        row for row in item_grid[hdr_idx + 1:]
+        if not is_footer_row(row) and not (row and row[0].lower().strip() == "total")
+    ]
+    if len(data_rows) < _AMOUNT_RESOLUTION_MIN_ROWS:
+        return warnings
+
+    ncols = len(col_names)
+    values = {c: _column_floats(data_rows, c) for c in range(ncols)}
+    numeric_count = {c: sum(1 for v in values[c] if v is not None) for c in range(ncols)}
+
+    incumbents = [c for c in range(ncols) if col_names[c] == "amount"]
+    # An unmapped numeric column is a challenger: that is what the Amount
+    # column looks like once its header has been misread into nothing.
+    challengers = [
+        c for c in range(ncols)
+        if col_names[c] is None
+        and c not in skipped
+        and numeric_count[c] >= _AMOUNT_COLUMN_MIN_NUMERIC_ROWS
+    ]
+    candidates = incumbents + challengers
+    if len(candidates) < 2:
+        return warnings
+
+    # A column whose rows sum to a tax total the footer prints is that tax,
+    # whatever its header said. Only checked on a column that read completely,
+    # since a sum with cells missing cannot be compared against a total that
+    # includes them.
+    tax_totals = [
+        abs(v) for v in (footer_data.get("sgst"), footer_data.get("cgst"), footer_data.get("igst"))
+        if isinstance(v, (int, float)) and abs(v) > 0
+    ]
+    # The three figures the rows are allowed to add up to, matching what the
+    # review screen accepts: formats disagree about whether the Amount column
+    # is pre-tax, post-discount or tax-inclusive.
+    subtotal = footer_data.get("subtotal")
+    discount = footer_data.get("discount") or 0.0
+    grand_total = footer_data.get("grand_total")
+    roundoff = footer_data.get("roundoff") or 0.0
+    amount_totals = []
+    if isinstance(subtotal, (int, float)) and subtotal > 0:
+        amount_totals.extend([subtotal, subtotal - discount])
+    if isinstance(grand_total, (int, float)) and grand_total > 0:
+        amount_totals.append(grand_total - roundoff)
+
+    def column_sum_hits(c_idx: int, targets: List[float]) -> bool:
+        if not targets or numeric_count[c_idx] < len(data_rows):
+            return False
+        total = sum(v for v in values[c_idx] if v is not None)
+        # Every row rounds to paise on its own, so the sum's slack grows with
+        # the row count.
+        return any(abs(total - t) <= max(0.05 * len(data_rows), abs(t) * 0.0005) for t in targets)
+
+    qty_idx = _first_index(col_names, _QTY_CONCEPTS)
+    rate_idx = _first_index(col_names, ("rate",))
+    disc_idx = _first_index(col_names, ("discount",))
+    dpct_idx = _first_index(col_names, ("discount_percent",))
+    gpct_idx = _first_index(col_names, ("gst_percent",))
+
+    def agreement(c_idx: int) -> "tuple[int, int]":
+        """(rows the best formula reproduces, rows it could have reproduced)."""
+        if qty_idx is None or rate_idx is None:
+            return 0, 0
+        rows = []
+        for i, actual in enumerate(values[c_idx]):
+            qty = values[qty_idx][i]
+            rate = values[rate_idx][i]
+            if actual is None or qty is None or rate is None:
+                continue
+            rows.append((
+                qty * rate,
+                (values[disc_idx][i] or 0.0) if disc_idx is not None else 0.0,
+                (values[dpct_idx][i] or 0.0) if dpct_idx is not None else 0.0,
+                (values[gpct_idx][i] or 0.0) if gpct_idx is not None else 0.0,
+                actual,
+            ))
+        return count_best_formula_agreements(rows), len(rows)
+
+    disqualified = {c for c in candidates if column_sum_hits(c, tax_totals)}
+
+    scored = {}
+    for c in candidates:
+        if c in disqualified:
+            continue
+        hits, comparable = agreement(c)
+        explains_rows = (
+            hits >= _AMOUNT_COLUMN_MIN_AGREEMENTS
+            and comparable > 0
+            and hits / comparable >= _AMOUNT_COLUMN_MIN_AGREEMENT_RATIO
+        )
+        # Reconciling with the footer is the stronger signal: it is the whole
+        # column checked against a figure printed elsewhere on the page.
+        scored[c] = (column_sum_hits(c, amount_totals), explains_rows, hits, c)
+
+    winner = max(scored, key=lambda c: scored[c]) if scored else None
+    has_evidence = winner is not None and (scored[winner][0] or scored[winner][1])
+
+    if not has_evidence:
+        # Nothing earned the column. A disqualified incumbent still has to go:
+        # it is provably the tax figure, and leaving it mapped puts that on
+        # every line. Anything else keeps the header's decision.
+        for c in incumbents:
+            if c in disqualified:
+                col_names[c] = None
+                warnings.append(
+                    f"Column {c} was read as the line Amount, but its rows sum to a tax total "
+                    f"printed in the footer, so it has been dropped rather than billed as an amount."
+                )
+        return warnings
+
+    if winner in incumbents and len(incumbents) == 1:
+        return warnings
+
+    for c in incumbents:
+        if c != winner:
+            col_names[c] = None
+    if col_names[winner] != "amount":
+        col_names[winner] = "amount"
+        warnings.append(
+            f"The line Amount column was identified as column {winner} from the invoice's own "
+            f"qty/rate/total arithmetic, because its header could not be read."
+        )
+    return warnings
+
+
 # A manufacturer cell holds a short code, not prose. Anything long is the
 # column having swallowed a neighbour's text, and storing that would put
 # rubbish on the catalogue record under a field a pharmacist trusts.
@@ -1675,6 +1876,18 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                     f"Column '{concept}' was printed below its header row and has been "
                     f"re-aligned to the line items."
                 )
+
+        # Settle which column is the Amount before any row is read. The header
+        # alone cannot always say - a GST breakout's "Value" and a money
+        # "Value" are the same word - so where it is ambiguous the figures
+        # decide. Runs after the re-alignment above so it sees the final
+        # header mapping, and skips re-aligned columns because their values
+        # sit a row below the cells this reads.
+        warnings.extend(
+            resolve_amount_column(
+                item_grid, hdr_idx, col_names, footer_data, set(realigned_columns)
+            )
+        )
 
         pending_row_data: Optional[Dict[str, Any]] = None
         pending_r_indices: List[int] = []

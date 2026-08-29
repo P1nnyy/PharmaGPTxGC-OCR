@@ -186,6 +186,27 @@ def infer_amount_formula_from_total(
     return min(winners, key=lambda c: c.complexity)
 
 
+def count_best_formula_agreements(
+    rows: List["tuple[float, float, float, float, float]"],
+) -> int:
+    """How many of these rows the single best-fitting formula reproduces.
+
+    Each row is (base, discount, discount_percent, gst_percent, actual), where
+    base is qty x rate. This tests a whole *column* rather than filling a row:
+    given the figures beside it, how much of the column does the invoice's own
+    arithmetic explain? The Amount column scores near the row count on every
+    format above, because one of these formulas is what produced it. A tax or
+    discount column scores near zero no matter what its header was misread as,
+    which is what makes this usable to tell them apart.
+    """
+    if not rows:
+        return 0
+    return max(
+        sum(1 for base, d, p, g, actual in rows if _matches(candidate.compute(base, d, p, g), actual))
+        for candidate in _CANDIDATES
+    )
+
+
 def fill_missing_amounts(
     items: List[CanonicalLineItem], printed_total: Optional[float] = None
 ) -> Dict[str, Any]:
