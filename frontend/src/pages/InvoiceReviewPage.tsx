@@ -1813,36 +1813,69 @@ export const InvoiceReviewPage: React.FC = () => {
                   stronger witness, so the difference is stated here rather
                   than left to be noticed - a footer digit read wrong is
                   otherwise invisible behind a rounding tolerance. */}
+              {/* Graded, not uniform. With every row totalled, the rows and
+                  the footer are two independent readings of the same figure
+                  and they disagree — something on the page was misread, and
+                  this is the screen's most serious statement. With rows still
+                  missing an amount the total is merely incomplete, which is a
+                  different message and must not wear the same colour, or the
+                  red that means "wrong" stops meaning anything. */}
               {subtotalVsLines && (
-                <div className="text-[10px] text-amber-700 text-right -mt-1">
-                  {subtotalVsLines.missing > 0
-                    ? `${subtotalVsLines.counted} of ${lineItems.length} rows total `
-                    : `${lineItems.length} rows total `}
-                  {formatCurrencyOrDash(subtotalVsLines.lineTotal)} —{' '}
-                  {formatCurrencyOrDash(Math.abs(subtotalVsLines.gap))}{' '}
-                  {subtotalVsLines.gap > 0 ? 'more' : 'less'} than this
-                  {/* The correction is offered only on a total every row
-                      contributed to. Writing an incomplete one into the
-                      subtotal would replace a figure the invoice printed with
-                      a smaller one, and make the two agree by lowering the
-                      invoice rather than by fixing the rows. */}
-                  {subtotalVsLines.missing > 0 ? (
-                    <>
-                      {' '}
-                      ({subtotalVsLines.missing} row
-                      {subtotalVsLines.missing > 1 ? 's have' : ' has'} no amount)
-                    </>
-                  ) : (
-                    !isLocked && (
-                      <button
-                        type="button"
-                        onClick={() => handleTotalsChange('subtotal', String(subtotalVsLines.lineTotal))}
-                        className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-amber-900 cursor-pointer"
-                      >
-                        use {formatCurrencyOrDash(subtotalVsLines.lineTotal)}
-                      </button>
-                    )
-                  )}
+                <div
+                  className={`rounded-lg border px-2.5 py-2 text-xs leading-snug ${
+                    subtotalVsLines.missing > 0
+                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                      : 'border-rose-300 bg-rose-50 text-rose-900'
+                  }`}
+                >
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    <div className="min-w-0 space-y-1">
+                      <div className="font-bold">
+                        {subtotalVsLines.missing > 0
+                          ? 'Subtotal cannot be confirmed yet'
+                          : "Line items don't add up to this subtotal"}
+                      </div>
+                      <div>
+                        {subtotalVsLines.missing > 0
+                          ? `${subtotalVsLines.counted} of ${lineItems.length} rows total `
+                          : `${lineItems.length} rows total `}
+                        <span className="font-bold">
+                          {formatCurrencyOrDash(subtotalVsLines.lineTotal)}
+                        </span>
+                        , which is{' '}
+                        <span className="font-bold">
+                          {formatCurrencyOrDash(Math.abs(subtotalVsLines.gap))}
+                        </span>{' '}
+                        {subtotalVsLines.gap > 0 ? 'more' : 'less'} than the{' '}
+                        {formatCurrencyOrDash(toNumberOrNull(header.subtotal))} above.
+                      </div>
+                      {/* The correction is offered only on a total every row
+                          contributed to. Writing an incomplete one into the
+                          subtotal would replace a figure the invoice printed
+                          with a smaller one, and make the two agree by
+                          lowering the invoice rather than by fixing the rows. */}
+                      {subtotalVsLines.missing > 0 ? (
+                        <div className="opacity-90">
+                          {subtotalVsLines.missing} row
+                          {subtotalVsLines.missing > 1 ? 's have' : ' has'} no amount yet — fill
+                          those in before trusting either figure.
+                        </div>
+                      ) : (
+                        !isLocked && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleTotalsChange('subtotal', String(subtotalVsLines.lineTotal))
+                            }
+                            className="font-bold underline decoration-dotted underline-offset-2 hover:opacity-70 cursor-pointer"
+                          >
+                            Use {formatCurrencyOrDash(subtotalVsLines.lineTotal)} from the rows
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1934,17 +1967,32 @@ export const InvoiceReviewPage: React.FC = () => {
                   digit we read wrong. */}
               {impliedAdjustment && (
                 <div
-                  className={`rounded-lg px-2 py-1.5 text-[10px] leading-relaxed ${
+                  className={`rounded-lg border px-2.5 py-2 text-xs leading-snug ${
                     impliedAdjustment.kind === 'unexplained'
-                      ? 'bg-rose-50 text-rose-700'
-                      : 'bg-amber-50 text-amber-800'
+                      ? 'border-rose-300 bg-rose-50 text-rose-900'
+                      : 'border-amber-300 bg-amber-50 text-amber-900'
                   }`}
                 >
-                  <div className="font-semibold">
-                    Invoice states {formatCurrencyOrDash(impliedAdjustment.statedTotal)}; the figures
-                    above come to {formatCurrencyOrDash(impliedAdjustment.computedTotal)}.
-                  </div>
-                  <div className="opacity-90">{impliedAdjustment.note}</div>
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    <div className="min-w-0 space-y-1">
+                      <div className="font-bold">
+                        {impliedAdjustment.kind === 'unexplained'
+                          ? "Grand total doesn't match the figures above"
+                          : 'Grand total needs a round-off to reconcile'}
+                      </div>
+                      <div>
+                        Invoice states{' '}
+                        <span className="font-bold">
+                          {formatCurrencyOrDash(impliedAdjustment.statedTotal)}
+                        </span>
+                        ; the figures above come to{' '}
+                        <span className="font-bold">
+                          {formatCurrencyOrDash(impliedAdjustment.computedTotal)}
+                        </span>
+                        .
+                      </div>
+                      <div className="opacity-90">{impliedAdjustment.note}</div>
 
                   {/* Two ways to close the gap, both stated. Recording it as a
                       round-off keeps the invoice's own total and makes the
@@ -1952,7 +2000,7 @@ export const InvoiceReviewPage: React.FC = () => {
                       and is the right call only when that total is itself the
                       misread one. Neither happens on its own. */}
                   {!isLocked && (
-                    <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-semibold">
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 font-bold">
                       <button
                         type="button"
                         onClick={() =>
@@ -1979,23 +2027,36 @@ export const InvoiceReviewPage: React.FC = () => {
                       )}
                     </div>
                   )}
+                    </div>
+                  </div>
                 </div>
               )}
 
               {/* An amount payable that no longer matches the bill is the one
-                  thing on this screen that must never be silently true. */}
+                  thing on this screen that must never be silently true. It is
+                  the amount that gets paid, so it is stated at the same weight
+                  as the other two alerts rather than as a footnote. */}
               {grandTotalOverridden && (
-                <div className="text-[10px] text-rose-700 text-right">
-                  Invoice states {formatCurrencyOrDash(statedGrandTotal)}
-                  {!isLocked && (
-                    <button
-                      type="button"
-                      onClick={revertGrandTotal}
-                      className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-rose-900 cursor-pointer"
-                    >
-                      revert
-                    </button>
-                  )}
+                <div className="rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-2 text-xs leading-snug text-rose-900">
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    <div className="min-w-0 space-y-1">
+                      <div className="font-bold">Grand total has been changed</div>
+                      <div>
+                        The invoice states{' '}
+                        <span className="font-bold">{formatCurrencyOrDash(statedGrandTotal)}</span>.
+                      </div>
+                      {!isLocked && (
+                        <button
+                          type="button"
+                          onClick={revertGrandTotal}
+                          className="font-bold underline decoration-dotted underline-offset-2 hover:opacity-70 cursor-pointer"
+                        >
+                          Revert to {formatCurrencyOrDash(statedGrandTotal)}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
