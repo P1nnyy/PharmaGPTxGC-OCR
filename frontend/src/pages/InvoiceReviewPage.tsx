@@ -571,6 +571,70 @@ export const InvoiceReviewPage: React.FC = () => {
   }, [captureImgDimensions]);
 
   const headerStackRef = useRef<HTMLDivElement>(null);
+  // Scroll position at the moment the details panel was opened, or null while
+  // it is closed. The panel closes once the reviewer scrolls away from there.
+  const detailsAnchorRef = useRef<number | null>(null);
+  const [isHeaderPinned, setIsHeaderPinned] = useState(false);
+
+  // Watches the page's scroll container so the header block can behave like
+  // part of the page rather than a panel stapled to the top of it:
+  //
+  //   - it grows a separating border only once something is sliding under it
+  //   - the invoice details panel closes when the reviewer scrolls on
+  //
+  // The details panel is a detour, not a resting state - it gets opened to
+  // check one field and then left open, where it costs the line items half
+  // the screen for the rest of the session. Scrolling down to the rows is the
+  // reviewer saying they are done with it, so it gives the space back on its
+  // own instead of waiting to be closed by hand.
+  useEffect(() => {
+    // The scroll container is the layout's <main>, which this page has no
+    // reference to, so it is found by walking up to the nearest ancestor that
+    // actually scrolls.
+    let scroller: HTMLElement | null = headerStackRef.current?.parentElement ?? null;
+    while (scroller) {
+      const { overflowY } = getComputedStyle(scroller);
+      if (overflowY === 'auto' || overflowY === 'scroll') break;
+      scroller = scroller.parentElement;
+    }
+    if (!scroller) return;
+
+    const target = scroller;
+    const onScroll = () => {
+      const top = target.scrollTop;
+      setIsHeaderPinned(top > 4);
+      // A threshold rather than any movement at all: expanding the panel can
+      // itself shift the scroll position by a pixel or two, and collapsing on
+      // that would make the button look like it had not worked.
+      if (detailsAnchorRef.current !== null && top > detailsAnchorRef.current + 48) {
+        setIsDetailsExpanded(false);
+      }
+    };
+
+    target.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => target.removeEventListener('scroll', onScroll);
+    // Keyed on isLoading, not []: the loading state renders in place of this
+    // whole block, so on mount the ref is still null and there is nothing to
+    // walk up from. Re-running once the invoice is on screen is what actually
+    // finds the scroll container.
+  }, [isLoading]);
+
+  // Re-anchor whenever the panel opens, so "scrolled away from it" is measured
+  // from where the reviewer was when they opened it, not from the top of the page.
+  useEffect(() => {
+    if (!isDetailsExpanded) {
+      detailsAnchorRef.current = null;
+      return;
+    }
+    let scroller: HTMLElement | null = headerStackRef.current?.parentElement ?? null;
+    while (scroller) {
+      const { overflowY } = getComputedStyle(scroller);
+      if (overflowY === 'auto' || overflowY === 'scroll') break;
+      scroller = scroller.parentElement;
+    }
+    detailsAnchorRef.current = scroller ? scroller.scrollTop : 0;
+  }, [isDetailsExpanded]);
 
 
   // -------------------------------------------------------------------
@@ -1640,22 +1704,33 @@ export const InvoiceReviewPage: React.FC = () => {
           The SaaSLayout <main> has overflow-y-auto so sticky:top-0 works
           inside that scroll container.
           ================================================================ */}
+      {/* One page, one scrollbar. This block used to cap its own height and
+          scroll internally, which made it read as a boxed-off panel bolted
+          above the table and broke the expand: opening the details panel
+          scrolled it inside its own box instead of moving the line items
+          down, so the two halves of the screen behaved like separate
+          documents. It now takes the height its content needs and the page
+          scrolls as one. The scan stays put because the block is sticky, and
+          the details panel closes itself on scroll (below) rather than being
+          held back by a height cap.
+
+          Pinning is lg-only. Below that breakpoint the grid stacks the scan
+          above the summary, so the block is roughly twice as tall - pinning
+          it there would hold most of the viewport and leave the rows with a
+          sliver. On a narrow window the whole page simply scrolls. */}
       <div
         ref={headerStackRef}
-        className="sticky top-0 z-30 bg-[#f4f5fa] pt-1 pb-3 flex flex-col gap-3 border-b border-slate-200 shadow-sm"
+        className={`lg:sticky top-0 z-30 bg-[#f4f5fa] pt-1 pb-3 flex flex-col gap-3 border-b transition-shadow duration-200 ${
+          // Only a pinned bar needs a lip separating it from what slides
+          // under it. At rest the border and shadow drew a box around content
+          // that is simply the top of the page.
+          isHeaderPinned ? 'lg:border-slate-200 lg:shadow-sm border-transparent' : 'border-transparent'
+        }`}
         style={{
           marginLeft: '-1.5rem',
           marginRight: '-1.5rem',
           paddingLeft: '1.5rem',
           paddingRight: '1.5rem',
-          // Never let the pinned scan/summary panel take the whole viewport:
-          // it stays put while the items scroll under it, so whatever it
-          // occupies is permanently unavailable to the table. Capping it at
-          // 62vh keeps at least a third of the screen on the line items at any
-          // window height. On a normal laptop the panel is shorter than the cap
-          // anyway, so this changes nothing there.
-          maxHeight: 'min(calc(100vh - 88px), 62vh)',
-          overflowY: 'auto',
         }}
       >
         {/* Two Panel Layout Grid */}
