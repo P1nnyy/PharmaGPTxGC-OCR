@@ -4,6 +4,7 @@ from extraction.normalizers.azure_invoice_normalizer import (
     resolve_gstin_owners,
     _strip_border_artifacts,
     _footer_pairs,
+    _is_quantity_total_label,
     score_footer_table,
     _footer_label_and_value,
     normalize_azure_invoice,
@@ -1157,6 +1158,26 @@ class TestHybridFooterRow:
     def _row(self, *cells):
         return list(cells)
 
+    def test_the_quantity_total_is_captured_not_discarded(self):
+        """The printed quantity total is an independent witness to the
+        quantity column: the columns are read cell by cell and this is read
+        once, so a free-quantity digit misread on one row shows up as a
+        disagreement instead of passing unnoticed."""
+        row = self._row("GST 5,00%", "2530.86", "0.00", "191,45", "58.49", "58.49",
+                        "116.98", "Total Qty\n-\n26", "SGST PAYBLE", "58.49")
+        assert ("Total Qty", "26") in _footer_pairs(row)
+
+    def test_a_quantity_total_is_never_read_as_money(self):
+        """"Total Qty" carries the word "total", and _is_footer_label accepts
+        anything containing it. Booking 26 as the amount payable is the
+        failure this guards."""
+        assert _is_quantity_total_label("total qty")
+        assert _is_quantity_total_label("total qty :-")
+        assert _is_quantity_total_label("total quantity")
+        assert not _is_quantity_total_label("total items")
+        assert not _is_quantity_total_label("grand total")
+        assert not _is_quantity_total_label("sub total")
+
     def test_the_real_pair_is_found_past_a_count_label(self):
         """A row carrying both a count and a money figure must surrender both.
 
@@ -1177,6 +1198,20 @@ class TestHybridFooterRow:
     def test_a_count_label_does_not_shadow_the_discount_beside_it(self):
         pairs = dict(_footer_pairs(["Total Items :-\n3", "DIS AMT.\n87.83"]))
         assert pairs.get("DIS AMT.") == "87.83"
+
+    def test_a_separator_on_its_own_line_does_not_lose_the_pair(self):
+        """OCR breaks the ":-" of "Total Qty :- 26" onto its own line often
+        enough to matter. Partitioning at the first newline left the value
+        glued to the separator, which parses as no number, so the pair - and
+        with it the invoice's own quantity total - was dropped in silence."""
+        pairs = dict(_footer_pairs(["Total Qty\n-\n26"]))
+        assert pairs.get("Total Qty") == "26"
+
+    def test_the_two_line_form_still_pairs(self):
+        assert dict(_footer_pairs(["Total Qty\n26"])).get("Total Qty") == "26"
+
+    def test_a_cell_of_pure_junk_lines_yields_nothing(self):
+        assert _footer_pairs(["Total Qty\n-\n:-"]) == []
 
     def test_a_matrix_header_does_not_swallow_the_row(self):
         """TOTAL/SCHEME are column headings, not a label and its amount."""

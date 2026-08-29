@@ -66,6 +66,11 @@ class CanonicalInvoice(BaseModel):
     # (e.g. -0.20). None when the invoice has no such line at all - distinct
     # from an invoice that explicitly rounds off by zero.
     roundoff: Optional[float] = None
+    # Quantity total as printed in the footer ("Total Qty :- 26"). An
+    # independent witness to the quantity column: the columns are read cell by
+    # cell and this is read once, so a free-quantity digit misread on one row
+    # shows up as a disagreement rather than passing unnoticed.
+    total_quantity: Optional[float] = None
     line_items: List[CanonicalLineItem] = []
     confidence: Optional[float] = None
     extraction_engine: Optional[str] = None

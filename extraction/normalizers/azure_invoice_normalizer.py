@@ -272,6 +272,21 @@ _SUBTOTAL_LABELS = [
     "net taxable", "gross total", "gross amount", "amount before tax",
     "total before tax", "basic amount", "basic value", "item total",
 ]
+# "Total Qty :- 26" and its OCR variants. Kept separate from the money labels
+# so the two can never be confused for one another.
+_QUANTITY_TOTAL_LABELS = [
+    "total qty", "total quantity", "total qnty", "total qty.", "tot qty",
+    # OCR routinely turns the "t" of "qty" into a digit or drops it entirely.
+    "total q0y", "total qy", "total 0y",
+]
+
+
+def _is_quantity_total_label(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]", " ", text.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return any(normalized.startswith(k) for k in _QUANTITY_TOTAL_LABELS)
+
+
 _GRAND_TOTAL_LABELS = [
     "grand total", "net total", "payable amount", "total payable", "net amt",
     "net amount", "bill amount",
@@ -287,6 +302,11 @@ def _is_footer_label(text: str) -> bool:
     if is_discount_label(t):
         return True
     return any(k in t for k in ("sgst", "cgst", "igst", "round", "total"))
+
+
+# A line carrying nothing but the punctuation that separates a label from its
+# value - ":-", "-", ":". Never a label and never a value.
+_SEPARATOR_ONLY = re.compile(r"[:\-\u2013\u2014.\s]+")
 
 
 def _footer_pairs(row: List[str]) -> "List[tuple[str, str]]":
@@ -310,12 +330,24 @@ def _footer_pairs(row: List[str]) -> "List[tuple[str, str]]":
         if not text:
             continue
 
-        # A cell holding its own answer on a second line.
+        # A cell holding its own answer on a later line.
+        #
+        # Not just the second line: where the label carries a ":-" separator,
+        # OCR sometimes breaks it onto a line of its own, so "Total Qty :- 26"
+        # arrives as three lines rather than two. Partitioning at the first
+        # newline then left the value glued to the separator ("-\n26"), which
+        # parses as no number, and the pair was dropped - taking the invoice's
+        # own quantity total with it. Dropping separator-only lines first
+        # handles both shapes with one rule.
         if "\n" in text:
-            head, _, tail = text.partition("\n")
-            head, tail = head.strip(), tail.strip()
-            if head and tail and _is_footer_label(head) and try_parse_float(tail) is not None:
-                pairs.append((head, tail))
+            lines = [ln.strip() for ln in text.split("\n")]
+            lines = [ln for ln in lines if ln and not _SEPARATOR_ONLY.fullmatch(ln)]
+            if (
+                len(lines) == 2
+                and _is_footer_label(lines[0])
+                and try_parse_float(lines[1]) is not None
+            ):
+                pairs.append((lines[0], lines[1]))
                 continue
 
         # A label whose amount is the next populated cell along.
@@ -1406,6 +1438,17 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                         continue
                     lbl = lbl_raw.lower().strip()
                     val = try_parse_float(val_str) if val_str else None
+                    # Counts first. These are not money and must never reach a
+                    # money field: "Total Qty 26" carries the word "total", and
+                    # one careless addition to the label lists below would book
+                    # 26 as the amount payable. Reading it deliberately here is
+                    # also worth doing on its own - the printed quantity total
+                    # is an independent witness to the quantity column, and it
+                    # is what catches a free-quantity digit read wrong.
+                    if _is_quantity_total_label(lbl):
+                        if val is not None:
+                            footer_data["total_quantity"] = val
+                        continue
                     if any(k in lbl for k in _SUBTOTAL_LABELS):
                         footer_data["subtotal"] = val
                     elif is_discount_label(lbl):
@@ -1925,6 +1968,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         igst=igst,
         grand_total=grand_total,
         roundoff=roundoff,
+        total_quantity=footer_data.get("total_quantity"),
         line_items=line_items,
         confidence=confidence,
         extraction_engine="azure_document_intelligence",

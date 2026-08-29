@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { buildInvoiceChecks, type CheckStatus } from './invoiceChecks';
+import { buildInvoiceChecks, deriveImpliedAdjustment, type CheckStatus } from './invoiceChecks';
 import { apiClient } from '../api/client';
 import { useRun } from '../context/RunContext';
 import {
@@ -37,6 +37,9 @@ interface InvoiceHeader {
   igst: number | null;
   grand_total: number | null;
   roundoff: number | null;
+  // The quantity total printed in the footer. Evidence, not an editable
+  // figure: it is what the rows are checked against.
+  total_quantity?: number | null;
   seller_gstin?: string;
   seller_address?: string;
   seller_phone?: string;
@@ -436,12 +439,27 @@ export const InvoiceReviewPage: React.FC = () => {
     igst: null,
     grand_total: null,
     roundoff: null,
+    total_quantity: null,
     seller_gstin: '',
     seller_address: '',
     seller_phone: '',
     drug_license: '',
     buyer_gstin: ''
   });
+
+  // What the invoice itself said was payable, kept as read so an override is
+  // always visible and always reversible. The grand total is the one figure on
+  // the page that decides what gets paid, so it must never change without the
+  // screen saying it changed.
+  const [statedGrandTotal, setStatedGrandTotal] = useState<number | null>(null);
+  // The round-off the invoice itself printed, if any. Distinguishes a printed
+  // round-off that stops reconciling - which means something else was misread -
+  // from one a reviewer entered that has simply gone stale.
+  const [statedRoundoff, setStatedRoundoff] = useState<number | null>(null);
+  // True only while the grand total on screen is one we worked out, because
+  // the invoice never printed one. A stated total is evidence and is left
+  // alone; a derived one is arithmetic and follows its inputs.
+  const [grandTotalIsDerived, setGrandTotalIsDerived] = useState(false);
 
   const [lineItems, setLineItems] = useState<TableLineItem[]>([]);
   // True only when the user emptied the table themselves, row by row. Gates the
@@ -870,6 +888,7 @@ export const InvoiceReviewPage: React.FC = () => {
           igst: detail.igst ?? null,
           grand_total: detail.grand_total ?? null,
           roundoff: detail.roundoff ?? null,
+          total_quantity: detail.total_quantity ?? null,
           seller_gstin: detail.seller_gstin || detail.seller?.gstin || '',
           seller_address: detail.seller_address || detail.seller?.address || '',
           seller_phone: detail.seller_phone || detail.seller?.phone || '',
@@ -877,6 +896,10 @@ export const InvoiceReviewPage: React.FC = () => {
           buyer_gstin: detail.buyer_gstin || '',
           discount_breakdown: Array.isArray(detail.discount_breakdown) ? detail.discount_breakdown : [],
         });
+
+        setStatedGrandTotal(toNumberOrNull(detail.grand_total));
+        setStatedRoundoff(toNumberOrNull(detail.roundoff));
+        setGrandTotalIsDerived(toNumberOrNull(detail.grand_total) === null);
 
         // ---- Auto Rotation from Azure Page Angles ----
         // One angle per page so each sheet is uprighted on its own terms.
@@ -968,6 +991,9 @@ export const InvoiceReviewPage: React.FC = () => {
 
   // Handle header field edits
   const handleHeaderChange = (key: keyof InvoiceHeader, value: any) => {
+    // Typing into the grand total is the reviewer stating what is owed, so it
+    // stops being a derived figure and stops following the parts.
+    if (key === 'grand_total') setGrandTotalIsDerived(false);
     setHeader((prev) => ({
       ...prev,
       [key]: value
@@ -975,17 +1001,21 @@ export const InvoiceReviewPage: React.FC = () => {
   };
 
   /**
-   * Edits a figure in the totals block and carries the change through to the
-   * grand total.
+   * Edits a figure in the totals block.
    *
-   * Correcting a misread subtotal used to leave the grand total stating the
-   * old arithmetic, so the reviewer fixed one number and the totals still did
-   * not add up - the indicator stayed red and the fix looked ineffective. The
-   * grand total is the sum of the parts, so when a part changes it follows.
+   * This used to carry every change through to the grand total, so that a
+   * corrected subtotal would clear the red totals indicator. That traded the
+   * wrong thing away: the grand total is what the supplier is owed, printed on
+   * the bill and usually repeated in words, while the subtotal is a cell that
+   * OCR can misread. Recomputing meant fixing a 20-paise misread quietly
+   * restated the amount payable - the reviewer corrected one number and
+   * silently changed what the pharmacy owed, with nothing on screen saying so.
    *
-   * Typing directly into the grand total still wins: that field is the figure
-   * printed on the bill, and a reviewer who enters it is stating what the
-   * supplier is owed rather than deriving it.
+   * So a stated grand total now stands. A gap between it and the parts is a
+   * real property of the invoice - usually a rounding the supplier applied and
+   * did not print - and is reported by deriveImpliedAdjustment() rather than
+   * papered over by moving the total. Where the invoice printed no grand total
+   * at all there is nothing to protect, and it follows the parts as before.
    */
   const handleTotalsChange = (key: 'subtotal' | 'discount' | 'roundoff', raw: string) => {
     setHeader((prev) => {
@@ -1000,13 +1030,32 @@ export const InvoiceReviewPage: React.FC = () => {
       const tax = num(prev.cgst) + num(prev.sgst) + num(prev.igst);
       const roundoff = num(next.roundoff);
 
-      // Only when there is a subtotal to build on. Deriving a grand total from
-      // an empty box would replace a figure read off the invoice with zero.
-      if (String(next.subtotal ?? '').trim() !== '') {
+      // Only when the total on screen is ours to recompute, and only when
+      // there is a subtotal to build it from - deriving from an empty box
+      // would put a zero where a figure read off the invoice belongs.
+      if (grandTotalIsDerived && String(next.subtotal ?? '').trim() !== '') {
         next.grand_total = parseFloat((subtotal - discount + tax + roundoff).toFixed(2));
       }
       return next;
     });
+  };
+
+  /**
+   * Replaces the grand total with the figure the other totals come to.
+   *
+   * The deliberate version of what handleTotalsChange used to do behind the
+   * reviewer's back: available when the printed total is itself the misread
+   * one, but taken as a decision, shown as an override, and revertible to
+   * whatever the invoice stated.
+   */
+  const overrideGrandTotal = (value: number) => {
+    setHeader((prev) => ({ ...prev, grand_total: parseFloat(value.toFixed(2)) }));
+    setGrandTotalIsDerived(false);
+  };
+
+  const revertGrandTotal = () => {
+    setHeader((prev) => ({ ...prev, grand_total: statedGrandTotal }));
+    setGrandTotalIsDerived(statedGrandTotal === null);
   };
 
   // Handle line item field edits and auto-recompute amount totals
@@ -1112,6 +1161,60 @@ export const InvoiceReviewPage: React.FC = () => {
   const isAnyAmountMissing = lineItems.some(item => !isPresent(getItemAmount(item)));
   const effectiveSubtotal = isPresent(header.subtotal) ? toNumberOrNull(header.subtotal) : computedSubtotal;
 
+  // The difference between what this invoice's own figures come to and what
+  // it says is payable. Suppliers round the amount due and print no round-off
+  // line for it, so a grand total that reconciles with nothing on the page is
+  // usually a fact about the invoice rather than a bad read - but only saying
+  // so out loud makes that distinguishable from a bad read.
+  const impliedAdjustment = React.useMemo(() => deriveImpliedAdjustment({
+    subtotal: toNumberOrNull(effectiveSubtotal),
+    discount: toNumberOrNull(discountVal),
+    taxTotal: toNumberOrNull(computedGstTotal),
+    roundoff: toNumberOrNull(roundoff),
+    printedRoundoff: statedRoundoff,
+    grandTotal: toNumberOrNull(header.grand_total),
+  }), [effectiveSubtotal, discountVal, computedGstTotal, roundoff, statedRoundoff, header.grand_total]);
+
+  // What the rows say was received, and how many of them land short of a
+  // whole pack. Both read from the edited rows, so accepting a per-row
+  // suggestion updates the chip in the same click.
+  const quantityTally = React.useMemo(() => {
+    let received = 0;
+    let partPackRows = 0;
+    let anyMissing = false;
+    for (const item of lineItems) {
+      const billed = toNumberOrNull(item.quantity);
+      const free = toNumberOrNull(item.free_quantity) ?? 0;
+      if (billed === null) {
+        anyMissing = true;
+        continue;
+      }
+      const rowTotal = billed + free;
+      received += rowTotal;
+      if (Math.abs(rowTotal - Math.round(rowTotal)) > 1e-6) partPackRows += 1;
+    }
+    return {
+      received: anyMissing ? null : parseFloat(received.toFixed(2)),
+      partPackRows,
+    };
+  }, [lineItems]);
+
+  // True once the total on screen is no longer the one the invoice printed.
+  const grandTotalOverridden =
+    statedGrandTotal !== null &&
+    toNumberOrNull(header.grand_total) !== null &&
+    Math.abs((toNumberOrNull(header.grand_total) as number) - statedGrandTotal) >= 0.005;
+
+  // How far the rows are from the subtotal printed in the footer. A footer
+  // total is one OCR'd cell; the amount column is many, so a disagreement is
+  // worth showing beside the subtotal itself, where it gets corrected.
+  const subtotalVsLines = React.useMemo(() => {
+    const stated = toNumberOrNull(header.subtotal);
+    if (stated === null || computedSubtotal === null || isAnyAmountMissing) return null;
+    const gap = parseFloat((computedSubtotal - stated).toFixed(2));
+    return Math.abs(gap) < 0.005 ? null : { gap, lineTotal: computedSubtotal };
+  }, [header.subtotal, computedSubtotal, isAnyAmountMissing]);
+
   // Each question the reviewer would otherwise ask by hand, answered
   // separately. Computed straight from what is on screen, so correcting a
   // figure flips its indicator in the same keystroke — see invoiceChecks.ts
@@ -1137,6 +1240,9 @@ export const InvoiceReviewPage: React.FC = () => {
       isCriticalItemMissing(item, 'amount')
     ).length,
     derivedAmounts: lineItems.filter((item) => item.is_suggested_amount).length,
+    receivedQuantity: quantityTally.received,
+    statedQuantity: toNumberOrNull(header.total_quantity),
+    partPackRows: quantityTally.partPackRows,
     sellerName: header.seller_name ?? null,
     sellerGstin: header.seller_gstin ?? null,
     invoiceNumber: header.invoice_number ?? null,
@@ -1144,6 +1250,7 @@ export const InvoiceReviewPage: React.FC = () => {
   }), [
     effectiveSubtotal, isAnyAmountMissing, computedSubtotal, discountVal, computedGstTotal,
     cgstVal, sgstVal, igstVal, roundoff, header.grand_total, lineItems,
+    quantityTally, header.total_quantity,
     header.seller_name, header.seller_gstin, header.invoice_number, header.invoice_date,
     invoiceHasMrpColumn,
   ]);
@@ -1676,6 +1783,28 @@ export const InvoiceReviewPage: React.FC = () => {
                 )}
               </div>
 
+              {/* The footer subtotal is a single OCR'd cell; the amount column
+                  is a dozen of them. When they disagree the column is the
+                  stronger witness, so the difference is stated here rather
+                  than left to be noticed - a footer digit read wrong is
+                  otherwise invisible behind a rounding tolerance. */}
+              {subtotalVsLines && (
+                <div className="text-[10px] text-amber-700 text-right -mt-1">
+                  {lineItems.length} rows total {formatCurrencyOrDash(subtotalVsLines.lineTotal)} —{' '}
+                  {formatCurrencyOrDash(Math.abs(subtotalVsLines.gap))}{' '}
+                  {subtotalVsLines.gap > 0 ? 'more' : 'less'} than this
+                  {!isLocked && (
+                    <button
+                      type="button"
+                      onClick={() => handleTotalsChange('subtotal', String(subtotalVsLines.lineTotal))}
+                      className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-amber-900 cursor-pointer"
+                    >
+                      use {formatCurrencyOrDash(subtotalVsLines.lineTotal)}
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="flex items-center justify-between">
                 {/* Just "Tax". The bracket used to hold a rate, defaulting to
                     a hardcoded "12%" whenever no tax had been extracted — so
@@ -1715,16 +1844,116 @@ export const InvoiceReviewPage: React.FC = () => {
                 </div>
               )}
 
-              {(roundoff !== null || !isLocked) && (
+              {(roundoff !== null || impliedAdjustment !== null || !isLocked) && (
                 <div className="flex items-center justify-between">
-                  <span className="text-gray-500 font-medium">Round Off</span>
+                  <span className="text-gray-500 font-medium">
+                    {roundoff === null && impliedAdjustment ? impliedAdjustment.label : 'Round Off'}
+                  </span>
                   {isLocked ? (
-                    <span className="font-semibold text-slate-800">{formatSignedCurrency(roundoff)}</span>
+                    // With nothing printed, the figure shown is inferred from
+                    // the invoice's own grand total, so it is styled as the
+                    // different kind of thing it is rather than sitting there
+                    // looking like an extracted value.
+                    roundoff === null && impliedAdjustment ? (
+                      <span
+                        className={`font-semibold italic ${
+                          impliedAdjustment.kind === 'unexplained' ? 'text-rose-600' : 'text-amber-700'
+                        }`}
+                      >
+                        {formatSignedCurrency(impliedAdjustment.requiredRoundoff)}
+                      </span>
+                    ) : (
+                      <span
+                        className={`font-semibold ${
+                          impliedAdjustment?.isStale ? 'text-amber-700' : 'text-slate-800'
+                        }`}
+                      >
+                        {formatSignedCurrency(roundoff)}
+                      </span>
+                    )
                   ) : (
                     <TotalsInput
                       value={header.roundoff}
+                      placeholder={
+                        roundoff === null && impliedAdjustment
+                          ? formatSignedCurrency(impliedAdjustment.requiredRoundoff)
+                          : undefined
+                      }
+                      className={impliedAdjustment?.isStale ? 'text-amber-700' : ''}
                       onChange={(v) => handleTotalsChange('roundoff', v)}
                     />
+                  )}
+                </div>
+              )}
+
+              {/* Both numbers, named. A grand total that reconciles with
+                  nothing above it reads as a failed extraction; showing what
+                  the invoice states beside what its own figures come to lets
+                  the reviewer tell a supplier's unstated rounding apart from a
+                  digit we read wrong. */}
+              {impliedAdjustment && (
+                <div
+                  className={`rounded-lg px-2 py-1.5 text-[10px] leading-relaxed ${
+                    impliedAdjustment.kind === 'unexplained'
+                      ? 'bg-rose-50 text-rose-700'
+                      : 'bg-amber-50 text-amber-800'
+                  }`}
+                >
+                  <div className="font-semibold">
+                    Invoice states {formatCurrencyOrDash(impliedAdjustment.statedTotal)}; the figures
+                    above come to {formatCurrencyOrDash(impliedAdjustment.computedTotal)}.
+                  </div>
+                  <div className="opacity-90">{impliedAdjustment.note}</div>
+
+                  {/* Two ways to close the gap, both stated. Recording it as a
+                      round-off keeps the invoice's own total and makes the
+                      figures reconcile; overriding replaces the printed total
+                      and is the right call only when that total is itself the
+                      misread one. Neither happens on its own. */}
+                  {!isLocked && (
+                    <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-semibold">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleTotalsChange('roundoff', String(impliedAdjustment.requiredRoundoff))
+                        }
+                        className="underline decoration-dotted underline-offset-2 hover:opacity-70 cursor-pointer"
+                      >
+                        {impliedAdjustment.isStale ? 'Update' : 'Record'} round-off to{' '}
+                        {formatSignedCurrency(impliedAdjustment.requiredRoundoff)}
+                      </button>
+                      {/* Only offered while the round-off box is empty. With a
+                          stale value in it, "what these figures come to" is
+                          contaminated by the stale figure, so overriding the
+                          printed total with it would bake the error into the
+                          amount payable. Clear or fix the round-off first. */}
+                      {!impliedAdjustment.isStale && (
+                        <button
+                          type="button"
+                          onClick={() => overrideGrandTotal(impliedAdjustment.computedTotal)}
+                          className="underline decoration-dotted underline-offset-2 hover:opacity-70 cursor-pointer"
+                        >
+                          Override total with {formatCurrencyOrDash(impliedAdjustment.computedTotal)}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* An amount payable that no longer matches the bill is the one
+                  thing on this screen that must never be silently true. */}
+              {grandTotalOverridden && (
+                <div className="text-[10px] text-rose-700 text-right">
+                  Invoice states {formatCurrencyOrDash(statedGrandTotal)}
+                  {!isLocked && (
+                    <button
+                      type="button"
+                      onClick={revertGrandTotal}
+                      className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-rose-900 cursor-pointer"
+                    >
+                      revert
+                    </button>
                   )}
                 </div>
               )}
