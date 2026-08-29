@@ -1156,9 +1156,11 @@ export const InvoiceReviewPage: React.FC = () => {
 
   const roundoff = toNumberOrNull(header.roundoff);
 
-  // A row with no amount cannot be totalled, which is a different answer from
-  // "the rows total the wrong thing" - the checks distinguish the two.
-  const isAnyAmountMissing = lineItems.some(item => !isPresent(getItemAmount(item)));
+  // How many rows contributed to computedSubtotal. A row with no amount makes
+  // that total a floor rather than a figure, which is a different answer from
+  // "the rows total the wrong thing" - the checks distinguish the two, and
+  // neither goes quiet just because a row is incomplete.
+  const rowsWithAmount = lineItems.filter(item => isPresent(getItemAmount(item))).length;
   const effectiveSubtotal = isPresent(header.subtotal) ? toNumberOrNull(header.subtotal) : computedSubtotal;
 
   // The difference between what this invoice's own figures come to and what
@@ -1208,12 +1210,30 @@ export const InvoiceReviewPage: React.FC = () => {
   // How far the rows are from the subtotal printed in the footer. A footer
   // total is one OCR'd cell; the amount column is many, so a disagreement is
   // worth showing beside the subtotal itself, where it gets corrected.
+  //
+  // A row with no amount does not silence this. It used to: the whole
+  // comparison was withheld until every row had an amount, which meant a
+  // single unreadable cell hid the fact that nine rows were totalling 42.82
+  // against a printed 1821.63 — and the reviewer only saw it after deleting
+  // an unrelated row happened to satisfy the guard. Rows missing an amount
+  // are the case where the total is MOST likely to be wrong, so the rows that
+  // do have one are still totalled and the count is stated instead. What is
+  // withheld is the one-click correction: an incomplete total is not a figure
+  // to overwrite the subtotal with.
   const subtotalVsLines = React.useMemo(() => {
     const stated = toNumberOrNull(header.subtotal);
-    if (stated === null || computedSubtotal === null || isAnyAmountMissing) return null;
+    if (stated === null || computedSubtotal === null) return null;
+    if (rowsWithAmount === 0) return null;
     const gap = parseFloat((computedSubtotal - stated).toFixed(2));
-    return Math.abs(gap) < 0.005 ? null : { gap, lineTotal: computedSubtotal };
-  }, [header.subtotal, computedSubtotal, isAnyAmountMissing]);
+    // With rows missing, the total is expected to fall short, so only a gap
+    // too large to be those rows is worth raising. Their own amounts are
+    // unknown, so the invoice's average row is the yardstick available.
+    const missing = lineItems.length - rowsWithAmount;
+    const slack = missing > 0 ? Math.abs(stated / lineItems.length) * missing : 0;
+    if (Math.abs(gap) < 0.005) return null;
+    if (missing > 0 && gap < 0 && Math.abs(gap) <= slack) return null;
+    return { gap, lineTotal: computedSubtotal, counted: rowsWithAmount, missing };
+  }, [header.subtotal, computedSubtotal, lineItems.length, rowsWithAmount]);
 
   // Each question the reviewer would otherwise ask by hand, answered
   // separately. Computed straight from what is on screen, so correcting a
@@ -1223,7 +1243,12 @@ export const InvoiceReviewPage: React.FC = () => {
     // Coerced here, not trusted: these fields hold whatever the reviewer has
     // typed, so a half-entered "14." is a string until it parses.
     subtotal: toNumberOrNull(effectiveSubtotal),
-    lineTotal: isAnyAmountMissing ? null : computedSubtotal,
+    // The total of the rows that have an amount, with the count alongside, so
+    // the check can say how far off they are AND that some are missing. It
+    // used to be withheld entirely whenever a row lacked an amount, which put
+    // the check into 'unknown' exactly when the rows were least trustworthy.
+    lineTotal: computedSubtotal,
+    rowsWithAmount,
     discount: toNumberOrNull(discountVal),
     taxTotal: toNumberOrNull(computedGstTotal),
     cgst: toNumberOrNull(cgstVal),
@@ -1248,7 +1273,7 @@ export const InvoiceReviewPage: React.FC = () => {
     invoiceNumber: header.invoice_number ?? null,
     invoiceDate: header.invoice_date ?? null,
   }), [
-    effectiveSubtotal, isAnyAmountMissing, computedSubtotal, discountVal, computedGstTotal,
+    effectiveSubtotal, computedSubtotal, rowsWithAmount, discountVal, computedGstTotal,
     cgstVal, sgstVal, igstVal, roundoff, header.grand_total, lineItems,
     quantityTally, header.total_quantity,
     header.seller_name, header.seller_gstin, header.invoice_number, header.invoice_date,
@@ -1790,17 +1815,33 @@ export const InvoiceReviewPage: React.FC = () => {
                   otherwise invisible behind a rounding tolerance. */}
               {subtotalVsLines && (
                 <div className="text-[10px] text-amber-700 text-right -mt-1">
-                  {lineItems.length} rows total {formatCurrencyOrDash(subtotalVsLines.lineTotal)} —{' '}
+                  {subtotalVsLines.missing > 0
+                    ? `${subtotalVsLines.counted} of ${lineItems.length} rows total `
+                    : `${lineItems.length} rows total `}
+                  {formatCurrencyOrDash(subtotalVsLines.lineTotal)} —{' '}
                   {formatCurrencyOrDash(Math.abs(subtotalVsLines.gap))}{' '}
                   {subtotalVsLines.gap > 0 ? 'more' : 'less'} than this
-                  {!isLocked && (
-                    <button
-                      type="button"
-                      onClick={() => handleTotalsChange('subtotal', String(subtotalVsLines.lineTotal))}
-                      className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-amber-900 cursor-pointer"
-                    >
-                      use {formatCurrencyOrDash(subtotalVsLines.lineTotal)}
-                    </button>
+                  {/* The correction is offered only on a total every row
+                      contributed to. Writing an incomplete one into the
+                      subtotal would replace a figure the invoice printed with
+                      a smaller one, and make the two agree by lowering the
+                      invoice rather than by fixing the rows. */}
+                  {subtotalVsLines.missing > 0 ? (
+                    <>
+                      {' '}
+                      ({subtotalVsLines.missing} row
+                      {subtotalVsLines.missing > 1 ? 's have' : ' has'} no amount)
+                    </>
+                  ) : (
+                    !isLocked && (
+                      <button
+                        type="button"
+                        onClick={() => handleTotalsChange('subtotal', String(subtotalVsLines.lineTotal))}
+                        className="ml-1.5 font-semibold underline decoration-dotted underline-offset-2 hover:text-amber-900 cursor-pointer"
+                      >
+                        use {formatCurrencyOrDash(subtotalVsLines.lineTotal)}
+                      </button>
+                    )
                   )}
                 </div>
               )}

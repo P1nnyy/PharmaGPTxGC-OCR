@@ -29,8 +29,13 @@ export interface InvoiceCheck {
 
 export interface CheckInputs {
   subtotal: number | null;
-  /** Sum of the line-item amounts on screen. */
+  /** Sum of the line-item amounts on screen, over the rows that have one. */
   lineTotal: number | null;
+  /**
+   * How many rows contributed to lineTotal. Below itemCount the total is a
+   * floor rather than a figure, and the check says so instead of going quiet.
+   */
+  rowsWithAmount: number;
   discount: number | null;
   taxTotal: number | null;
   cgst: number | null;
@@ -81,14 +86,16 @@ export function buildInvoiceChecks(input: CheckInputs): InvoiceCheck[] {
   // per-line "Amount" column means: some print it pre-tax, some after
   // discount, some tax-inclusive. Matching any one of them is a genuine
   // reconciliation, and insisting on a single formula fails correct invoices.
-  if (input.lineTotal === null || input.subtotal === null) {
+  const rowsMissingAmount = Math.max(0, input.itemCount - input.rowsWithAmount);
+
+  if (input.lineTotal === null || input.subtotal === null || input.rowsWithAmount === 0) {
     checks.push({
       id: 'lines_vs_subtotal',
       label: 'Line items',
       status: 'unknown',
-      detail: input.lineTotal === null
-        ? 'Some rows have no amount yet, so they cannot be totalled.'
-        : 'This invoice prints no subtotal to compare the rows against.',
+      detail: input.subtotal === null
+        ? 'This invoice prints no subtotal to compare the rows against.'
+        : 'No row has an amount yet, so there is nothing to total.',
     });
   } else {
     const discount = input.discount ?? 0;
@@ -101,24 +108,53 @@ export function buildInvoiceChecks(input: CheckInputs): InvoiceCheck[] {
       candidates.push({ label: 'the grand total', value: input.grandTotal - roundoff });
     }
     const hit = candidates.find((c) => Math.abs(input.lineTotal! - c.value) <= TOLERANCE);
-    checks.push({
-      id: 'lines_vs_subtotal',
-      label: 'Line items',
-      status: hit ? 'pass' : 'fail',
-      // A hit inside the tolerance is still a hit, but it is not necessarily
-      // an exact match, and saying "matching" of a figure that is 20 paise out
-      // is how a misread footer cell stays invisible. Name the gap when there
-      // is one — the reviewer can then decide whether it is per-line rounding
-      // or a digit read wrong.
-      detail: hit
-        ? (() => {
-            const gap = Math.abs(input.lineTotal! - hit.value);
-            return gap < 0.005
-              ? `${input.itemCount} rows total ${money(input.lineTotal)}, matching ${hit.label} exactly.`
-              : `${input.itemCount} rows total ${money(input.lineTotal)}, ${money(gap)} apart from ${hit.label} (${money(hit.value)}) — within rounding tolerance.`;
-          })()
-        : `${input.itemCount} rows total ${money(input.lineTotal)}, but the subtotal is ${money(input.subtotal)} — a gap of ${money(Math.abs(input.lineTotal - input.subtotal))}.`,
-    });
+
+    // Rows counted, out of how many there are. Naming both stops a partial
+    // total reading as a complete one.
+    const counted = rowsMissingAmount > 0
+      ? `${input.rowsWithAmount} of ${input.itemCount} rows total`
+      : `${input.itemCount} rows total`;
+
+    if (rowsMissingAmount > 0) {
+      // A short total is expected while rows are missing, so it is not called
+      // a mismatch — but it is not called clean either, and it is never
+      // withheld. Withholding it is how nine rows totalling ₹42.82 against a
+      // printed ₹1821.63 stayed invisible: one unreadable cell put this check
+      // into 'unknown', and the discrepancy only surfaced once an unrelated
+      // row was deleted. A shortfall larger than the missing rows could
+      // plausibly account for is a fault regardless of what is missing.
+      const shortfall = input.subtotal - input.lineTotal;
+      const perRow = Math.abs(input.subtotal / Math.max(1, input.itemCount));
+      const plausible = shortfall > 0 && shortfall <= perRow * rowsMissingAmount * 1.5;
+      checks.push({
+        id: 'lines_vs_subtotal',
+        label: 'Line items',
+        status: hit ? 'pass' : plausible ? 'warn' : 'fail',
+        detail: hit
+          ? `${counted} ${money(input.lineTotal)}, already matching ${hit.label} with ${rowsMissingAmount} row(s) still without an amount — one of those figures is wrong.`
+          : `${counted} ${money(input.lineTotal)} against a subtotal of ${money(input.subtotal)} — ${money(Math.abs(shortfall))} ${shortfall > 0 ? 'short' : 'over'}, with ${rowsMissingAmount} row(s) carrying no amount.`
+            + (plausible ? ' Fill those in to complete the comparison.' : ' That is more than the missing rows can account for.'),
+      });
+    } else {
+      checks.push({
+        id: 'lines_vs_subtotal',
+        label: 'Line items',
+        status: hit ? 'pass' : 'fail',
+        // A hit inside the tolerance is still a hit, but it is not necessarily
+        // an exact match, and saying "matching" of a figure that is 20 paise out
+        // is how a misread footer cell stays invisible. Name the gap when there
+        // is one — the reviewer can then decide whether it is per-line rounding
+        // or a digit read wrong.
+        detail: hit
+          ? (() => {
+              const gap = Math.abs(input.lineTotal! - hit.value);
+              return gap < 0.005
+                ? `${counted} ${money(input.lineTotal)}, matching ${hit.label} exactly.`
+                : `${counted} ${money(input.lineTotal)}, ${money(gap)} apart from ${hit.label} (${money(hit.value)}) — within rounding tolerance.`;
+            })()
+          : `${counted} ${money(input.lineTotal)}, but the subtotal is ${money(input.subtotal)} — a gap of ${money(Math.abs(input.lineTotal - input.subtotal))}.`,
+      });
+    }
   }
 
   // ---- 2. Does the totals block reach the grand total? ----
