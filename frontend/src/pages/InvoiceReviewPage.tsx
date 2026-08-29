@@ -1717,10 +1717,20 @@ export const InvoiceReviewPage: React.FC = () => {
           Pinning is lg-only. Below that breakpoint the grid stacks the scan
           above the summary, so the block is roughly twice as tall - pinning
           it there would hold most of the viewport and leave the rows with a
-          sliver. On a narrow window the whole page simply scrolls. */}
+          sliver. On a narrow window the whole page simply scrolls.
+
+          It pins at -top-4, not top-0, because a sticky offset is measured
+          from the scroll container's padding box and <main> carries 1rem of
+          top padding. At top-0 the block came to rest 16px below the top of
+          the visible area, and that strip was an open window: every row
+          scrolling underneath surfaced in it, so the table's own header
+          appeared to float above the scan. Pulling the rest position up by
+          that padding closes it. The matching -mt-4/pt-5 keeps the content
+          exactly where it was - the block simply starts higher and pads the
+          difference back, so it has something to paint over the gap with. */}
       <div
         ref={headerStackRef}
-        className={`lg:sticky top-0 z-30 bg-[#f4f5fa] pt-1 pb-3 flex flex-col gap-3 border-b transition-shadow duration-200 ${
+        className={`lg:sticky -top-4 z-30 bg-[#f4f5fa] -mt-4 pt-5 pb-3 flex flex-col gap-3 border-b transition-shadow duration-200 ${
           // Only a pinned bar needs a lip separating it from what slides
           // under it. At rest the border and shadow drew a box around content
           // that is simply the top of the page.
