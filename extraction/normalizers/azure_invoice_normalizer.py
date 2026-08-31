@@ -295,6 +295,53 @@ _GRAND_TOTAL_LABELS = [
     "net amount", "bill amount",
 ]
 
+# Some footers label the subtotal with nothing but "TOTAL", above the tax
+# rows and a separate "Grand Total" - Jeevan Medicos prints exactly that, and
+# without reading it the printed subtotal was skipped and a figure derived
+# instead, which quietly hid a 99.73 disagreement between the rows and the
+# invoice's own total.
+#
+# Matched on the whole label, never as a substring: "Grand Total", "Total GST"
+# and "Total Qty" all contain the word and mean different things, and each
+# carries a second word that this rule therefore excludes.
+def _is_bare_total_label(text: str) -> bool:
+    return re.sub(r"[^a-z]", "", text.lower()) == "total"
+
+
+def _resolve_bare_total(
+    candidates: List[float],
+    discount: Optional[float],
+    tax_total: float,
+    grand_total: Optional[float],
+    roundoff: Optional[float],
+) -> Optional[float]:
+    """Picks the bare "TOTAL" that behaves like a subtotal, or None.
+
+    The label alone is not enough even when it is exactly "TOTAL". Across the
+    invoices on file the same word heads a column in the item table's summary
+    strip (paired with the next heading along, "SCHEME"), and labels the
+    count rows - "TOTAL 4" for items, "TOTAL 71" for quantity. Trusting the
+    word booked 4 and 71 as the amount the pharmacy owed.
+
+    So the figure has to behave like a subtotal before it is taken as one:
+    subtotal - discount + tax = grand total is the arithmetic the rest of the
+    footer already states, and a count cannot satisfy it. The invoice
+    confirms the reading rather than the label asserting it.
+    """
+    if grand_total is None:
+        return None
+    for value in candidates:
+        if value is None or value <= 0:
+            continue
+        expected = value - (discount or 0.0) + tax_total + (roundoff or 0.0)
+        # Suppliers round the payable to the rupee without always printing the
+        # adjustment, so a rupee of slack - the same allowance the review
+        # screen makes - rather than an exact match.
+        if abs(expected - grand_total) <= 1.0:
+            return value
+    return None
+
+
 def _is_footer_label(text: str) -> bool:
     """Whether a cell reads like a totals-block label rather than a value."""
     t = text.lower().strip()
@@ -976,14 +1023,45 @@ _CONTINUATION_IDENTITY_FIELDS = ("product", "serial", "amount", "taxable_amount"
 def _is_continuation_fragment(row_data: Dict[str, str]) -> bool:
     """Whether a row is the tail of the item above rather than an item itself.
 
+    Two shapes, both of them a description that did not fit on one line.
+
     Long values (batch, expiry, HSN) sometimes wrap onto a second physical
     row, most often on a continuation page whose header block crowds the
     table. Such a fragment carries none of the fields that identify an item -
     no product, no serial number, no money - but does carry something.
+
+    The other shape is a wrapped *product name*, which is how Jeevan Medicos
+    prints: "REFRESH LIQUIGEL" on one line and "E/D" on the next, "OMNACORTIL
+    10 MG" then "TAB.". The tail lands in the description column, so the row
+    does carry a product and the rule above lets it through as an item of its
+    own - which is why a 22-line invoice came back as 27 items, five of them
+    named "E/D", "TAB." and "15 'S". A row whose description column is the
+    only thing on it is that tail: a real line always prices itself, with a
+    rate or a batch or an amount at the very least, and a name on its own
+    cannot be put into stock.
     """
+    populated = {key for key, value in row_data.items() if str(value or "").strip()}
+    if not populated:
+        return False
+    if populated == {"product"}:
+        return True
     if any((row_data.get(f) or "").strip() for f in _CONTINUATION_IDENTITY_FIELDS):
         return False
-    return any(str(v).strip() for v in row_data.values())
+    return True
+
+
+# Totals-block wording that reaches the description column as a stray line.
+# ":" and "=" settle most of it - a printed drug name does not carry them,
+# while "CESS:0%=0" and "GST:5%" do - and the tax words cover the rest.
+_NOTE_FRAGMENT_RE = re.compile(
+    r"[:=]|\b(cess|gst|sgst|cgst|igst|tax|taxable|total|discount|round\s*off|payable)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_note_fragment(text: str) -> bool:
+    """Whether a wrapped line is a totals note rather than the tail of a name."""
+    return bool(_NOTE_FRAGMENT_RE.search(text or ""))
 
 
 def _absorb_continuation(target: CanonicalLineItem, fragment: CanonicalLineItem) -> None:
@@ -992,6 +1070,21 @@ def _absorb_continuation(target: CanonicalLineItem, fragment: CanonicalLineItem)
     for field in ("batch", "expiry", "hsn", "pack"):
         if getattr(target, field, None) in (None, "") and getattr(fragment, field, None):
             setattr(target, field, getattr(fragment, field))
+
+    # A wrapped name is the one field that appends rather than fills: the
+    # target already has the first line of it, and the fragment carries the
+    # rest ("OMNACORTIL 10 MG" + "TAB."). Joined in printed order, because
+    # that is the name the pharmacist reads off the box.
+    #
+    # Unless it is a note rather than a name. A stray "CESS:0%=0" from the
+    # totals block lands in the description column looking exactly like a
+    # wrapped name, and gluing it on would put it in the catalogue under a
+    # real product - worse than the phantom row it replaces, because a
+    # corrupted name is not visibly wrong. Such a fragment is dropped: the
+    # row still disappears, it just contributes nothing.
+    if fragment.name and target.name and not _is_note_fragment(fragment.name):
+        if fragment.name not in target.name:
+            target.name = f"{target.name} {fragment.name}".strip()
 
 
 # Header words that only mean something relative to the column beside them.
@@ -1237,6 +1330,54 @@ def resolve_amount_column(
     disc_idx = _first_index(col_names, ("discount",))
     dpct_idx = _first_index(col_names, ("discount_percent",))
     gpct_idx = _first_index(col_names, ("gst_percent",))
+
+    # When the Quantity header is unreadable as well, there is nothing left to
+    # test a candidate Amount against - qty x rate needs the quantity. Jeevan
+    # Medicos arrives that way: Azure returned "QCy" for Qty and "Gross AntE"
+    # for Gross Amt, so both columns mapped to nothing and every row came back
+    # with no quantity and no amount, on an invoice whose figures were all
+    # perfectly legible one column over.
+    #
+    # The pair is therefore recovered together. Rate is known, so the two
+    # unmapped columns that satisfy qty x rate = amount are the quantity and
+    # the amount - no other pair of columns on a pharma invoice reproduces
+    # that product across most of the rows. Searched as a pair rather than
+    # one at a time because neither can be tested without the other.
+    if qty_idx is None and rate_idx is not None and len(challengers) >= 2:
+        best_pair = None
+        for q_col in challengers:
+            q_vals = values[q_col]
+            # A quantity is positive and, on these invoices, never enormous.
+            # Screening here keeps the search honest rather than letting an
+            # arithmetic coincidence nominate a tax rate as the quantity.
+            if not any(v is not None and 0 < v <= 10000 for v in q_vals):
+                continue
+            for a_col in challengers:
+                if a_col == q_col:
+                    continue
+                rows = []
+                for i, actual in enumerate(values[a_col]):
+                    qty, rate = q_vals[i], values[rate_idx][i]
+                    if actual is None or qty is None or rate is None or qty <= 0:
+                        continue
+                    rows.append((qty * rate, 0.0, 0.0, 0.0, actual))
+                if len(rows) < _AMOUNT_COLUMN_MIN_AGREEMENTS:
+                    continue
+                hits = count_best_formula_agreements(rows)
+                if hits < _AMOUNT_COLUMN_MIN_AGREEMENTS or hits / len(rows) < _AMOUNT_COLUMN_MIN_AGREEMENT_RATIO:
+                    continue
+                if best_pair is None or hits > best_pair[0]:
+                    best_pair = (hits, q_col, a_col)
+
+        if best_pair is not None:
+            _, q_col, a_col = best_pair
+            col_names[q_col] = "quantity_pcs"
+            col_names[a_col] = "amount"
+            warnings.append(
+                f"The Quantity and Amount columns were identified as columns {q_col} and {a_col} "
+                f"from the invoice's own qty x rate arithmetic, because their headers could not be read."
+            )
+            return warnings
 
     def agreement(c_idx: int) -> "tuple[int, int]":
         """(rows the best formula reproduces, rows it could have reproduced)."""
@@ -1618,6 +1759,9 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         
     # 4. Extract footer data
     footer_data = {}
+    # Numeric values found against a label reading only "TOTAL". Held back
+    # rather than assigned, because the word alone does not say which total.
+    bare_total_candidates: List[float] = []
     if selected_footer_table_idx is not None:
         if is_footer_horizontal and horizontal_footer_data:
             footer_data = horizontal_footer_data
@@ -1649,6 +1793,13 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                     if _is_quantity_total_label(lbl):
                         if val is not None:
                             footer_data["total_quantity"] = val
+                        continue
+                    if _is_bare_total_label(lbl):
+                        # Resolved after the loop, against the rest of the
+                        # footer - see _resolve_bare_total below for why a
+                        # bare "TOTAL" cannot be trusted on the label alone.
+                        if val is not None:
+                            bare_total_candidates.append(val)
                         continue
                     if any(k in lbl for k in _SUBTOTAL_LABELS):
                         footer_data["subtotal"] = val
@@ -2020,6 +2171,19 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
                 ))
 
     # 7. Merge header fields (footer data takes precedence for totals)
+    # A bare "TOTAL" is only now testable: it takes the discount, tax and
+    # grand total beside it to tell a subtotal from an item count.
+    if footer_data.get("subtotal") is None and bare_total_candidates:
+        resolved_bare_total = _resolve_bare_total(
+            bare_total_candidates,
+            footer_data.get("discount"),
+            (footer_data.get("cgst") or 0.0) + (footer_data.get("sgst") or 0.0) + (footer_data.get("igst") or 0.0),
+            footer_data.get("grand_total"),
+            footer_data.get("roundoff"),
+        )
+        if resolved_bare_total is not None:
+            footer_data["subtotal"] = resolved_bare_total
+
     subtotal = footer_data.get("subtotal") if footer_data.get("subtotal") is not None else doc_subtotal
     # Kept separate from `subtotal` below, which may end up back-derived from
     # the line items themselves. Deriving amounts from a total that was itself

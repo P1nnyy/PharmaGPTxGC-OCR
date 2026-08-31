@@ -1553,3 +1553,125 @@ def test_amount_column_is_left_alone_when_there_is_nothing_to_check_it_against()
     }
     invoice = normalize_azure_invoice(raw)
     assert [i.amount for i in invoice.line_items] == [100.00, 200.00, 300.00]
+
+
+# ==========================================================================
+# A description that wraps onto a second line (Jeevan Medicos)
+# ==========================================================================
+
+def _wrapped_description_table(header=None):
+    """Jeevan Medicos prints a long name across two lines, and OCR damaged
+    the Qty and Gross Amt headings: "QCy" and "Gross AntE"."""
+    header = header or ["Sr.", "Item Description", "HSN", "MRP", "Batch No.",
+                        "PKG", "QCy", "Rate", "Gross\nAntE"]
+    rows = [
+        ["1", "ROSUMAC 10 15'S", "30", "282.47", "18254976A", "15's", "1.00", "215.25", "215.25"],
+        ["2", "REFRESH LIQUIGEL", "30", "177.11", "125013", "15ML", "1.00", "145.42", "145.42"],
+        ["", "E/D", "", "", "", "", "", "", ""],
+        ["3", "OMNACORTIL 10 MG", "30", "12.80", "13260089A", "10'S", "50.00", "10.25", "512.50"],
+        ["", "TAB.", "", "", "", "", "", "", ""],
+        ["4", "ROSEDAY 5 15 'S", "3004", "135.70", "48021218", "15'S", "2.00", "103.40", "206.80"],
+        ["5", "GLYCOMET 500 SR", "3004", "41.97", "60002750", "20'S", "10.00", "31.98", "319.80"],
+        ["", "20`S", "", "", "", "", "", "", ""],
+    ]
+    cells = [{"rowIndex": 0, "columnIndex": c, "content": v} for c, v in enumerate(header)]
+    for r, row in enumerate(rows, start=1):
+        cells += [{"rowIndex": r, "columnIndex": c, "content": v} for c, v in enumerate(row)]
+    footer = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "TOTAL"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "1399.77"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "Discount"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "0.00"},
+        {"rowIndex": 2, "columnIndex": 0, "content": "CGST"},
+        {"rowIndex": 2, "columnIndex": 1, "content": "35.00"},
+        {"rowIndex": 3, "columnIndex": 0, "content": "SGST"},
+        {"rowIndex": 3, "columnIndex": 1, "content": "35.00"},
+        {"rowIndex": 4, "columnIndex": 0, "content": "Grand Total"},
+        {"rowIndex": 4, "columnIndex": 1, "content": "1469.77"},
+    ]
+    return {
+        "modelId": "prebuilt-invoice",
+        "documents": [{"fields": {"InvoiceId": {"value": "378"}}}],
+        "tables": [
+            {"rowCount": len(rows) + 1, "columnCount": len(header), "cells": cells},
+            {"rowCount": 5, "columnCount": 2, "cells": footer},
+        ],
+    }
+
+
+def test_wrapped_product_name_does_not_become_its_own_item():
+    """A row carrying only a scrap of description is the tail of the name
+    above. Five of them turned a 22-line invoice into 27 items."""
+    invoice = normalize_azure_invoice(_wrapped_description_table())
+    names = [i.name for i in invoice.line_items]
+    assert names == [
+        "ROSUMAC 10 15'S",
+        "REFRESH LIQUIGEL E/D",
+        "OMNACORTIL 10 MG TAB.",
+        "ROSEDAY 5 15 'S",
+        "GLYCOMET 500 SR 20`S",
+    ]
+
+
+def test_quantity_and_amount_are_recovered_when_both_headers_are_unreadable():
+    """Neither column can be tested without the other, so the pair is found
+    together: qty x rate = amount identifies both."""
+    invoice = normalize_azure_invoice(_wrapped_description_table())
+    assert [i.quantity for i in invoice.line_items] == [1.0, 1.0, 50.0, 2.0, 10.0]
+    assert [i.amount for i in invoice.line_items] == [215.25, 145.42, 512.50, 206.80, 319.80]
+
+
+def test_footer_labelled_only_total_is_read_as_the_subtotal():
+    """This format labels the subtotal "TOTAL", with Grand Total separate.
+
+    Tested with a row whose Amount was misread — as happened on the real
+    invoice, where a Gross of 215.25 came back 115.25 — because that is when
+    reading the printed figure matters. Skipping it fell back to summing the
+    rows, which makes the subtotal agree with the rows by construction and
+    hides the very disagreement the reviewer needs to see.
+    """
+    raw = _wrapped_description_table()
+    for cell in raw["tables"][0]["cells"]:
+        if cell["rowIndex"] == 1 and cell["columnIndex"] == 8:
+            cell["content"] = "115.25"
+    invoice = normalize_azure_invoice(raw)
+    line_total = round(sum(i.amount for i in invoice.line_items), 2)
+
+    assert invoice.subtotal == 1399.77        # what the invoice printed
+    assert line_total == 1299.77              # what the rows come to
+    assert invoice.grand_total == 1469.77
+
+
+def test_bare_total_that_is_a_count_is_not_read_as_the_subtotal():
+    """The same word labels the item and quantity counts. Booking "TOTAL 4"
+    as the subtotal made the pharmacy owe four rupees, so the figure has to
+    reconcile with the rest of the footer before it is believed."""
+    raw = _wrapped_description_table()
+    raw["tables"][1]["cells"].append({"rowIndex": 5, "columnIndex": 0, "content": "TOTAL"})
+    raw["tables"][1]["cells"].append({"rowIndex": 5, "columnIndex": 1, "content": "5"})
+    raw["tables"][1]["rowCount"] = 6
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.subtotal == 1399.77
+
+
+def test_readable_qty_and_amount_headers_are_not_second_guessed():
+    """With the headers intact the arithmetic must agree with them."""
+    invoice = normalize_azure_invoice(_wrapped_description_table(
+        header=["Sr.", "Item Description", "HSN", "MRP", "Batch No.",
+                "PKG", "Qty", "Rate", "Amount"]
+    ))
+    assert [i.quantity for i in invoice.line_items] == [1.0, 1.0, 50.0, 2.0, 10.0]
+    assert [i.amount for i in invoice.line_items] == [215.25, 145.42, 512.50, 206.80, 319.80]
+
+
+def test_a_totals_note_in_the_description_column_is_dropped_not_glued_on():
+    """A stray "CESS:0%=0" looks exactly like a wrapped name. Appending it
+    would file a real product under a corrupted name, which is worse than the
+    phantom row it replaces because it is not visibly wrong."""
+    raw = _wrapped_description_table()
+    table = raw["tables"][0]
+    table["rowCount"] += 1
+    table["cells"].append({"rowIndex": 9, "columnIndex": 1, "content": "CESS:0%=0"})
+    invoice = normalize_azure_invoice(raw)
+    assert len(invoice.line_items) == 5
+    assert invoice.line_items[-1].name == "GLYCOMET 500 SR 20`S"
