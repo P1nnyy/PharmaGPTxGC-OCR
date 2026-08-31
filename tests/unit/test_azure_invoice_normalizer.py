@@ -1675,3 +1675,74 @@ def test_a_totals_note_in_the_description_column_is_dropped_not_glued_on():
     invoice = normalize_azure_invoice(raw)
     assert len(invoice.line_items) == 5
     assert invoice.line_items[-1].name == "GLYCOMET 500 SR 20`S"
+
+
+# ==========================================================================
+# A watermark printed across the item table (Gurkirat Medicos)
+# ==========================================================================
+
+def _watermarked_table():
+    """The seller stamps its name diagonally over the table, and OCR puts
+    each word into whichever cell it crosses: "GURKIRAT" onto a second line
+    of the description, "MEDICOS" onto a second line of the MRP."""
+    header = ["S.", "Qty.", "Pack", "Mfg", "Product", "Batch", "Exp", "HSN",
+              "MRP", "Rate", "DIS", "SGST", "CEST", "Amount"]
+    row = ["1", "2.500+.500", "1º10", "STERI", "SILODOSIA 8D\nGURKIRAT", "LC5006",
+           "11/27", "3004", "403.12\nMEDICOS", "307.17", "0.00", "2.50", "2.50", "767.93"]
+    cells = [{"rowIndex": 0, "columnIndex": c, "content": v} for c, v in enumerate(header)]
+    cells += [{"rowIndex": 1, "columnIndex": c, "content": v} for c, v in enumerate(row)]
+    footer = [
+        {"rowIndex": 0, "columnIndex": 0, "content": "SUB TOTAL"},
+        {"rowIndex": 0, "columnIndex": 1, "content": "767.93"},
+        {"rowIndex": 1, "columnIndex": 0, "content": "GRAND TOTAL"},
+        {"rowIndex": 1, "columnIndex": 1, "content": "766.00"},
+    ]
+    return {
+        "modelId": "prebuilt-invoice",
+        "documents": [{"fields": {
+            "InvoiceId": {"value": "A000864"},
+            "VendorName": {"value": "GURKIRAT"},
+        }}],
+        "tables": [
+            {"rowCount": 2, "columnCount": len(header), "cells": cells},
+            {"rowCount": 2, "columnCount": 2, "cells": footer},
+        ],
+    }
+
+
+def test_watermark_over_a_numeric_cell_does_not_lose_the_figure():
+    """"403.12\\nMEDICOS" is unparseable as a whole, so a perfectly legible
+    MRP was dropped and the column showed nothing."""
+    invoice = normalize_azure_invoice(_watermarked_table())
+    assert invoice.line_items[0].mrp == 403.12
+    assert invoice.line_items[0].rate == 307.17
+    assert invoice.line_items[0].amount == 767.93
+
+
+def test_watermark_is_removed_from_the_product_name():
+    """The other half of the same watermark filed the product as
+    "SILODOSIA 8D GURKIRAT", which reaches the catalogue looking legitimate."""
+    invoice = normalize_azure_invoice(_watermarked_table())
+    assert invoice.line_items[0].name == "SILODOSIA 8D"
+
+
+def test_two_numbers_in_one_cell_are_still_left_alone():
+    """One numeric line is a watermark over a value; two is a merged column,
+    and picking either would be a guess."""
+    raw = _watermarked_table()
+    for cell in raw["tables"][0]["cells"]:
+        if cell["rowIndex"] == 1 and cell["columnIndex"] == 8:
+            cell["content"] = "403.12\n512.60"
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.line_items[0].mrp == "403.12\n512.60"
+
+
+def test_a_name_made_only_of_the_seller_name_is_not_emptied():
+    """Stripping every word would leave a nameless row, which is worse than
+    a wrong one - there would be nothing left for the reviewer to correct."""
+    raw = _watermarked_table()
+    for cell in raw["tables"][0]["cells"]:
+        if cell["rowIndex"] == 1 and cell["columnIndex"] == 4:
+            cell["content"] = "GURKIRAT"
+    invoice = normalize_azure_invoice(raw)
+    assert invoice.line_items[0].name == "GURKIRAT"

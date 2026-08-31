@@ -82,7 +82,30 @@ def parse_decimal_safe(value: Any) -> Any:
             return float(clean)
         return int(clean)
     except ValueError:
-        return s
+        pass
+
+    # A watermark printed diagonally across the page is OCR'd into whatever
+    # cells it crosses, on a line of its own. Gurkirat Medicos stamps its own
+    # name over the table, and the MRP cell came back as "403.12\nMEDICOS" -
+    # unparseable, so a perfectly legible 403.12 was dropped and the column
+    # showed nothing at all. Where exactly one line of a multi-line cell is a
+    # number, that line is the value and the rest is something printed over
+    # it. Exactly one, because two numbers in a cell is a different problem -
+    # a merged column - and picking either would be a guess.
+    numeric_lines = []
+    for line in s.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            candidate = clean_decimal_string(line)
+            numeric_lines.append(float(candidate) if "." in candidate else int(candidate))
+        except ValueError:
+            continue
+    if len(numeric_lines) == 1:
+        return numeric_lines[0]
+
+    return s
 
 def try_parse_float(val: Any) -> Optional[float]:
     """Attempts to parse a float value, returning None if parsing fails."""
@@ -1057,6 +1080,42 @@ _NOTE_FRAGMENT_RE = re.compile(
     r"[:=]|\b(cess|gst|sgst|cgst|igst|tax|taxable|total|discount|round\s*off|payable)\b",
     re.IGNORECASE,
 )
+
+
+def _strip_watermark_from_names(items: List[CanonicalLineItem], seller_name: Optional[str]) -> int:
+    """Removes the seller's own watermark from product names.
+
+    The other half of the watermark problem. A name stamped diagonally across
+    the page is OCR'd into whatever cells it crosses, so "GURKIRAT MEDICOS"
+    over the item table put "MEDICOS" in the MRP cell (recovered in
+    parse_decimal_safe) and "GURKIRAT" on a second line of the description,
+    which joins into the name and files the product as "SILODOSIA 8D
+    GURKIRAT". That name then reaches the catalogue, where it is not visibly
+    wrong - which is what makes it worth removing rather than leaving.
+
+    Only whole words matching the seller's own name are removed, and only
+    from a name that has something left afterwards. A distributor does not
+    stock a product named after itself, but if the whole name matched it
+    would be left alone rather than emptied.
+    """
+    if not seller_name:
+        return 0
+    tokens = {word for word in re.findall(r"[A-Za-z]{4,}", seller_name.upper())}
+    if not tokens:
+        return 0
+
+    stripped = 0
+    for item in items:
+        if not item.name:
+            continue
+        words = item.name.split()
+        if len(words) < 2:
+            continue
+        kept = [w for w in words if re.sub(r"[^A-Z]", "", w.upper()) not in tokens]
+        if kept and len(kept) < len(words):
+            item.name = " ".join(kept)
+            stripped += 1
+    return stripped
 
 
 def _is_note_fragment(text: str) -> bool:
@@ -2300,6 +2359,13 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # anchor an unlabelled column, so every row comes back blank and there are
     # no readable amounts to learn from. A formula whose row sum reproduces the
     # printed total is confirmed by the document rather than assumed.
+    watermarked_names = _strip_watermark_from_names(line_items, seller_name)
+    if watermarked_names:
+        warnings.append(
+            f"The seller's watermark was printed over the item table and removed from "
+            f"{watermarked_names} product name(s)."
+        )
+
     amount_fill = fill_missing_amounts(line_items, printed_total=printed_subtotal)
 
     # 9. Populate metadata
