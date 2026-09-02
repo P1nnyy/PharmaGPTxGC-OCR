@@ -217,12 +217,51 @@ def candidates_for(name: Optional[str], connection: sqlite3.Connection) -> list[
     rows = connection.execute(
         f"SELECT {_COLUMNS} FROM reference_product WHERE block = ?", (block,)
     ).fetchall()
+    if not rows:
+        rows = _neighbouring_blocks(block, connection)
     prepared = []
     for row in rows:
         item = dict(row)
         item["_parts"] = split_name(item["brand_name"])
         prepared.append(item)
     return prepared
+
+
+# A block is only tried as a neighbour when it is this long. Below it, a shared
+# opening says almost nothing - every three-letter prefix in this reference
+# opens dozens of unrelated brands - and the scan stops being cheap.
+_MIN_NEIGHBOUR_BLOCK = 5
+# Enough to cover a brand's whole family several times over. A prefix that
+# returns more than this is not identifying a product, it is a common stem.
+_MAX_NEIGHBOUR_ROWS = 200
+
+
+def _neighbouring_blocks(block: str, connection: sqlite3.Connection) -> list:
+    """Rows whose block extends ours, or which ours extends.
+
+    Exact blocking assumes the invoice and the reference open the name with
+    the same word, and mostly they do. When they do not, the failure is total
+    rather than partial: LASILACTON never sees Lasilactone, MOXITOB never sees
+    Moxitobra, and the screen reports "no product matches" about a product the
+    index holds. A truncated or misspelled first word is exactly the case a
+    reference lookup exists to solve, so it cannot be the one case that
+    returns nothing at all.
+
+    This only widens what gets SCORED. Every candidate still has to survive
+    the matcher's rules, which is where a genuinely different brand that
+    happens to share an opening is thrown out.
+    """
+    if len(block) < _MIN_NEIGHBOUR_BLOCK:
+        return []
+    return connection.execute(
+        f"""
+        SELECT {_COLUMNS} FROM reference_product
+        WHERE (block LIKE ? OR ? LIKE block || '%')
+          AND length(block) >= ?
+        LIMIT ?
+        """,
+        (f"{block}%", block, _MIN_NEIGHBOUR_BLOCK, _MAX_NEIGHBOUR_ROWS),
+    ).fetchall()
 
 
 def iter_meta(connection: sqlite3.Connection) -> Iterator[tuple[str, str]]:

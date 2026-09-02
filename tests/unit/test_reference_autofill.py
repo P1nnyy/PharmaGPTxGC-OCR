@@ -155,3 +155,35 @@ class TestResilience:
             summary = reference_service.autofill_products()
         assert summary["filled"] == 0
         assert "not installed" in summary["reason"]
+
+
+class TestEquivalentFormsAreNotConflicts:
+    """The catalogue and the reference name the same presentation differently.
+
+    Reported as disagreements these would be the most common conflict on the
+    screen while telling a reviewer nothing, and they would bury the few form
+    conflicts that do mean something.
+    """
+
+    def _suggest(self, current_form, proposed_form):
+        with patch.object(reference_service.reference_index, "candidates_for", return_value=[]), \
+             patch.object(reference_service, "propose",
+                          return_value={"status": "ok", "fields": {"form": proposed_form}}):
+            return reference_service.suggest_for_product(
+                product(form=current_form), connection=None
+            )
+
+    @pytest.mark.parametrize(
+        "current_form, proposed_form",
+        [("Eye Drops", "Drops"), ("Ampoule", "Injection"), ("Syrup", "Suspension"),
+         ("Respule", "Respules")],
+    )
+    def test_the_same_presentation_named_differently_is_not_offered(
+        self, current_form, proposed_form
+    ):
+        result = self._suggest(current_form, proposed_form)
+        assert result["conflicts"] == {}
+        assert "form" not in result["new_fields"]
+
+    def test_a_genuinely_different_form_is_still_a_conflict(self):
+        assert "form" in self._suggest("Capsule", "Tablet")["conflicts"]

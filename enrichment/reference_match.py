@@ -83,6 +83,16 @@ FORM_WORDS = {
     "AMPOULE", "AMPOULES", "AMP", "AMPS", "GARGLE", "MOUTHWASH", "SHAMPOO", "SOAP",
     "ROTACAPS", "ROTOCAP", "ROTOCAPS", "SACHET", "LOTION", "KIT", "ORAL", "OTHER",
     "EYE", "EAR", "NASAL",
+    # Presentation words the reference spells out and invoices leave off.
+    # Each of these was, on its own, enough to reject the single row that
+    # named the product: "Freego Granules" against FREEGO, "Rabivax-S
+    # Vaccine" against RABIVAX-S, "Neosporin Dusting Powder" against
+    # NEOSPORIN. They describe how the medicine is presented, never which
+    # medicine it is.
+    "GRANULE", "GRANULES", "VACCINE", "DUSTING", "LIQUID", "ELIXIR", "PASTE",
+    "INFUSION", "SUPPOSITORY", "SUPPOSITORIES", "PESSARY", "ENEMA", "PATCH",
+    "LOZENGE", "LOZENGES", "CHEWABLE", "DISPERSIBLE", "EMULSION", "LINCTUS",
+    "NEBULISER", "NEBULIZER", "CARTRIDGE", "PREFILLED", "TRANSDERMAL",
 }
 
 # Packaging prose. The reference spells its pack out in the name - "Hyperneb
@@ -117,13 +127,31 @@ FLAVOUR_WORDS = {
 # widens what we can match without widening what we can get wrong.
 MODIFIERS = {"PR", "SR", "XR", "ER", "CR", "OD", "LA", "MD", "DT", "MR", "XL", "NEW"}
 
+# The closed vocabulary a misspelled token is measured against. Both sets
+# describe presentation rather than identity, so mistaking one for the other
+# costs nothing.
+_PRESENTATION_WORDS = FORM_WORDS | PACKAGING_WORDS
+
 # Pack expressions, removed from the name before anything in it is read as a
 # variant number. "TRIOLMESAR 20 15'S" states one dose (20) and one pack (15);
 # leaving the 15 in makes it a two-number product matching nothing at all.
+#
+# Every figure here is guarded by (?<![\d.]) - it must start a number, not
+# continue one. Without that guard the digits after a decimal point open a
+# word boundary of their own, and "CTD 6.25 TAB" matched "25 TAB": the pack
+# became 25, the strength was truncated to 6, and the one row that named the
+# product ("CTD 6.25 Tablet") was then rejected for stating 6.25 against our
+# 6. A decimal dose is the most common way a strength is written, so this
+# silently removed a whole class of products from the search.
+#
+# The TAB/CAP form requires the count to be welded to the unit as well.
+# Spaced, the figure is overwhelmingly a strength and the word is just the
+# dosage form: LASILACTON 50 TAB is Lasilactone 50, not a pack of fifty, and
+# reading it as a pack loses the only figure that identifies the product.
 _PACK_RE = re.compile(
-    r"\(?\b(\d+)\s*['`‘’]?\s*S\b\)?"          # 15'S  15 'S  120S  10`S
-    r"|\b(\d+)\s*(?:TAB|TABS|CAP|CAPS)\b"               # 20TAB
-    r"|\b\d+\s*[X*]\s*(\d+)\s*(?:GM|ML|MG|G)?",          # 1*10  1X15  1X20GM
+    r"\(?(?<![\d.])(\d+)\s*['`‘’]?\s*S\b\)?"          # 15'S  15 'S  120S  10`S
+    r"|(?<![\d.])(\d+)(?:TAB|TABS|CAP|CAPS)\b"        # 20TAB (welded only)
+    r"|(?<![\d.])\d+\s*[X*]\s*(\d+)\s*(?:GM|ML|MG|G)?",  # 1*10  1X15  1X20GM
     re.IGNORECASE,
 )
 
@@ -151,6 +179,44 @@ def expand_abbreviations(name: str) -> str:
 # 1GM as a brand word made GLYCOMET 1GM unmatchable against every Glycomet row.
 _STRENGTH_TOKEN_RE = re.compile(r"^(\d+(?:\.\d+)?)(MG|MCG|GM|G|IU|ML|%)$")
 _STRENGTH_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(MG|MCG|GM|G|IU|ML|%)")
+# A dose unit standing on its own, left behind when the name spaced it away
+# from its figure. See _fuse_spaced_strengths.
+_UNIT_ONLY_RE = re.compile(r"MG|MCG|GM|G|IU|ML|%")
+
+# Multi-word qualifiers, removed before the name is split because neither word
+# means anything alone. SUGAR and FREE are both ordinary brand words - Betafree,
+# Itch Free - so forgiving them individually would let unrelated products match;
+# as a phrase they are only ever a variant of the same medicine.
+_QUALIFIER_PHRASE_RE = re.compile(r"\bSUGAR\s*[-\s]?\s*FREE\b", re.IGNORECASE)
+
+# How close a token must be to a presentation word to be read as a misspelling
+# of it. Deliberately looser than the brand-word threshold: these are compared
+# against a small closed vocabulary rather than against 254,000 brand names, so
+# a false hit costs one discarded descriptive word, while a miss costs the
+# whole product. NASEL for NASAL scores 80, OIT for OINT 86.
+_PRESENTATION_MISSPELL_RATIO = 80.0
+_MIN_MISSPELL_LENGTH = 4
+
+
+def _is_misspelled_presentation(token: str) -> bool:
+    """True when a token is a near-miss of a form or packaging word.
+
+    Invoices are OCR'd, and the words most often mangled are the descriptive
+    ones nobody proofreads: DUONASE NASEL SPRAY, ANOVATE OIT. Spelled
+    correctly these are stripped as presentation; misspelled they survive as
+    brand words and disqualify the very row that names the product.
+
+    Short tokens are exempt because real product markers are short - the P in
+    MOXI-P, the M in DIAPRIDE M4 - and those must keep their power to
+    distinguish.
+    """
+    if len(token) < _MIN_MISSPELL_LENGTH or token.isdigit():
+        return False
+    return any(
+        fuzz.ratio(token, word) >= _PRESENTATION_MISSPELL_RATIO
+        for word in _PRESENTATION_WORDS
+        if len(word) >= _MIN_MISSPELL_LENGTH
+    )
 
 # How close two words must be to count as the same word spelled differently
 # rather than as an extra word. Matches the duplicate finder's threshold.
@@ -178,6 +244,80 @@ FORM_MAP: dict[str, tuple[str, str]] = {
     "inhaler": ("Inhaler", "UNIT"),
     "respules": ("Respule", "RESPULE"),
 }
+
+# Forms that name the same presentation in different words. The invoice and
+# the reference are written by different people for different purposes, and
+# they routinely disagree in ways that say nothing about the product: an
+# ampoule IS the injection, an eye drop IS a drop, and a paediatric syrup and
+# an oral suspension are the same bottle described from two angles.
+#
+# Compared as families rather than strings because a form disagreement is a
+# rejection here, and each of these cost a real product its only listing -
+# AVIL AMPOULES against "Avil Injection", BETAFREE EYE DROPS against
+# "Betafree Eye Drop", SILYBON SYRUP against "Silybon Suspension".
+#
+# The families stay narrow on purpose. Tablet and capsule are NOT grouped, nor
+# powder with ointment: those are genuinely different products, and a
+# rejection there is the module working.
+_FORM_FAMILIES: tuple[frozenset, ...] = (
+    frozenset({"DROPS", "DROP", "EYE DROPS", "EYE DROP", "EAR DROPS", "EAR DROP",
+               "NASAL DROPS", "NASAL DROP", "ORAL DROPS", "ORAL DROP"}),
+    frozenset({"INJECTION", "VIAL", "AMPOULE", "AMPOULES", "AMPULE", "AMP"}),
+    frozenset({"SYRUP", "SUSPENSION", "ORAL SUSPENSION", "ORAL SOLUTION",
+               "SOLUTION", "LIQUID", "ELIXIR"}),
+)
+
+# Form words that may appear in a reference row's own name. Longest first, so
+# "eye drop" is recognised before the "drop" inside it.
+_NAMED_FORMS = (
+    "EYE DROPS", "EYE DROP", "EAR DROPS", "EAR DROP", "NASAL DROPS", "NASAL DROP",
+    "NASAL SPRAY", "ORAL DROPS", "ORAL SOLUTION", "ORAL SUSPENSION", "DRY SYRUP",
+    "TABLET", "CAPSULE", "SYRUP", "SUSPENSION", "INJECTION", "SOLUTION",
+    "RESPULES", "RESPULE", "ROTACAPS", "ROTACAP", "INHALER", "OINTMENT",
+    "CREAM", "GEL", "LOTION", "POWDER", "SPRAY", "SACHET", "GRANULES",
+    "DROPS", "DROP", "SOAP", "SHAMPOO", "KIT", "PASTE",
+)
+
+
+def _form_family(value: Any) -> frozenset:
+    """The set of spellings that mean the same presentation as `value`.
+
+    Singular and plural are the same presentation. The catalogue stores
+    "Respule" and the reference names "Hyperneb 3% Respules"; without this the
+    two disagree about a form they both state identically.
+    """
+    text = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    if not text:
+        return frozenset()
+    variants = {text, text[:-1] if text.endswith("S") else text + "S"}
+    for family in _FORM_FAMILIES:
+        if variants & family:
+            return family
+    return frozenset(variants)
+
+
+def forms_agree(a: Any, b: Any) -> bool:
+    """True when two form labels name the same presentation."""
+    left, right = _form_family(a), _form_family(b)
+    return bool(left and right and (left & right))
+
+
+def form_from_name(brand_name: Optional[str]) -> Optional[str]:
+    """The dosage form a reference row states in its own name, if any.
+
+    Preferred over the row's `dosage_form` column wherever both exist. The
+    column is a coarse classification applied across 254,000 rows and it is
+    demonstrably wrong in places - "Arotear Gel" is filed under `solution` -
+    while the name is written per product and is what a pharmacist reads.
+    Trusting the column over the name rejected a row for contradicting a form
+    that its own name spelled out correctly.
+    """
+    text = re.sub(r"[^A-Z0-9 ]+", " ", str(brand_name or "").upper())
+    text = re.sub(r"\s+", " ", text)
+    for candidate in _NAMED_FORMS:
+        if re.search(rf"(?:^| ){re.escape(candidate)}(?: |$)", text):
+            return candidate.title()
+    return None
 
 
 def canon_strength(text: Any) -> Optional[tuple[float, str]]:
@@ -241,18 +381,59 @@ def _split_fused(token: str) -> list[str]:
     return [g for g in boundary.groups() if g]
 
 
+def _fuse_spaced_strengths(tokens: list[str]) -> list[str]:
+    """Rejoins a dose that was printed with a space inside it.
+
+    Distributors write "OMNACORTIL 10 MG TAB." as often as they write
+    "OMNACORTIL 10MG", and the two say exactly the same thing. Split on
+    whitespace, though, the second form leaves MG standing alone - and a bare
+    unit is not a number, not a form word and not a strength, so it was
+    classified as a BRAND word. Rule 1 then asks the reference to account for
+    a brand word called MG, no listing ever can, and every row in the block is
+    rejected.
+
+    That is not a near miss to be tuned: it removed the correct product, and
+    every alternative to it, from a search whose answer was sitting in the
+    index. The pattern is common enough (10 MG, 1 GM, 5 ML) that it accounted
+    for the largest share of names that found nothing at all.
+    """
+    fused: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if (
+            following
+            and re.fullmatch(r"\d+(?:\.\d+)?", token)
+            and _UNIT_ONLY_RE.fullmatch(following)
+        ):
+            fused.append(token + following)
+            index += 2
+            continue
+        fused.append(token)
+        index += 1
+    return fused
+
+
 def split_name(name: Optional[str]) -> NameParts:
     parts = NameParts()
-    for whole in normalize_name(expand_abbreviations(name or "")).split():
-        for token in _split_fused(whole):
-            if not token or token in FORM_WORDS or token in PACKAGING_WORDS:
-                continue
-            if re.fullmatch(r"\d+(?:\.\d+)?", token):
-                parts.numbers.append(token)
-            elif _STRENGTH_TOKEN_RE.match(token):
-                parts.strengths.append(token)
-            else:
-                parts.words.append(token)
+    cleaned = _QUALIFIER_PHRASE_RE.sub(" ", expand_abbreviations(name or ""))
+
+    tokens: list[str] = []
+    for whole in normalize_name(cleaned).split():
+        tokens.extend(_split_fused(whole))
+
+    for token in _fuse_spaced_strengths(tokens):
+        if not token or token in FORM_WORDS or token in PACKAGING_WORDS:
+            continue
+        if _is_misspelled_presentation(token):
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?", token):
+            parts.numbers.append(token)
+        elif _STRENGTH_TOKEN_RE.match(token):
+            parts.strengths.append(token)
+        else:
+            parts.words.append(token)
     return parts
 
 
@@ -366,8 +547,22 @@ def score_row(query: Query, row: dict) -> Optional[dict]:
     # Glycomet-GP 2/850 - same glimepiride, different metformin, different
     # medicine - and only requiring every figure to be accounted for on both
     # sides keeps them apart.
-    if query.parts.numbers and stated_figures(query.parts) != stated_figures(theirs):
-        return None
+    #
+    # A row whose NAME states no figure is judged by the strengths it records
+    # instead. The reference names the default dose by leaving it out - the
+    # 40mg pantoprazole is just "Pantocid Tablet", beside "Pantocid 20 Tablet"
+    # - so comparing names alone reads our PANTOCID 40 as contradicting the one
+    # row that is actually 40mg, and every sibling that is not.
+    #
+    # Only a fallback, never an addition: where the row does name figures they
+    # are the whole comparison, which is what keeps GLYCOMET GP 2 away from
+    # Glycomet-GP 2/850.
+    if query.parts.numbers:
+        theirs_figures = stated_figures(theirs) or {
+            canon[0] for canon in (canon_strength(v) for v in row_strengths(row)) if canon
+        }
+        if stated_figures(query.parts) != theirs_figures:
+            return None
 
     # A dose stated in our own name, or already held on the product, must
     # agree with one of the row's - ANY of them, not its "primary" one.
@@ -382,8 +577,14 @@ def score_row(query: Query, row: dict) -> Optional[dict]:
     ours_dose = canon_strength(stated)
     theirs_doses = [d for d in (canon_strength(v) for v in row_strengths(row)) if d]
     dose_agrees = bool(ours_dose) and any(d == ours_dose for d in theirs_doses)
+    # A figure the row states in its own NAME settles the question too, even
+    # when its ingredient column reads differently. Metapro-XL 25 is 23.75mg of
+    # metoprolol succinate, equivalent to 25mg of the tartrate, and the name is
+    # the figure a pharmacist and an invoice both use. Comparing only against
+    # the column threw away the row the invoice was plainly naming.
     if ours_dose and theirs_doses and not dose_agrees:
-        return None
+        if not any(abs(figure - ours_dose[0]) < 1e-9 for figure in stated_figures(theirs)):
+            return None
 
     # A strength stated in THEIR name must agree with one stated in ours.
     # Checking only the row's primary_strength column is not enough: Hyperneb
@@ -407,9 +608,21 @@ def score_row(query: Query, row: dict) -> Optional[dict]:
         ):
             return None
 
-    if query.known_form and row.get("dosage_form"):
-        mapped = FORM_MAP.get(str(row["dosage_form"]).lower())
-        if mapped and mapped[0].upper() != str(query.known_form).upper():
+    # A row states its form twice - in its name and in its dosage_form column -
+    # and the two are allowed to disagree with each other. The column is a
+    # coarse classification over 254,000 rows ("Arotear Gel" is filed under
+    # solution); the name is written per product but describes the presentation
+    # rather than the catalogue's own vocabulary ("Winolap Max Eye Drop" is
+    # held here as a Solution, and both are true).
+    #
+    # So the row is rejected only when our form contradicts BOTH. Requiring
+    # either one alone to agree threw away correct rows in both directions.
+    if query.known_form:
+        ours_family = _form_family(query.known_form)
+        mapped = FORM_MAP.get(str(row.get("dosage_form") or "").lower())
+        theirs_forms = [f for f in (form_from_name(row.get("brand_name")),
+                                    mapped[0] if mapped else None) if f]
+        if theirs_forms and not any(ours_family & _form_family(f) for f in theirs_forms):
             return None
 
     score = float(similarity)

@@ -17,7 +17,7 @@ from typing import Iterable, Optional
 
 from core.logger import logger
 from enrichment import reference_index
-from enrichment.reference_match import build_query, propose
+from enrichment.reference_match import build_query, forms_agree, propose
 
 # Fields a reference proposal is ever allowed to offer. Deliberately narrow:
 # batch, price, tax and schedule are absent because the reference either does
@@ -73,6 +73,14 @@ def suggest_for_product(product: dict, connection) -> dict:
         if current in (None, "", []):
             new_fields[key] = value
         elif str(current).strip().upper() == str(value).strip().upper():
+            continue
+        elif key == "form" and forms_agree(current, value):
+            # The catalogue and the reference name the same presentation in
+            # different words - Eye Drops against Drops, Ampoule against
+            # Injection. Reported as a disagreement, these would have been the
+            # most common "conflict" on the screen while telling a reviewer
+            # nothing, and they would have buried the few form conflicts that
+            # do mean something.
             continue
         elif _is_expansion(current, value):
             expansions[key] = {"current": current, "suggested": value}
