@@ -14,10 +14,20 @@ being asked, filling in a whole catalogue is a local operation rather than
 several hundred requests to someone else's servers. The batch route exists
 because of this file.
 
-The blocking key is the first brand word, which is the token the invoice and
-the reference agree on most reliably. Everything finer - the variant number,
-the release suffix, the pack - is what the matcher then has to weigh, and it
-needs to see the alternatives side by side to do that honestly.
+Each row is filed under its first brand word, which is the token the invoice
+and the reference agree on most reliably. Everything finer - the variant
+number, the release suffix, the pack - is what the matcher then has to weigh,
+and it needs to see the alternatives side by side to do that honestly.
+
+A query is more generous than that, because blocking decides what the matcher
+never sees and its failures are silent: a name that reaches no candidates
+reports "no product matches" about a product the index holds, and nothing on
+the screen tells those two apart. So a lookup opens the block of every brand
+word in the name rather than only the first (the reference lists LANZOL JUNIOR
+as "Junior Lanzol"), and where that finds nothing it will try a block that
+extends ours, that ours extends, or that is ours misspelled. Blocks are small -
+the largest here holds 405 rows - so the extra reads are cheap, and none of
+this relaxes a matching rule: it only puts rows in front of them.
 """
 
 import ast
@@ -26,8 +36,10 @@ import os
 import sqlite3
 from typing import Iterator, Optional
 
+from rapidfuzz import fuzz
+
 from core.logger import logger
-from enrichment.reference_match import block_key, split_name
+from enrichment.reference_match import block_key, split_name, strip_pack
 
 DEFAULT_PATH = os.path.join("datasets", "product_reference.sqlite")
 
@@ -211,20 +223,62 @@ def candidates_for(name: Optional[str], connection: sqlite3.Connection) -> list[
     few hundred rows, and keeping one implementation means the matcher's
     tokenising rules can change without the index going stale underneath them.
     """
-    block = block_key(name)
-    if not block:
+    words = split_name(strip_pack(name)[0]).words
+    if not words:
         return []
-    rows = connection.execute(
-        f"SELECT {_COLUMNS} FROM reference_product WHERE block = ?", (block,)
-    ).fetchall()
+
+    rows = _rows_for_blocks(_query_blocks(words), connection)
     if not rows:
-        rows = _neighbouring_blocks(block, connection)
-    prepared = []
+        rows = _neighbouring_blocks(words[0], connection)
+
+    prepared, seen = [], set()
     for row in rows:
         item = dict(row)
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
         item["_parts"] = split_name(item["brand_name"])
         prepared.append(item)
     return prepared
+
+
+# How many of our own brand words are looked up. Blocks are small - the
+# largest in this reference holds 405 rows and the median a handful - so the
+# cost is a few indexed reads, and the words after the third are increasingly
+# qualifiers rather than the name.
+_MAX_QUERY_BLOCKS = 3
+# Additional words must be this long to be worth a lookup of their own.
+_MIN_EXTRA_BLOCK = 4
+
+
+def _query_blocks(words: list[str]) -> list[str]:
+    """The blocks to look this name up in: its first brand word, and its others.
+
+    The reference does not always open a name with the same word the invoice
+    does. LANZOL JUNIOR 15 is listed as "Junior Lanzol 15mg Tablet DT" - the
+    same two words in the other order - so blocking on the first word alone
+    put the row in a bucket the query never opened, and the block it DID open
+    held the wrong-strength siblings. The result was not a poor match but a
+    confident "no product matches".
+
+    Word order is the one thing the matcher does not care about (it compares
+    sorted tokens), so the index should not be the place that insists on it.
+    """
+    blocks = [words[0]]
+    for word in words[1:]:
+        if len(blocks) >= _MAX_QUERY_BLOCKS:
+            break
+        if len(word) >= _MIN_EXTRA_BLOCK and word not in blocks:
+            blocks.append(word)
+    return blocks
+
+
+def _rows_for_blocks(blocks: list[str], connection: sqlite3.Connection) -> list:
+    placeholders = ",".join("?" * len(blocks))
+    return connection.execute(
+        f"SELECT {_COLUMNS} FROM reference_product WHERE block IN ({placeholders})",
+        blocks,
+    ).fetchall()
 
 
 # A block is only tried as a neighbour when it is this long. Below it, a shared
@@ -253,7 +307,7 @@ def _neighbouring_blocks(block: str, connection: sqlite3.Connection) -> list:
     """
     if len(block) < _MIN_NEIGHBOUR_BLOCK:
         return []
-    return connection.execute(
+    rows = connection.execute(
         f"""
         SELECT {_COLUMNS} FROM reference_product
         WHERE (block LIKE ? OR ? LIKE block || '%')
@@ -261,6 +315,52 @@ def _neighbouring_blocks(block: str, connection: sqlite3.Connection) -> list:
         LIMIT ?
         """,
         (f"{block}%", block, _MIN_NEIGHBOUR_BLOCK, _MAX_NEIGHBOUR_ROWS),
+    ).fetchall()
+    # Both fallbacks run, rather than the second only when the first is empty.
+    # HYPONET-O found one row that way - the unrelated HYPON block, which its
+    # name merely extends - and a single useless candidate was enough to hide
+    # Hyponat-O, the product it was actually looking for.
+    return [*rows, *_misread_blocks(block, connection)]
+
+
+# How close a block must be to ours to be worth scoring. Deliberately the same
+# threshold the matcher uses to forgive an OCR misread inside a name: a
+# spelling the rules would accept has to be a spelling the index will surface,
+# or the forgiveness never gets the chance to apply.
+_MISREAD_RATIO = 85.0
+# Candidate blocks are narrowed by a shared opening first, so the comparison
+# runs over a dozen or so blocks rather than the reference's 118,000.
+_MISREAD_PREFIX = 4
+
+
+def _misread_blocks(block: str, connection: sqlite3.Connection) -> list:
+    """Rows in a block that is our block misspelled.
+
+    HYPONET-O 15 is "Hyponat-O 15 Tablet" in the reference - one letter apart,
+    which `unexplained_words` forgives readily. But blocking never offered it
+    the row, so the matcher's tolerance for a misread first word was
+    unreachable in exactly the case it was written for.
+
+    Neither containment test catches this: HYPONAT does not extend HYPONET and
+    HYPONET does not extend HYPONAT. They simply differ in the middle, which is
+    what OCR does.
+    """
+    near = [
+        candidate for (candidate,) in connection.execute(
+            "SELECT DISTINCT block FROM reference_product WHERE block LIKE ?",
+            (f"{block[:_MISREAD_PREFIX]}%",),
+        )
+        if candidate != block and fuzz.ratio(block, candidate) >= _MISREAD_RATIO
+    ]
+    if not near:
+        return []
+    placeholders = ",".join("?" * len(near))
+    return connection.execute(
+        f"""
+        SELECT {_COLUMNS} FROM reference_product
+        WHERE block IN ({placeholders}) LIMIT ?
+        """,
+        (*near, _MAX_NEIGHBOUR_ROWS),
     ).fetchall()
 
 
