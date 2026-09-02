@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from api.schemas.invoices import InvoiceUpdate
 from core.logger import logger
 from db.repositories import invoice_repository
+from enrichment import reference_service
 from services import image_storage
 from extraction.normalizers.amount_inference import fill_missing_amounts
 from extraction.normalizers.canonical_invoice import CanonicalLineItem
@@ -54,7 +55,38 @@ def update_invoice(invoice_id: str, payload: InvoiceUpdate):
     if not ok:
         raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
 
+    # Verifying is the moment an invoice's items enter the catalogue, so it is
+    # where they get matched against the reference. Doing it here rather than
+    # on upload is not incidental: the catalogue only ever reads from verified
+    # invoices, so before this point there is no catalogue product to fill in.
+    #
+    # Best effort by design. A reference index that is missing, stale or slow
+    # must never be able to stop an invoice being verified.
+    if payload.status == "verified":
+        try:
+            summary = reference_service.autofill_products(_product_ids_for(invoice_id))
+            logger.info(f"[INVOICE {invoice_id}] Reference autofill: {summary}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[INVOICE {invoice_id}] Reference autofill skipped: {exc}")
+
     return attach_image_urls(invoice_repository.get_invoice(invoice_id))
+
+
+def _product_ids_for(invoice_id: str) -> list:
+    """The catalogue products this invoice's lines resolve to."""
+    from db.graph_db import get_driver
+
+    with get_driver().session() as session:
+        return [
+            record["id"]
+            for record in session.run(
+                """
+                MATCH (:Invoice {id: $id})-[:CONTAINS]->(:LineItem)-[:OF_PRODUCT]->(p:Product)
+                RETURN DISTINCT p.id AS id
+                """,
+                id=invoice_id,
+            )
+        ]
 
 
 @router.post("/invoices/{invoice_id}/recompute-amounts")

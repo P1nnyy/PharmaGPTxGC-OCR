@@ -73,11 +73,20 @@ EDITABLE_FIELDS = {
     "hsn",
     "schedule",
     "notes",
+    # The active ingredients and their strengths. Not in REQUIRED_FIELDS: it
+    # is how a pharmacist recognises a substitute, but an invoice never prints
+    # it, so demanding it would block every product on a fact no invoice has.
+    "composition",
 }
 
 # Fields that make a product usable downstream. Completeness is measured
 # against these, and the review queue sorts by what is still missing.
 REQUIRED_FIELDS = ("brand", "strength", "form", "pack_size", "pack_multiplier", "base_unit")
+
+# Fields the parser records a reading confidence for. Writing one of these
+# from any other source has to clear that number, or it goes on describing a
+# value that has been replaced.
+_CONFIDENCE_BEARING = {"brand", "strength", "form", "pack_size", "pack_multiplier", "base_unit"}
 
 # Above this ratio, the price spread across a product's own line items is
 # better explained by two different pack sizes or strengths having been
@@ -536,7 +545,7 @@ def _merge_product_by_identity(
                       p.pack_size_confidence = $pack_size_confidence,
                       p.pack_multiplier_confidence = $pack_multiplier_confidence,
                       p.base_unit_confidence = $base_unit_confidence,
-                      p.confirmed_fields = [],
+                      p.confirmed_fields = [], p.acknowledged_fields = [], p.suggested_fields = [],
                       p.review_status = 'needs_review',
                       p.created_at = datetime()
         RETURN p.id AS id
@@ -575,7 +584,7 @@ def compute_flags(product: dict) -> list[dict]:
     the pharmacist fills in at leisure.
     """
     flags: list[dict] = []
-    confirmed = set(product.get("confirmed_fields") or [])
+    acknowledged = set(product.get("acknowledged_fields") or [])
 
     def missing(field: str) -> bool:
         return product.get(field) in (None, "", [])
@@ -679,10 +688,12 @@ def compute_flags(product: dict) -> list[dict]:
             "message": f"New spelling seen since this item was confirmed: {names}",
         })
 
-    # Report confirmed-but-still-empty fields as informational rather than
+    # Report acknowledged-but-still-empty fields as informational rather than
     # nagging: the pharmacist may know the invoice genuinely never states it.
+    # Keyed on acknowledged_fields, not confirmed_fields - the latter records
+    # values a human approved, and an empty field has no value to approve.
     for field in REQUIRED_FIELDS:
-        if missing(field) and field in confirmed:
+        if missing(field) and field in acknowledged:
             for flag in flags:
                 if flag.get("field") == field:
                     flag["severity"] = "low"
@@ -771,6 +782,8 @@ def _shape_product(record) -> dict:
     for field in _DECLARED_FIELDS:
         product.setdefault(field, None)
     product.setdefault("confirmed_fields", [])
+    product.setdefault("acknowledged_fields", [])
+    product.setdefault("suggested_fields", [])
     items = [_serialize(i) for i in record["items"] if i]
     invoices = [_serialize(i) for i in record["invoices"] if i]
     batches = [_serialize(b) for b in record["batches"] if b]
@@ -900,11 +913,19 @@ def update_product(
     fields: dict,
     confirm: bool = False,
     allow_merge: bool = False,
+    mark_confirmed: bool = True,
+    fetch_result: bool = True,
 ) -> Optional[dict]:
     """Applies human edits.
 
     Every field the caller sets is added to confirmed_fields, which is how the
     UI later tells an approved value from a parsed guess.
+
+    mark_confirmed=False writes the values without claiming anybody approved
+    them. That is for machine fills - the reference-catalogue lookup - where
+    the values are a good proposal but no human has yet read them. They then
+    surface in the review queue like any other unconfirmed product, which is
+    the point: autofill should shorten the review, not skip it.
 
     Editing strength/form/pack changes what SKU this is, so identity_key is
     recomputed. If that lands on a product that already exists, the edit has
@@ -914,10 +935,19 @@ def update_product(
     """
     driver = get_driver()
     with driver.session() as session:
-        result = session.execute_write(_update_product_tx, product_id, fields, confirm, allow_merge)
+        result = session.execute_write(
+            _update_product_tx, product_id, fields, confirm, allow_merge, mark_confirmed
+        )
     if result is None:
         return None
     if result.get("conflict"):
+        return result
+    # Re-reading the product costs a full aggregate query over its invoices and
+    # batches. That is the right answer for a review screen that is about to
+    # redraw the record, and pure waste for a bulk pass writing a hundred
+    # products in a row - which is what made autofill over the whole catalogue
+    # take minutes rather than seconds.
+    if not fetch_result:
         return result
     return get_product(result["id"])
 
@@ -965,7 +995,8 @@ def _apply_item_type_rules(tx, updates: dict, merged: dict) -> None:
         merged["base_unit"] = updates["base_unit"]
 
 
-def _update_product_tx(tx, product_id: str, fields: dict, confirm: bool, allow_merge: bool):
+def _update_product_tx(tx, product_id: str, fields: dict, confirm: bool, allow_merge: bool,
+                       mark_confirmed: bool = True):
     existing = tx.run("MATCH (p:Product {id: $id}) RETURN p", id=product_id).single()
     if not existing:
         return None
@@ -990,20 +1021,22 @@ def _update_product_tx(tx, product_id: str, fields: dict, confirm: bool, allow_m
         if clash:
             if allow_merge:
                 target_id = clash["o"]["id"]
-                _apply_fields(tx, product_id, updates, confirm)
+                _apply_fields(tx, product_id, updates, confirm, mark_confirmed=mark_confirmed)
                 _merge_products_tx(tx, [product_id], target_id)
                 return {"id": target_id, "merged_into": target_id}
             conflict = _serialize(clash["o"])
             new_key = None  # leave identity alone until the user chooses
 
-    _apply_fields(tx, product_id, updates, confirm, identity_key=new_key)
+    _apply_fields(tx, product_id, updates, confirm, identity_key=new_key,
+                  mark_confirmed=mark_confirmed)
 
     if conflict:
         return {"id": product_id, "conflict": conflict}
     return {"id": product_id}
 
 
-def _apply_fields(tx, product_id: str, updates: dict, confirm: bool, identity_key: Optional[str] = None):
+def _apply_fields(tx, product_id: str, updates: dict, confirm: bool,
+                  identity_key: Optional[str] = None, mark_confirmed: bool = True):
     set_clauses = [f"p.{key} = ${key}" for key in updates]
     params: dict = {"id": product_id, **updates}
 
@@ -1014,11 +1047,71 @@ def _apply_fields(tx, product_id: str, updates: dict, confirm: bool, identity_ke
     # A field a human typed is no longer a guess. The union is computed here
     # rather than in Cypher because set operations on list properties need
     # APOC, which is not available on every Aura tier.
-    existing_confirmed = tx.run(
-        "MATCH (p:Product {id: $id}) RETURN coalesce(p.confirmed_fields, []) AS c", id=product_id
-    ).single()["c"]
+    #
+    # Only fields that actually carry a value are confirmed. The review drawer
+    # sends the whole form on every save, blanks included, so taking the keys
+    # of the payload meant that merely pressing Save recorded a human as having
+    # approved every empty field on the product. That was not cosmetic: an
+    # acknowledged blank suppresses its own warning and satisfies the review
+    # queue, so a product with no strength on any invoice was being presented
+    # as needing nothing further.
+    existing = tx.run(
+        """
+        MATCH (p:Product {id: $id})
+        RETURN coalesce(p.confirmed_fields, []) AS confirmed,
+               coalesce(p.acknowledged_fields, []) AS acknowledged,
+               coalesce(p.suggested_fields, []) AS suggested
+        """,
+        id=product_id,
+    ).single()
+
+    filled = {k for k, v in updates.items() if v not in (None, "", [])}
+    blanked = set(updates.keys()) - filled
+    machine_filled: set = set()
+    if not mark_confirmed:
+        # A machine filled these in. They are written, but nobody has stood
+        # behind them yet.
+        machine_filled = filled
+        filled = set()
+
+    # Provenance, so the review screen can say where a value came from rather
+    # than presenting a matcher's proposal as though the invoice stated it.
+    # A field a person then edits or approves stops being a suggestion - the
+    # human answer supersedes it.
+    suggested = (set(existing["suggested"]) | machine_filled) - filled - blanked
+    set_clauses.append("p.suggested_fields = $suggested_fields")
+    params["suggested_fields"] = sorted(suggested)
+
+    # A per-field confidence describes the value the PARSER produced. Once a
+    # different value is written over it, that number is describing something
+    # that is no longer there - and the review queue reads it, so a form
+    # supplied by the reference catalogue was being reported as "guessed from
+    # the item name (0% confident)". Clear it: the value did not come from
+    # reading the invoice, so it has no reading confidence.
+    for field in machine_filled & _CONFIDENCE_BEARING:
+        set_clauses.append(f"p.{field}_confidence = NULL")
+
+    # confirmed and suggested are mutually exclusive by definition: one says a
+    # person approved this value, the other says a matcher supplied it. When a
+    # machine writes over a field, any earlier confirmation described a value
+    # that is no longer there, so it has to go - otherwise the stale entry
+    # masks the suggestion and the review queue treats a machine's answer as
+    # settled.
     set_clauses.append("p.confirmed_fields = $confirmed_fields")
-    params["confirmed_fields"] = sorted(set(existing_confirmed) | set(updates.keys()))
+    params["confirmed_fields"] = sorted(
+        (set(existing["confirmed"]) | filled) - blanked - machine_filled
+    )
+
+    # Deliberately leaving a field empty is a real answer - some invoices
+    # genuinely never state a strength - but it is a claim about the world, so
+    # it is only recorded when the user actually confirmed the product rather
+    # than as a side effect of saving a draft. Clearing a field and saving a
+    # draft leaves the question open, which is what a draft means.
+    acknowledged = set(existing["acknowledged"]) - filled
+    if confirm:
+        acknowledged |= blanked
+    set_clauses.append("p.acknowledged_fields = $acknowledged_fields")
+    params["acknowledged_fields"] = sorted(acknowledged)
 
     if confirm:
         set_clauses.append("p.review_status = 'confirmed'")
@@ -1207,7 +1300,8 @@ def _split_alias_tx(tx, alias_id: str, overrides: dict) -> Optional[str]:
         """
         MERGE (p:Product {identity_key: $identity_key})
         ON CREATE SET p.id = randomUUID(), p.created_at = datetime(),
-                      p.confirmed_fields = [], p.review_status = 'needs_review'
+                      p.confirmed_fields = [], p.acknowledged_fields = [], p.suggested_fields = [],
+                      p.review_status = 'needs_review'
         SET p.canonical_name = $canonical_name, p.brand = $brand, p.strength = $strength,
             p.form = $form, p.pack_size = $pack_size, p.pack_multiplier = $pack_multiplier,
             p.base_unit = $base_unit, p.updated_at = datetime()
@@ -1374,6 +1468,103 @@ def _apply_reparse_tx(tx, product_id: str, updates: dict):
     ).single()
     if not clash:
         tx.run("MATCH (p:Product {id: $id}) SET p.identity_key = $key", id=product_id, key=new_key)
+
+
+def bulk_confirm(product_ids: list[str]) -> dict:
+    """Marks several products reviewed in one action.
+
+    This is the whole point of the triage bands: an item the parser read
+    confidently and completely has nothing left to ask a pharmacist, and
+    charging a full drawer visit for each of two hundred of them is why the
+    catalogue never gets reviewed at all.
+
+    Approving is not a no-op on the record. The values being approved are
+    written into confirmed_fields, because that is what actually happened - a
+    person stood behind them - and it is what later tells the drawer to show
+    them as confirmed rather than as guesses.
+
+    Each product is its own transaction and its own try. A batch of eighty
+    must not be lost because the fifth one carries a form and unit that
+    contradict each other; that one is reported back with the reason and the
+    rest go through.
+    """
+    confirmed: list[str] = []
+    skipped: list[dict] = []
+
+    for product_id in product_ids:
+        try:
+            current = get_product(product_id)
+            if current is None:
+                skipped.append({"id": product_id, "reason": "No longer in the catalogue."})
+                continue
+
+            # Approve the values that are actually there. Blank fields are left
+            # out rather than confirmed as blank: acknowledging an absent value
+            # is a deliberate statement the reviewer makes in the drawer, not
+            # something a batch approval should make on their behalf.
+            fields = {
+                field: current.get(field)
+                for field in REQUIRED_FIELDS
+                if current.get(field) not in (None, "", [])
+            }
+
+            result = update_product(product_id, fields, confirm=True)
+            if result is None:
+                skipped.append({"id": product_id, "reason": "No longer in the catalogue."})
+            elif result.get("conflict"):
+                # Confirming should never silently merge two records.
+                skipped.append({
+                    "id": product_id,
+                    "reason": (
+                        f"These details already describe "
+                        f"\u201c{result['conflict'].get('canonical_name')}\u201d — open it to merge or separate them."
+                    ),
+                })
+            else:
+                confirmed.append(product_id)
+        except ValueError as exc:
+            skipped.append({"id": product_id, "reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the batch
+            logger.warning(f"[CATALOGUE] Bulk confirm failed for {product_id}: {exc}")
+            skipped.append({"id": product_id, "reason": "Could not be saved."})
+
+    logger.info(
+        f"[CATALOGUE] Bulk confirm: {len(confirmed)} confirmed, {len(skipped)} skipped"
+    )
+    return {"confirmed": confirmed, "skipped": skipped}
+
+
+def repair_provenance() -> dict:
+    """Removes confirmations left behind on values a machine later replaced.
+
+    confirmed_fields and suggested_fields must be disjoint - one says a person
+    approved this value, the other says a matcher supplied it. Records written
+    before that invariant was enforced can hold a field in both, and the stale
+    confirmation wins: the review queue reads it as settled and never asks
+    anyone to look at a value nobody actually approved.
+
+    The suggestion is kept and the confirmation dropped, because the machine
+    wrote the value that is currently there.
+    """
+    driver = get_driver()
+    with driver.session() as session:
+        record = session.execute_write(
+            lambda tx: tx.run(
+                """
+                MATCH (p:Product)
+                WHERE any(f IN coalesce(p.suggested_fields, [])
+                          WHERE f IN coalesce(p.confirmed_fields, []))
+                SET p.confirmed_fields =
+                    [f IN coalesce(p.confirmed_fields, [])
+                     WHERE NOT f IN coalesce(p.suggested_fields, [])]
+                RETURN count(p) AS repaired
+                """
+            ).single()
+        )
+    repaired = record["repaired"] if record else 0
+    if repaired:
+        logger.info(f"[CATALOGUE] Repaired provenance on {repaired} product(s)")
+    return {"repaired": repaired}
 
 
 def delete_orphan_products() -> int:

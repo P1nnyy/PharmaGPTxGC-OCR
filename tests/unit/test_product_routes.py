@@ -8,11 +8,15 @@ from fastapi import HTTPException
 
 from api.routers.products import (
     AliasSplit,
+    BulkConfirm,
     ProductMerge,
     ProductUpdate,
+    bulk_confirm_products,
     get_product,
     list_products,
     merge_products,
+    product_duplicates,
+    review_queue,
     split_alias,
     update_product,
 )
@@ -154,3 +158,104 @@ class TestMergeAndSplit:
             with pytest.raises(HTTPException) as exc:
                 split_alias("gone", AliasSplit())
         assert exc.value.status_code == 404
+
+
+class TestReviewQueue:
+    def ready(self, **overrides) -> dict:
+        base = product(
+            id="ready1",
+            brand="DONEP",
+            strength="10MG",
+            form="Tablet",
+            pack_size="1*10",
+            pack_multiplier=10,
+            base_unit="TABLET",
+            confirmed_fields=[],
+            brand_confidence=0.95,
+            strength_confidence=0.95,
+            form_confidence=0.95,
+            pack_size_confidence=0.95,
+            pack_multiplier_confidence=0.95,
+            base_unit_confidence=0.95,
+        )
+        base.update(overrides)
+        return base
+
+    def test_bands_the_outstanding_catalogue(self):
+        catalogue = [
+            self.ready(id="a"),
+            self.ready(id="b", strength_confidence=0.3),
+            self.ready(id="c", pack_multiplier=None),
+        ]
+        with patch("api.routers.products.product_repository.list_products", return_value=catalogue):
+            result = review_queue()
+        assert result["counts"] == {"ready": 1, "review": 1, "blocked": 1}
+        assert result["total_outstanding"] == 3
+
+    def test_each_row_carries_its_product_so_the_queue_needs_no_second_fetch(self):
+        with patch("api.routers.products.product_repository.list_products", return_value=[self.ready()]):
+            result = review_queue()
+        assert result["items"][0]["product"]["id"] == "ready1"
+
+    def test_confirmed_products_are_not_in_the_queue(self):
+        catalogue = [self.ready(id="a"), self.ready(id="done", review_status="confirmed")]
+        with patch("api.routers.products.product_repository.list_products", return_value=catalogue):
+            result = review_queue()
+        assert [i["product_id"] for i in result["items"]] == ["a"]
+        # The catalogue total still counts it - the queue is a work list, not
+        # a filtered view of the catalogue.
+        assert result["catalogue_total"] == 2
+
+    def test_a_confirmed_product_with_a_new_spelling_comes_back(self):
+        reopened = self.ready(
+            id="reopened",
+            review_status="confirmed",
+            flags=[{"code": "new_alias", "severity": "medium", "field": None, "message": "New spelling."}],
+            aliases=[{"id": "a1", "raw_name": "DONEP-10", "status": "new"}],
+        )
+        with patch("api.routers.products.product_repository.list_products", return_value=[reopened]):
+            result = review_queue()
+        assert [i["product_id"] for i in result["items"]] == ["reopened"]
+
+    def test_band_filter_narrows_the_rows_but_not_the_counts(self):
+        catalogue = [self.ready(id="a"), self.ready(id="c", pack_multiplier=None)]
+        with patch("api.routers.products.product_repository.list_products", return_value=catalogue):
+            result = review_queue(band="ready")
+        assert [i["product_id"] for i in result["items"]] == ["a"]
+        assert result["counts"]["blocked"] == 1
+
+
+class TestDuplicates:
+    def test_proposes_a_pair_and_says_why(self):
+        catalogue = [
+            product(id="a", brand="DONEP", canonical_name="DONEP", strength=None,
+                    form=None, pack_size=None, pack_multiplier=None, completeness=0.1),
+            product(id="b", brand="DONEP", canonical_name="DONEP 10MG", strength="10MG",
+                    form="Tablet", pack_size="1*10", pack_multiplier=10, completeness=1.0),
+        ]
+        with patch("api.routers.products.product_repository.list_products", return_value=catalogue):
+            result = product_duplicates()
+        assert len(result["candidates"]) == 1
+        assert result["candidates"][0]["reasons"]
+        assert result["scanned"] == 2
+
+    def test_limit_is_bounded(self):
+        with patch("api.routers.products.product_repository.list_products", return_value=[]):
+            # An absurd limit must not become an absurd amount of work.
+            assert product_duplicates(limit=100000)["candidates"] == []
+
+
+class TestBulkConfirm:
+    def test_forwards_the_ids_the_user_was_shown(self):
+        with patch(
+            "api.routers.products.product_repository.bulk_confirm",
+            return_value={"confirmed": ["a", "b"], "skipped": []},
+        ) as confirm:
+            result = bulk_confirm_products(BulkConfirm(product_ids=["a", "b"]))
+        confirm.assert_called_once_with(["a", "b"])
+        assert result["confirmed"] == ["a", "b"]
+
+    def test_empty_selection_is_rejected(self):
+        with pytest.raises(HTTPException) as exc:
+            bulk_confirm_products(BulkConfirm(product_ids=[]))
+        assert exc.value.status_code == 400

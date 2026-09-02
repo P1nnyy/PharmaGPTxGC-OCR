@@ -12,19 +12,28 @@ import {
   Loader2,
   FileText,
   Tag,
-  Globe,
-  ExternalLink,
-  ShieldAlert
+  ListChecks,
+  Table2,
+  ArrowRight,
+  BookOpen,
+  Sparkles
 } from 'lucide-react';
 import { apiClient } from '../api/client';
+import { ReviewQueue } from '../features/catalogue/ReviewQueue';
+import { DuplicatesPanel } from '../features/catalogue/DuplicatesPanel';
+import { ReferenceFillPanel, ReferenceInline } from '../features/catalogue/ReferenceFillPanel';
 import type {
   Product,
   ProductSummary,
   ProductFlag,
   ProductAlias,
-  EnrichmentResult,
-  Suggestion,
   ItemType,
+  ReviewBand,
+  ReviewQueueResponse,
+  DuplicateResponse,
+  ReferenceStatus,
+  ReferenceSuggestResponse,
+  ReferenceProposal,
 } from '../api/types';
 
 // The item-type vocabulary is NOT hardcoded here any more. It lives in the
@@ -76,22 +85,39 @@ const StatTile: React.FC<{
 // fact, which is exactly the failure this section exists to prevent.
 const FieldLabel: React.FC<{
   label: string;
-  confirmed: boolean;
-  confidence?: number;
+  acknowledged?: boolean;
+  suggested?: boolean;
   hasValue: boolean;
-}> = ({ label, confirmed, confidence, hasValue }) => (
+}> = ({ label, acknowledged, suggested, hasValue }) => (
   <div className="flex items-center justify-between mb-1.5">
     <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">{label}</label>
-    {confirmed ? (
-      <span className="text-[9px] font-bold text-green-600 flex items-center gap-0.5">
-        <CheckCircle2 size={10} /> confirmed
-      </span>
-    ) : hasValue && confidence !== undefined && confidence > 0 ? (
+    {/* One tag, and it means one thing: PharmaGPT put this value here.
+        Everything else the form knows about a field — that the parser read it
+        confidently, that a person approved it — used to get its own chip, and
+        ten fields produced ten chips saying four different things. That is
+        noise, and it buried the only chip a reviewer has to act on: the value
+        nobody has stood behind yet.
+
+        Where a value came from otherwise is not the reviewer's question. The
+        product header already says whether the record is confirmed, and the
+        review queue explains in words what it is still unsure about. */}
+    {suggested && hasValue ? (
       <span
-        className={`text-[9px] font-bold ${confidence >= 0.8 ? 'text-blue-500' : 'text-amber-600'}`}
-        title={`Parsed from the invoice text with ${Math.round(confidence * 100)}% confidence — please verify.`}
+        className="text-[9px] font-bold text-[#7c3aed] flex items-center gap-0.5"
+        title="Filled in from the reference catalogue, not read from this invoice. Confirm it to make it yours."
       >
-        {confidence >= 0.8 ? 'read from invoice' : 'guessed'}
+        <Sparkles size={10} /> PharmaGPT suggestion
+      </span>
+    ) : acknowledged && !hasValue ? (
+      /* Not a tag on data — it labels an absence, and it is the only thing
+         that explains why an empty required field is not holding the product
+         up. Without it a deliberate blank looks identical to an unanswered
+         one, and gets researched again next visit. */
+      <span
+        className="text-[9px] font-medium text-gray-400"
+        title="Recorded as genuinely absent — no invoice states it."
+      >
+        none on invoice
       </span>
     ) : null}
   </div>
@@ -112,6 +138,25 @@ export const ProductsPage: React.FC = () => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [detail, setDetail] = useState<Product | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+
+  // The catalogue answers two different questions and used to answer only the
+  // second: "what still needs me?" and "what do we stock?". The queue is the
+  // default because on any catalogue with outstanding work it is the one the
+  // user came to act on.
+  const [view, setView] = useState<'queue' | 'catalogue' | 'duplicates' | 'reference'>('queue');
+  const [queue, setQueue] = useState<ReviewQueueResponse | null>(null);
+  const [queueBusy, setQueueBusy] = useState(true);
+  const [duplicates, setDuplicates] = useState<DuplicateResponse | null>(null);
+  const [duplicatesBusy, setDuplicatesBusy] = useState(false);
+  const [refStatus, setRefStatus] = useState<ReferenceStatus | null>(null);
+  const [reference, setReference] = useState<ReferenceSuggestResponse | null>(null);
+  const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceApplying, setReferenceApplying] = useState(false);
+
+  // Ids being stepped through one at a time. Working a band is the whole
+  // point of a queue: saving one item should present the next, not drop the
+  // reviewer back to a list to find their place again.
+  const [walk, setWalk] = useState<string[]>([]);
 
   const showToast = (text: string) => {
     setToast(text);
@@ -138,6 +183,128 @@ export const ProductsPage: React.FC = () => {
     const timer = setTimeout(load, searchTerm ? 300 : 0);
     return () => clearTimeout(timer);
   }, [load, searchTerm]);
+
+  // Does not raise the busy flag itself. queueBusy starts true, so the first
+  // load is already covered, and a reload triggered by an effect must not
+  // call setState synchronously from inside it. Callers that reload in
+  // response to a user action raise the flag themselves, below.
+  const loadQueue = useCallback(async () => {
+    try {
+      setQueue(await apiClient.getReviewQueue());
+    } catch (e: any) {
+      setError(e?.message || 'Could not reach the catalogue service.');
+      setQueue(null);
+    } finally {
+      setQueueBusy(false);
+    }
+  }, []);
+
+  // Deferred rather than called straight from the effect body, matching how
+  // the catalogue list above loads. A fetch kicked off synchronously inside an
+  // effect settles its state during the same commit, which React flags as a
+  // cascading render.
+  useEffect(() => {
+    const timer = setTimeout(loadQueue, 0);
+    return () => clearTimeout(timer);
+  }, [loadQueue]);
+
+  useEffect(() => {
+    const timer = setTimeout(
+      () => apiClient.getReferenceStatus().then(setRefStatus).catch(() => setRefStatus({ available: false })),
+      0
+    );
+    return () => clearTimeout(timer);
+  }, []);
+
+  const scanReference = useCallback(async () => {
+    setReferenceBusy(true);
+    try {
+      setReference(await apiClient.getReferenceSuggestions([]));
+    } catch (e: any) {
+      showToast(e?.message || 'Reference lookup failed.');
+    } finally {
+      setReferenceBusy(false);
+    }
+  }, []);
+
+  const scanDuplicates = useCallback(async () => {
+    setDuplicatesBusy(true);
+    try {
+      setDuplicates(await apiClient.getProductDuplicates());
+    } catch (e: any) {
+      showToast(e?.message || 'Could not check for duplicates.');
+    } finally {
+      setDuplicatesBusy(false);
+    }
+  }, []);
+
+  // Anything that changes the catalogue invalidates all three views, so they
+  // are refreshed together rather than leaving a stale count on a tab the user
+  // is about to switch to.
+  const refreshAll = useCallback(async () => {
+    setQueueBusy(true);
+    await Promise.all([load(), loadQueue()]);
+    // Only re-run the duplicate scan if the user had asked for one; it is the
+    // most expensive of the three and nobody asked for it in the background.
+    if (duplicates) await scanDuplicates();
+  }, [load, loadQueue, scanDuplicates, duplicates]);
+
+  const applyReference = async (
+    items: Array<{ product_id: string; fields: Record<string, any> }>
+  ) => {
+    setReferenceApplying(true);
+    try {
+      const result = await apiClient.applyReferenceSuggestions(items);
+      showToast(
+        result.skipped.length === 0
+          ? `Filled in ${result.applied.length} product${result.applied.length === 1 ? '' : 's'}.`
+          : `Filled in ${result.applied.length}; ${result.skipped.length} need a closer look.`
+      );
+      await refreshAll();
+      await scanReference();
+    } catch (e: any) {
+      showToast(e?.message || 'Could not apply reference details.');
+    } finally {
+      setReferenceApplying(false);
+    }
+  };
+
+  const handleApprove = async (productIds: string[]) => {
+    try {
+      const result = await apiClient.bulkConfirmProducts(productIds);
+      const skipped = result.skipped.length;
+      showToast(
+        skipped === 0
+          ? `Approved ${result.confirmed.length} ${result.confirmed.length === 1 ? 'product' : 'products'}.`
+          : `Approved ${result.confirmed.length}; ${skipped} need a closer look.`
+      );
+      await refreshAll();
+    } catch (e: any) {
+      showToast(e?.message || 'Could not approve those products.');
+    }
+  };
+
+  // Opens the first item of a band and remembers the rest, so "Save" moves to
+  // the next one instead of closing.
+  const workThroughBand = async (band: ReviewBand) => {
+    const ids = (queue?.items || []).filter((i) => i.band === band).map((i) => i.product_id);
+    if (ids.length === 0) return;
+    setWalk(ids);
+    await openDetail(ids[0]);
+  };
+
+  // Advances the walk. Returns false when there is nothing after this one,
+  // which is what tells the drawer to close instead of advancing.
+  const advanceWalk = async (currentId: string): Promise<boolean> => {
+    const index = walk.indexOf(currentId);
+    const nextId = index >= 0 ? walk[index + 1] : undefined;
+    if (!nextId) {
+      setWalk([]);
+      return false;
+    }
+    await openDetail(nextId);
+    return true;
+  };
 
   const openDetail = async (productId: string) => {
     try {
@@ -220,6 +387,87 @@ export const ProductsPage: React.FC = () => {
         </div>
       )}
 
+      {/* View switch. The queue and the catalogue are different jobs — one is
+          "what needs me", the other "what do we stock" — and collapsing them
+          into a single table is what made the section feel like homework. */}
+      <div className="flex items-center gap-1 bg-[#f4f5fa] rounded-xl p-1 text-xs font-semibold w-fit">
+        {([
+          ['queue', 'Review queue', ListChecks, queue?.total_outstanding],
+          ['catalogue', 'Full catalogue', Table2, summary?.total],
+          ['duplicates', 'Duplicates', GitMerge, duplicates?.candidates.length],
+          ['reference', 'Autofill', BookOpen, reference?.fillable]
+        ] as const).map(([value, label, Icon, count]) => (
+          <button
+            key={value}
+            onClick={() => setView(value)}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg transition-colors cursor-pointer ${
+              view === value ? 'bg-white text-[#1b5dfc] shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Icon size={13} />
+            {label}
+            {count !== undefined && count !== null && count > 0 && (
+              <span
+                className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold ${
+                  view === value ? 'bg-blue-50 text-[#1b5dfc]' : 'bg-[#e2e8f0] text-gray-500'
+                }`}
+              >
+                {count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {view === 'queue' && queue && (
+        <ReviewQueue
+          data={queue}
+          busy={queueBusy}
+          onOpen={openDetail}
+          onReviewBand={workThroughBand}
+          onApprove={handleApprove}
+        />
+      )}
+
+      {view === 'queue' && !queue && queueBusy && (
+        <div className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm py-16 text-center text-gray-400">
+          <Loader2 size={20} className="animate-spin inline-block mr-2" />
+          Working out what still needs you...
+        </div>
+      )}
+
+      {view === 'reference' && (
+        <ReferenceFillPanel
+          status={refStatus}
+          data={reference}
+          busy={referenceBusy}
+          applying={referenceApplying}
+          onScan={scanReference}
+          onApply={applyReference}
+        />
+      )}
+
+      {view === 'duplicates' && (
+        <DuplicatesPanel
+          data={duplicates}
+          busy={duplicatesBusy}
+          products={products}
+          onScan={scanDuplicates}
+          onMerge={async (sources, target) => {
+            try {
+              await apiClient.mergeProducts(sources, target);
+              showToast('Merged into one product.');
+              await refreshAll();
+              await scanDuplicates();
+            } catch (e: any) {
+              showToast(e?.message || 'Merge failed.');
+            }
+          }}
+        />
+      )}
+
+      {view === 'catalogue' && (
+      <>
       {/* Toolbar */}
       <div className="bg-white p-5 rounded-2xl border border-[#e2e8f0] shadow-sm flex flex-col md:flex-row md:items-center gap-4">
         <div className="relative w-full md:max-w-md">
@@ -329,7 +577,7 @@ export const ProductsPage: React.FC = () => {
                     <tr
                       key={product.id}
                       onClick={() => openDetail(product.id)}
-                      className={`hover:bg-[#f8fafc] transition-colors cursor-pointer ${
+                      className={`group hover:bg-[#f8fafc] transition-colors cursor-pointer ${
                         selected ? 'bg-blue-50/60' : ''
                       }`}
                     >
@@ -344,7 +592,7 @@ export const ProductsPage: React.FC = () => {
                       </td>
 
                       <td className="p-4">
-                        <span className="font-semibold text-[#0f172a] block">
+                        <span className="font-semibold text-[#0f172a] block group-hover:text-[#1b5dfc] group-hover:underline underline-offset-2">
                           {product.brand || product.canonical_name || 'Unnamed item'}
                         </span>
                         {product.aliases.length > 1 && (
@@ -440,14 +688,33 @@ export const ProductsPage: React.FC = () => {
         </div>
       </div>
 
+      </>
+      )}
+
       {detail && (
         <ProductDetailDrawer
+          // Remounts per product. The drawer seeds its form from props on
+          // first render, so without this, advancing through a walk would
+          // leave the previous item's values in the boxes - editing one
+          // product while displaying another.
+          key={detail.id}
           product={detail}
-          onClose={() => setDetail(null)}
+          // Position in the walk, so the drawer can say "3 of 11" and offer to
+          // move on rather than closing back to a list.
+          walkPosition={
+            walk.indexOf(detail.id) >= 0
+              ? { index: walk.indexOf(detail.id) + 1, total: walk.length }
+              : null
+          }
+          onClose={() => {
+            setDetail(null);
+            setWalk([]);
+          }}
           onSaved={async (message) => {
             showToast(message);
-            await load();
+            await refreshAll();
           }}
+          onAdvance={() => advanceWalk(detail.id)}
           onReplace={setDetail}
         />
       )}
@@ -459,10 +726,15 @@ export const ProductsPage: React.FC = () => {
 
 const ProductDetailDrawer: React.FC<{
   product: Product;
+  // Set when the user is working through a band rather than opening one item.
+  walkPosition: { index: number; total: number } | null;
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
+  // Moves to the next item in the walk. Resolves false when this was the last
+  // one, which is the drawer's cue to close.
+  onAdvance: () => Promise<boolean>;
   onReplace: (product: Product) => void;
-}> = ({ product, onClose, onSaved, onReplace }) => {
+}> = ({ product, walkPosition, onClose, onSaved, onAdvance, onReplace }) => {
   // Only the active types are offered, but the product's own form is kept in
   // the list even if that type has since been switched off — otherwise opening
   // an older product would silently blank its form on the next save.
@@ -487,6 +759,7 @@ const ProductDetailDrawer: React.FC<{
     pack_multiplier: product.pack_multiplier?.toString() || '',
     base_unit: product.base_unit || '',
     manufacturer: product.manufacturer || '',
+    composition: product.composition || '',
     hsn: product.hsn || '',
     schedule: product.schedule || '',
     notes: product.notes || ''
@@ -494,10 +767,32 @@ const ProductDetailDrawer: React.FC<{
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<Product | null>(null);
   const [splitting, setSplitting] = useState<ProductAlias | null>(null);
-  const [lookup, setLookup] = useState<EnrichmentResult | null>(null);
-  const [lookingUp, setLookingUp] = useState(false);
+  // The reference lookup is local, so it runs on open rather than waiting to
+  // be asked. The online lookup still needs a click - that one costs someone
+  // else a request.
+  const [refProposal, setRefProposal] = useState<ReferenceProposal | null>(null);
+  const [refBusy, setRefBusy] = useState(true);
 
-  const confirmed = new Set(product.confirmed_fields || []);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getReferenceSuggestions([product.id])
+      .then((data) => {
+        if (!cancelled) setRefProposal(data.results[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setRefProposal(null);
+      })
+      .finally(() => {
+        if (!cancelled) setRefBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [product.id]);
+
+  const acknowledged = new Set(product.acknowledged_fields || []);
+  const suggested = new Set(product.suggested_fields || []);
   const set = (key: keyof typeof form) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
 
   // Choosing a dosage form answers two other questions at the same time: what
@@ -535,11 +830,19 @@ const ProductDetailDrawer: React.FC<{
 
   // Only the units this form supports. With no matching type (an unknown or
   // retired form) every known unit is offered rather than none.
+  //
+  // The product's own unit is always among them, the same way formOptions
+  // keeps its own form. Without that, a vocabulary that failed to load - or
+  // simply no longer lists this form - leaves a select with no option
+  // matching its value, which renders as "Not set" over a unit the product
+  // does have. The record is unharmed until someone believes the picker and
+  // touches it.
   const unitOptions = React.useMemo(() => {
     const type = vocabulary.find((t) => t.name === form.form);
-    if (type?.supported_units?.length) return type.supported_units;
-    return knownUnits;
-  }, [vocabulary, knownUnits, form.form]);
+    const units = type?.supported_units?.length ? [...type.supported_units] : [...knownUnits];
+    if (form.base_unit && !units.includes(form.base_unit)) units.push(form.base_unit);
+    return units;
+  }, [vocabulary, knownUnits, form.form, form.base_unit]);
 
   const payload = () => ({
     ...form,
@@ -552,6 +855,7 @@ const ProductDetailDrawer: React.FC<{
     pack_multiplier: form.pack_multiplier.trim() ? Number(form.pack_multiplier) : null,
     base_unit: form.base_unit || null,
     manufacturer: form.manufacturer.trim() || null,
+    composition: form.composition.trim() || null,
     hsn: form.hsn.trim() || null,
     schedule: form.schedule || null,
     notes: form.notes.trim() || null
@@ -571,6 +875,11 @@ const ProductDetailDrawer: React.FC<{
         return;
       }
       await onSaved(confirm ? 'Product confirmed.' : 'Changes saved.');
+      // Mid-walk, saving means "done with this one" — so the next item opens
+      // rather than the reviewer being returned to the list to find their
+      // place. The walk closing itself on the last item is what tells them
+      // the band is finished.
+      if (walkPosition && (await onAdvance())) return;
       onClose();
     } catch (e: any) {
       await onSaved(e?.message || 'Save failed.');
@@ -579,39 +888,11 @@ const ProductDetailDrawer: React.FC<{
     }
   };
 
-  const runLookup = async () => {
-    setLookingUp(true);
-    setLookup(null);
-    try {
-      setLookup(await apiClient.enrichProduct(product.id));
-    } catch (e: any) {
-      setLookup({
-        product_id: product.id,
-        query: '',
-        suggestions: [],
-        status: 'error',
-        message: e?.message || 'Lookup failed.'
-      });
-    } finally {
-      setLookingUp(false);
-    }
-  };
-
-  // Fills the form only — the user still has to save, so a lookup can never
-  // write to the catalogue on its own.
-  const applySuggestion = (suggestion: Suggestion) => {
-    const f = suggestion.facts;
-    if (!f) return;
-    setForm((prev) => ({
-      ...prev,
-      brand: f.brand ?? prev.brand,
-      strength: f.strength ?? prev.strength,
-      form: f.form ?? prev.form,
-      pack_size: f.pack_size ?? prev.pack_size,
-      pack_multiplier: f.pack_multiplier?.toString() ?? prev.pack_multiplier,
-      base_unit: f.base_unit ?? prev.base_unit,
-      manufacturer: f.manufacturer ?? prev.manufacturer
-    }));
+  // Skipping leaves the item exactly as it is and moves on. A reviewer who
+  // cannot answer this one now must be able to keep going; without it the
+  // only way past a hard item is to abandon the whole band.
+  const skip = async () => {
+    if (!(await onAdvance())) onClose();
   };
 
   const doSplit = async (alias: ProductAlias, overrides: Record<string, any>) => {
@@ -639,6 +920,11 @@ const ProductDetailDrawer: React.FC<{
         {/* Drawer header */}
         <div className="sticky top-0 bg-white border-b border-[#e2e8f0] px-6 py-4 flex items-start justify-between z-10">
           <div className="min-w-0">
+            {walkPosition && (
+              <span className="text-[10px] font-bold text-[#1b5dfc] uppercase tracking-wider block mb-0.5">
+                Reviewing {walkPosition.index} of {walkPosition.total}
+              </span>
+            )}
             <h3 className="text-lg font-bold text-[#0f172a] truncate">
               {product.brand || product.canonical_name || 'Unnamed item'}
             </h3>
@@ -718,14 +1004,32 @@ const ProductDetailDrawer: React.FC<{
             </div>
           )}
 
-          {/* Online lookup */}
-          <LookupPanel
-            product={product}
-            result={lookup}
-            busy={lookingUp}
-            onRun={runLookup}
-            onApply={applySuggestion}
-          />
+          {/* Reference catalogue — instant, local, and the first thing to try. */}
+          <section className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm p-5 space-y-3">
+            <div>
+              <h4 className="text-sm font-bold text-[#0f172a] flex items-center gap-1.5">
+                <BookOpen size={14} className="text-gray-400" />
+                Reference catalogue
+              </h4>
+              <p className="text-[11px] text-gray-500">
+                What a local index of Indian products says about this name. Only fields every
+                matching listing agrees on are offered; nothing is saved until you press save.
+              </p>
+            </div>
+            <ReferenceInline
+              proposal={refProposal}
+              busy={refBusy}
+              suggestedFields={product.suggested_fields || []}
+              onApply={(fields) =>
+                setForm((prev) => ({
+                  ...prev,
+                  ...Object.fromEntries(
+                    Object.entries(fields).map(([k, v]) => [k, v === null ? '' : String(v)])
+                  )
+                }))
+              }
+            />
+          </section>
 
           {/* Catalogue fields */}
           <section className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm p-5 space-y-4">
@@ -738,17 +1042,17 @@ const ProductDetailDrawer: React.FC<{
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <FieldLabel label="Brand / Product name" confirmed={confirmed.has('brand')} confidence={product.brand_confidence} hasValue={!!form.brand} />
+                <FieldLabel label="Brand / Product name" acknowledged={acknowledged.has('brand')} suggested={suggested.has('brand')} hasValue={!!form.brand} />
                 <input className={inputClass} value={form.brand} onChange={(e) => set('brand')(e.target.value)} placeholder="e.g. MONTICOPE" />
               </div>
 
               <div>
-                <FieldLabel label="Dosage strength" confirmed={confirmed.has('strength')} confidence={product.strength_confidence} hasValue={!!form.strength} />
+                <FieldLabel label="Dosage strength" acknowledged={acknowledged.has('strength')} suggested={suggested.has('strength')} hasValue={!!form.strength} />
                 <input className={inputClass} value={form.strength} onChange={(e) => set('strength')(e.target.value)} placeholder="e.g. 10MG" />
               </div>
 
               <div>
-                <FieldLabel label="Dosage form" confirmed={confirmed.has('form')} confidence={product.form_confidence} hasValue={!!form.form} />
+                <FieldLabel label="Dosage form" acknowledged={acknowledged.has('form')} suggested={suggested.has('form')} hasValue={!!form.form} />
                 <select className={inputClass} value={form.form} onChange={(e) => setDosageForm(e.target.value)}>
                   <option value="">Not set</option>
                   {formOptions.map((f) => (
@@ -758,12 +1062,12 @@ const ProductDetailDrawer: React.FC<{
               </div>
 
               <div>
-                <FieldLabel label="Pack size" confirmed={confirmed.has('pack_size')} confidence={product.pack_size_confidence} hasValue={!!form.pack_size} />
+                <FieldLabel label="Pack size" acknowledged={acknowledged.has('pack_size')} suggested={suggested.has('pack_size')} hasValue={!!form.pack_size} />
                 <input className={inputClass} value={form.pack_size} onChange={(e) => set('pack_size')(e.target.value)} placeholder="e.g. 1*10, 15'S, 100ML" />
               </div>
 
               <div>
-                <FieldLabel label="Units per pack" confirmed={confirmed.has('pack_multiplier')} confidence={product.pack_multiplier_confidence} hasValue={!!form.pack_multiplier} />
+                <FieldLabel label="Units per pack" acknowledged={acknowledged.has('pack_multiplier')} suggested={suggested.has('pack_multiplier')} hasValue={!!form.pack_multiplier} />
                 <input
                   className={inputClass}
                   type="number"
@@ -784,7 +1088,15 @@ const ProductDetailDrawer: React.FC<{
               </div>
 
               <div>
-                <FieldLabel label="Dispensing unit" confirmed={confirmed.has('base_unit')} confidence={product.base_unit_confidence} hasValue={!!form.base_unit} />
+                {/* When a form is set, the unit follows from it rather than
+                    being read separately - so it is shown with the form's own
+                    confidence, not the lower number the parser records for a
+                    value it derived. Calling it a guess here would contradict
+                    the review queue, which does not ask about it at all. */}
+                <FieldLabel
+                  label="Dispensing unit" acknowledged={acknowledged.has('base_unit')} suggested={suggested.has('base_unit')}
+                  hasValue={!!form.base_unit}
+                />
                 <select className={inputClass} value={form.base_unit} onChange={(e) => set('base_unit')(e.target.value)}>
                   <option value="">Not set</option>
                   {unitOptions.map((u: string) => (
@@ -794,12 +1106,22 @@ const ProductDetailDrawer: React.FC<{
               </div>
 
               <div>
-                <FieldLabel label="Manufacturer" confirmed={confirmed.has('manufacturer')} hasValue={!!form.manufacturer} />
+                <FieldLabel label="Manufacturer" acknowledged={acknowledged.has('manufacturer')} suggested={suggested.has('manufacturer')} hasValue={!!form.manufacturer} />
                 <input className={inputClass} value={form.manufacturer} onChange={(e) => set('manufacturer')(e.target.value)} placeholder="e.g. Mankind" />
               </div>
 
+              <div className="sm:col-span-2">
+                <FieldLabel label="Salt composition" acknowledged={acknowledged.has('composition')} suggested={suggested.has('composition')} hasValue={!!form.composition} />
+                <input className={inputClass} value={form.composition} onChange={(e) => set('composition')(e.target.value)} placeholder="e.g. Olmesartan Medoxomil 20mg + Amlodipine 5mg" />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  What is actually in it. Invoices never print this — it comes from the reference
+                  catalogue, and it is how you recognise that two differently-named products are
+                  the same medicine.
+                </p>
+              </div>
+
               <div>
-                <FieldLabel label="HSN code" confirmed={confirmed.has('hsn')} hasValue={!!form.hsn} />
+                <FieldLabel label="HSN code" acknowledged={acknowledged.has('hsn')} suggested={suggested.has('hsn')} hasValue={!!form.hsn} />
                 <input className={inputClass} value={form.hsn} onChange={(e) => set('hsn')(e.target.value)} placeholder="e.g. 30049099" />
                 {product.observed_hsns.length > 0 && (
                   <p className="text-[10px] text-gray-400 mt-1">
@@ -809,7 +1131,7 @@ const ProductDetailDrawer: React.FC<{
               </div>
 
               <div>
-                <FieldLabel label="Schedule" confirmed={confirmed.has('schedule')} hasValue={!!form.schedule} />
+                <FieldLabel label="Schedule" acknowledged={acknowledged.has('schedule')} suggested={suggested.has('schedule')} hasValue={!!form.schedule} />
                 <select className={inputClass} value={form.schedule} onChange={(e) => set('schedule')(e.target.value)}>
                   <option value="">Not set</option>
                   {SCHEDULES.map((s) => (
@@ -822,7 +1144,7 @@ const ProductDetailDrawer: React.FC<{
               </div>
 
               <div>
-                <FieldLabel label="Notes" confirmed={confirmed.has('notes')} hasValue={!!form.notes} />
+                <FieldLabel label="Notes" acknowledged={acknowledged.has('notes')} suggested={suggested.has('notes')} hasValue={!!form.notes} />
                 <input className={inputClass} value={form.notes} onChange={(e) => set('notes')(e.target.value)} placeholder="Optional" />
               </div>
             </div>
@@ -950,22 +1272,35 @@ const ProductDetailDrawer: React.FC<{
               disabled={saving}
               className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
             >
-              Cancel
+              {walkPosition ? 'Stop' : 'Cancel'}
             </button>
-            <button
-              onClick={() => save(false)}
-              disabled={saving}
-              className="bg-white hover:bg-slate-50 text-[#1b5dfc] font-semibold px-4 py-2 rounded-xl text-xs border border-blue-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
-            >
-              Save
-            </button>
+            {walkPosition ? (
+              <button
+                onClick={skip}
+                disabled={saving}
+                className="bg-white hover:bg-slate-50 text-gray-700 font-semibold px-4 py-2 rounded-xl text-xs border border-gray-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+              >
+                Skip
+                <ArrowRight size={13} />
+              </button>
+            ) : (
+              <button
+                onClick={() => save(false)}
+                disabled={saving}
+                className="bg-white hover:bg-slate-50 text-[#1b5dfc] font-semibold px-4 py-2 rounded-xl text-xs border border-blue-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Save
+              </button>
+            )}
             <button
               onClick={() => save(true)}
               disabled={saving}
               className="bg-[#1b5dfc] hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-xl text-xs shadow-md shadow-blue-500/10 transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
             >
               {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-              Save &amp; confirm
+              {walkPosition && walkPosition.index < walkPosition.total
+                ? 'Confirm & next'
+                : 'Save & confirm'}
             </button>
           </div>
         </div>
@@ -983,189 +1318,6 @@ const ProductDetailDrawer: React.FC<{
 };
 
 // --------------------------------------------------------------------------
-
-const FIELD_LABELS: Record<string, string> = {
-  brand: 'Brand',
-  strength: 'Strength',
-  form: 'Form',
-  pack_size: 'Pack size',
-  pack_multiplier: 'Units per pack',
-  base_unit: 'Dispensing unit',
-  manufacturer: 'Manufacturer'
-};
-
-// Suggestions are presented as a claim by a named source with a link, never as
-// an answer. The reviewer needs to be able to check it, so the match score,
-// what could not be verified, and the source URL all travel with the values.
-const LookupPanel: React.FC<{
-  product: Product;
-  result: EnrichmentResult | null;
-  busy: boolean;
-  onRun: () => void;
-  onApply: (s: Suggestion) => void;
-}> = ({ product, result, busy, onRun, onApply }) => {
-  const searchName = product.aliases?.[0]?.raw_name || product.canonical_name || product.brand;
-
-  return (
-    <section className="bg-white rounded-2xl border border-[#e2e8f0] shadow-sm p-5 space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h4 className="text-sm font-bold text-[#0f172a] flex items-center gap-1.5">
-            <Globe size={14} className="text-gray-400" />
-            Look up online
-          </h4>
-          <p className="text-[11px] text-gray-500">
-            Searches public drug listings for{' '}
-            <span className="font-mono text-[#0f172a]">{searchName}</span> and suggests the
-            catalogue details. Nothing is saved until you apply it and press save.
-          </p>
-        </div>
-        <button
-          onClick={onRun}
-          disabled={busy}
-          className="shrink-0 flex items-center gap-1.5 bg-white hover:bg-slate-50 text-[#1b5dfc] font-semibold px-3 py-2 rounded-xl text-xs border border-blue-200 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
-        >
-          {busy ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-          {busy ? 'Searching…' : result ? 'Search again' : 'Search'}
-        </button>
-      </div>
-
-      {result && result.suggestions.length === 0 && (
-        <div className="flex items-start gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-600">
-          <Info size={14} className="shrink-0 mt-0.5" />
-          <span>{result.message || 'No matching listing found.'}</span>
-        </div>
-      )}
-
-      {result?.suggestions.map((suggestion) => {
-        const m = suggestion.match;
-        const changes = suggestion.fields.filter((f) => !f.agrees);
-        const overwritesConfirmed = changes.filter((f) => f.confirmed);
-
-        return (
-          <div key={m.slug} className="border border-[#e2e8f0] rounded-xl overflow-hidden">
-            <div className="bg-[#f8fafc] px-4 py-3 flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-bold text-[#0f172a]">
-                    {suggestion.facts?.listing_name || m.display}
-                  </span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
-                      m.score >= 88
-                        ? 'bg-green-50 text-green-700 border-green-200'
-                        : 'bg-amber-50 text-amber-700 border-amber-200'
-                    }`}
-                  >
-                    {Math.round(m.score)}% match
-                  </span>
-                  {m.strength_verified ? (
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-50 text-green-700 border border-green-200">
-                      strength verified
-                    </span>
-                  ) : (
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                      strength unverified
-                    </span>
-                  )}
-                </div>
-                <a
-                  href={m.url}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="text-[10px] text-[#1b5dfc] hover:underline flex items-center gap-1 mt-1"
-                >
-                  {m.source} <ExternalLink size={9} />
-                </a>
-              </div>
-              {suggestion.facts && (
-                <button
-                  onClick={() => onApply(suggestion)}
-                  className="shrink-0 bg-[#1b5dfc] hover:bg-blue-700 text-white font-semibold px-3 py-1.5 rounded-lg text-[11px] transition-colors cursor-pointer"
-                >
-                  Use these details
-                </button>
-              )}
-            </div>
-
-            <div className="px-4 py-3 space-y-2">
-              {m.reasons.map((reason, i) => (
-                <div key={i} className="flex items-start gap-1.5 text-[10px] text-gray-500">
-                  <Info size={10} className="shrink-0 mt-0.5" />
-                  <span>{reason}</span>
-                </div>
-              ))}
-
-              {overwritesConfirmed.length > 0 && (
-                <div className="flex items-start gap-1.5 text-[10px] text-red-600 font-semibold">
-                  <ShieldAlert size={11} className="shrink-0 mt-0.5" />
-                  <span>
-                    Would change {overwritesConfirmed.map((f) => FIELD_LABELS[f.field]).join(', ')},
-                    which someone already confirmed.
-                  </span>
-                </div>
-              )}
-
-              {suggestion.fields.length > 0 && (
-                <table className="w-full text-[11px] mt-1">
-                  <tbody className="divide-y divide-[#f1f5f9]">
-                    {suggestion.fields.map((f) => (
-                      <tr key={f.field}>
-                        <td className="py-1.5 text-gray-500 w-32">{FIELD_LABELS[f.field] || f.field}</td>
-                        <td className="py-1.5 text-gray-400 line-through">
-                          {f.agrees ? '' : f.current || ''}
-                        </td>
-                        <td className="py-1.5 font-semibold text-[#0f172a]">
-                          {f.suggested}
-                          {f.agrees && (
-                            <span className="ml-1.5 text-[9px] font-bold text-green-600">agrees</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-
-              {suggestion.facts && (
-                <div className="pt-2 mt-1 border-t border-[#f1f5f9] space-y-1">
-                  {suggestion.facts.composition && (
-                    <p className="text-[10px] text-gray-500">
-                      <span className="text-gray-400">Composition:</span>{' '}
-                      {suggestion.facts.composition}
-                    </p>
-                  )}
-                  {suggestion.facts.prescription_note && (
-                    <p className="text-[10px] text-gray-500">
-                      <span className="text-gray-400">Regulatory:</span>{' '}
-                      {suggestion.facts.prescription_note}
-                      <span className="text-gray-400">
-                        {' '}— set the schedule yourself; listings don’t distinguish H from H1.
-                      </span>
-                    </p>
-                  )}
-                  {suggestion.facts.listed_mrp !== null && (
-                    <p className="text-[10px] text-gray-500">
-                      <span className="text-gray-400">Listed MRP:</span>{' '}
-                      {currency(suggestion.facts.listed_mrp)}
-                      <span className="text-gray-400"> — for comparison only, not saved.</span>
-                    </p>
-                  )}
-                  {suggestion.facts.unavailable.length > 0 && (
-                    <p className="text-[10px] text-gray-400">
-                      Not published by {suggestion.facts.source}:{' '}
-                      {suggestion.facts.unavailable.join(', ')}.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </section>
-  );
-};
 
 const SplitDialog: React.FC<{
   alias: ProductAlias;

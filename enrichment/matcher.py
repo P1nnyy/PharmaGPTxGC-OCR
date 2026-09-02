@@ -79,7 +79,7 @@ def _significant_tokens(text: str) -> set:
     return {t for t in normalize_name(text).split() if t and t not in _NOISE_TOKENS}
 
 
-def _strengths_conflict(a: Optional[str], b: Optional[str]) -> bool:
+def strengths_conflict(a: Optional[str], b: Optional[str]) -> bool:
     """True only when both sides stated a strength and they genuinely differ.
 
     Silence is never a conflict: most invoice lines omit strength entirely,
@@ -131,7 +131,7 @@ def score_candidate(
     if not listing_brand:
         return None
 
-    if _strengths_conflict(query_strength, candidate.get("strength")):
+    if strengths_conflict(query_strength, candidate.get("strength")):
         # Rule 1. Not a penalty - a rejection.
         return None
 
@@ -176,7 +176,7 @@ def score_candidate(
 
     strength_verified = bool(
         query_strength and candidate.get("strength")
-        and not _strengths_conflict(query_strength, candidate.get("strength"))
+        and not strengths_conflict(query_strength, candidate.get("strength"))
     )
     if strength_verified:
         score += 8.0

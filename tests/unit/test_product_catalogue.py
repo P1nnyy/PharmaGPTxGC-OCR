@@ -25,6 +25,7 @@ def product(**overrides) -> dict:
         "schedule": "Schedule H",
         "review_status": "needs_review",
         "confirmed_fields": [],
+        "acknowledged_fields": [],
         "observed_mrps": [120.0],
         "observed_hsns": ["30049099"],
         "aliases": [],
@@ -143,12 +144,19 @@ class TestNewSpelling:
 
 
 class TestAcknowledgement:
-    def test_confirming_a_blank_field_downgrades_the_nag(self):
+    def test_acknowledging_a_blank_field_downgrades_the_nag(self):
         # The pharmacist may know the invoice genuinely never states it.
-        prod = product(pack_multiplier=None, confirmed_fields=["pack_multiplier"])
+        prod = product(pack_multiplier=None, acknowledged_fields=["pack_multiplier"])
         flag = next(f for f in compute_flags(prod) if f["code"] == "missing_pack_multiplier")
         assert flag["severity"] == "low"
         assert "acknowledged" in flag["message"]
+
+    def test_a_confirmed_value_does_not_acknowledge_a_blank(self):
+        # confirmed_fields records values a human approved. A blank has no
+        # value to approve, so its warning must stand - this is what let a
+        # product with no strength on any invoice look fully reviewed.
+        prod = product(pack_multiplier=None, confirmed_fields=["pack_multiplier"])
+        assert severity_of(prod, "missing_pack_multiplier") == "high"
 
     def test_unacknowledged_stays_high(self):
         prod = product(pack_multiplier=None)
