@@ -187,3 +187,53 @@ class TestEquivalentFormsAreNotConflicts:
 
     def test_a_genuinely_different_form_is_still_a_conflict(self):
         assert "form" in self._suggest("Capsule", "Tablet")["conflicts"]
+
+
+class TestAFormNamedMorePrecisely:
+    def _suggest(self, current_form, proposed_form):
+        with patch.object(reference_service.reference_index, "candidates_for", return_value=[]), \
+             patch.object(reference_service, "propose",
+                          return_value={"status": "ok", "fields": {"form": proposed_form}}):
+            return reference_service.suggest_for_product(
+                product(form=current_form), connection=None
+            )
+
+    @pytest.mark.parametrize(
+        "current_form, proposed_form",
+        [("Spray", "Nasal Spray"), ("Drops", "Eye Drops")],
+    )
+    def test_a_more_specific_name_is_a_refinement_not_a_disagreement(
+        self, current_form, proposed_form
+    ):
+        result = self._suggest(current_form, proposed_form)
+        assert result["conflicts"] == {}
+        assert result["expansions"]["form"]["suggested"] == proposed_form
+
+    def test_a_different_presentation_is_not_a_refinement(self):
+        assert "form" in self._suggest("Tablet", "Nasal Spray")["conflicts"]
+
+
+class TestTheUnitThatTravelsWithTheForm:
+    def _suggest(self, product_overrides, fields):
+        with patch.object(reference_service.reference_index, "candidates_for", return_value=[]), \
+             patch.object(reference_service, "propose",
+                          return_value={"status": "ok", "fields": fields}):
+            return reference_service.suggest_for_product(
+                product(**product_overrides), connection=None
+            )
+
+    def test_a_unit_is_not_contested_once_the_form_is_settled(self):
+        """An Ampoule counted in AMPOULE against an Injection counted in VIAL
+        is a disagreement about nothing once the two forms are agreed."""
+        result = self._suggest(
+            {"form": "Ampoule", "base_unit": "AMPOULE"},
+            {"form": "Injection", "base_unit": "VIAL"},
+        )
+        assert result["conflicts"] == {}
+
+    def test_a_unit_is_still_contested_when_the_forms_genuinely_differ(self):
+        result = self._suggest(
+            {"form": "Tablet", "base_unit": "TABLET"},
+            {"form": "Syrup", "base_unit": "ML"},
+        )
+        assert "base_unit" in result["conflicts"]

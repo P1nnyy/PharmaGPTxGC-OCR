@@ -696,3 +696,47 @@ class TestAFigureTheRowNamesButDoesNotRecord:
             row("Metapro-XL 50 Tablet", primary_strength="47.5mg",
                 ingredient_strengths="47.5mg"),
         ) is None
+
+
+class TestWhichOfARowsTwoAnswersIsProposed:
+    """A reference row states its form and its strength twice over, and the two
+    statements can differ. Which one is proposed is the difference between
+    filling a field correctly and filling it with something a pharmacist will
+    have to undo."""
+
+    def test_a_form_the_row_names_beats_the_column_it_is_filed_under(self):
+        result = propose(build_query("AROTEAR GEL"), [
+            row("Arotear Gel", dosage_form="solution", primary_strength=None),
+        ])
+        assert result["fields"]["form"] == "Gel"
+        assert result["fields"]["base_unit"] == "GM"
+
+    def test_the_column_still_answers_when_the_name_says_nothing(self):
+        result = propose(build_query("SILYBON"), [
+            row("Silybon", dosage_form="suspension", primary_strength=None),
+        ])
+        assert result["fields"]["form"] == "Suspension"
+
+    def test_a_dose_the_row_names_beats_the_ingredient_it_records(self):
+        """Metolar XR 12.5 contains 11.8mg of metoprolol succinate. The pack
+        says 12.5, and so will next month's invoice."""
+        result = propose(build_query("METOLAR XR 12.5", form="Capsule"), [
+            row("Metolar XR 12.5 Capsule", dosage_form="capsule",
+                primary_strength="11.8mg", ingredient_strengths="11.8mg"),
+        ])
+        assert result["fields"]["strength"] == "12.5MG"
+
+    def test_a_dose_the_row_agrees_with_is_left_as_recorded(self):
+        result = propose(build_query("OMNACORTIL 10", form="Tablet"), [
+            row("Omnacortil 10 Tablet DT", primary_strength="10mg",
+                ingredient_strengths="10mg"),
+        ])
+        assert result["fields"]["strength"] == "10MG"
+
+    def test_a_name_stating_several_figures_is_left_to_the_combination_rule(self):
+        result = propose(build_query("GLYCOMET GP 2/850"), [
+            row("Glycomet-GP 2/850 Tablet SR", primary_strength="2mg",
+                ingredient_strengths="2mg|850mg", ingredient_count=2,
+                composition="Glimepiride 2mg + Metformin 850mg"),
+        ])
+        assert result["fields"]["strength"] == "2MG+850MG"

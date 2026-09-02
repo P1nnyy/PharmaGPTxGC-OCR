@@ -66,7 +66,16 @@ def suggest_for_product(product: dict, connection) -> dict:
     expansions: dict = {}
     conflicts: dict = {}
 
+    # base_unit is not an independent fact - it is what the form is counted in,
+    # and the catalogue derives it from the form when a reviewer picks one. So
+    # when the two sides turn out to name the same presentation, the unit that
+    # came with it is settled too: offering VIAL against an Ampoule whose form
+    # we just agreed with is a disagreement about nothing.
+    form_settled = bool(fields.get("form")) and forms_agree(product.get("form"), fields["form"])
+
     for key, value in fields.items():
+        if key == "base_unit" and form_settled:
+            continue
         if key not in PROPOSABLE:
             continue
         current = product.get(key)
@@ -74,6 +83,11 @@ def suggest_for_product(product: dict, connection) -> dict:
             new_fields[key] = value
         elif str(current).strip().upper() == str(value).strip().upper():
             continue
+        elif key == "form" and _is_narrower_form(current, value):
+            # Spray -> Nasal Spray, Drops -> Eye Drops. The same presentation
+            # named more precisely, which is a refinement to accept rather than
+            # a disagreement to arbitrate.
+            expansions[key] = {"current": current, "suggested": value}
         elif key == "form" and forms_agree(current, value):
             # The catalogue and the reference name the same presentation in
             # different words - Eye Drops against Drops, Ampoule against
@@ -91,6 +105,21 @@ def suggest_for_product(product: dict, connection) -> dict:
     result["expansions"] = expansions
     result["conflicts"] = conflicts
     return result
+
+
+def _is_narrower_form(current, suggested) -> bool:
+    """True when the reference names the form we hold, only more precisely.
+
+    A catalogue that says Spray and a listing that says Nasal Spray are not in
+    disagreement; one is simply carrying the detail the other dropped. Matched
+    on the trailing words because that is where the presentation sits and the
+    qualifier goes in front - Nasal Spray, Eye Drops, Oral Solution.
+    """
+    a = re.sub(r"\s+", " ", str(current or "").strip().upper())
+    b = re.sub(r"\s+", " ", str(suggested or "").strip().upper())
+    if not a or not b or a == b:
+        return False
+    return b.endswith(f" {a}")
 
 
 def _is_expansion(current, suggested) -> bool:

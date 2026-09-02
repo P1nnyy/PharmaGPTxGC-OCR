@@ -243,6 +243,36 @@ FORM_MAP: dict[str, tuple[str, str]] = {
     "spray": ("Spray", "ML"),
     "inhaler": ("Inhaler", "UNIT"),
     "respules": ("Respule", "RESPULE"),
+    # The forms a reference row names in its own title. The dosage_form column
+    # is a coarse fourteen-way classification; the names are as specific as the
+    # catalogue's own vocabulary, so a row called "Ciplox D Eye Ointment" can
+    # propose an ointment rather than the "drops" its column happens to hold.
+    "eye drop": ("Eye Drops", "ML"),
+    "eye drops": ("Eye Drops", "ML"),
+    "ear drop": ("Ear Drops", "ML"),
+    "ear drops": ("Ear Drops", "ML"),
+    "eye/ear drops": ("Eye/Ear Drops", "ML"),
+    "nasal drop": ("Nasal Drops", "ML"),
+    "nasal drops": ("Nasal Drops", "ML"),
+    "nasal spray": ("Nasal Spray", "ML"),
+    "oral drops": ("Drops", "ML"),
+    "oral solution": ("Solution", "ML"),
+    "oral suspension": ("Suspension", "ML"),
+    "dry syrup": ("Syrup", "ML"),
+    "vial": ("Vial", "VIAL"),
+    "ampoule": ("Ampoule", "AMPOULE"),
+    "ampoules": ("Ampoule", "AMPOULE"),
+    "granules": ("Granules", "SACHET"),
+    "sachet": ("Sachet", "SACHET"),
+    "rotacap": ("Rotacap", "CAPSULE"),
+    "rotacaps": ("Rotacap", "CAPSULE"),
+    "respule": ("Respule", "RESPULE"),
+    "suppository": ("Suppository", "UNIT"),
+    "mouthwash": ("Mouthwash", "ML"),
+    "lotion": ("Lotion", "ML"),
+    "shampoo": ("Shampoo", "ML"),
+    "soap": ("Soap", "UNIT"),
+    "kit": ("Kit", "KIT"),
 }
 
 # Forms that name the same presentation in different words. The invoice and
@@ -760,6 +790,49 @@ def _same_as_printed(value: float, strength: str) -> bool:
     return bool(printed) and abs(float(printed.group(1)) - value) < 1e-9
 
 
+def row_form(row: dict) -> str:
+    """The form key to propose for one row.
+
+    Its own name first, where the catalogue has a type for what the name says.
+    The dosage_form column is a coarse classification over 254,000 rows and it
+    loses detail the name kept - "Arotear Gel" is filed under `solution`, and
+    proposing Solution/ML for a gel contradicts a row that spelled it out.
+    """
+    named = form_from_name(row.get("brand_name"))
+    if named and named.lower() in FORM_MAP:
+        return named.lower()
+    return str(row.get("dosage_form") or "").lower()
+
+
+def row_strength(row: dict) -> Optional[str]:
+    """The strength to propose for one single-ingredient row.
+
+    A row states its dose twice and the two can differ legitimately: Metolar
+    XR 12.5 contains 11.8mg of metoprolol succinate, which is 12.5mg of the
+    tartrate it replaces. Both figures are true, but the catalogue is a record
+    of what was bought - the pack says 12.5, and so will next month's invoice -
+    so the figure printed in the name is the one worth keeping.
+
+    Only ONE figure in the name may do this. A name stating several is a
+    combination, whose strength is settled by pin_combination_strength.
+    """
+    recorded = row.get("primary_strength")
+    canon = canon_strength(recorded)
+    if not canon:
+        return recorded
+
+    named = stated_figures(split_name(row.get("brand_name")))
+    if len(named) != 1:
+        return recorded
+
+    figure = next(iter(named))
+    if abs(figure - canon[0]) < 1e-9:
+        return recorded
+
+    unit = re.search(r"(MCG|MG|IU|ML|GM|G|%)", str(recorded).upper())
+    return f"{figure:g}{unit.group(1) if unit else 'MG'}"
+
+
 def _agree(rows: list[dict], read) -> tuple[Any, int]:
     """The single value every row agrees on, and how many distinct ones there were."""
     values = {read(r) for r in rows if read(r) not in (None, "", [])}
@@ -789,7 +862,7 @@ def propose(query: Query, rows: list[dict], limit: int = 8) -> dict:
 
     winners = [s["row"] for s in survivors]
 
-    form_value, form_variants = _agree(winners, lambda r: (r.get("dosage_form") or "").lower())
+    form_value, form_variants = _agree(winners, row_form)
     pack_value, pack_variants = _agree(winners, lambda r: _to_float(r.get("pack_size")))
     maker_value, maker_variants = _agree(winners, lambda r: r.get("manufacturer"))
 
@@ -805,7 +878,7 @@ def propose(query: Query, rows: list[dict], limit: int = 8) -> dict:
         pinned_by_name = pinned.pop() if len(pinned) == 1 else None
         strength_value, strength_variants = pinned_by_name, 0
     else:
-        strength_value, strength_variants = _agree(winners, lambda r: r.get("primary_strength"))
+        strength_value, strength_variants = _agree(winners, row_strength)
 
     fields: dict[str, Any] = {}
     contested: list[dict] = []
