@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "/Users/pranavgupta/PharmaGPTxGC-OCR"
+  ],
+  "python.terminal.activateEnvironment": true
+}
