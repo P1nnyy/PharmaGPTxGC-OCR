@@ -11,9 +11,12 @@ themselves to, and every account here is someone the owner hired.
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from api.deps import current_user, require_super_admin
+from core import google_oauth
+from core.config import settings
 from core.security import AuthConfigError, create_access_token, verify_password
 from db.repositories import (audit_repository, invite_repository,
                              pharmacy_repository, user_repository)
@@ -403,3 +406,106 @@ def update_shop(payload: ShopProfileRequest, user: dict = Depends(require_super_
         "missing": pharmacy_repository.missing_fields(shop),
         "required": list(pharmacy_repository.REQUIRED_FIELDS),
     }
+
+
+# ---- Sign in with Google --------------------------------------------------
+
+
+def _redirect_uri() -> str:
+    """Must match a URI registered at Google, character for character."""
+    return settings.PUBLIC_BASE_URL.rstrip("/") + "/auth/google/callback"
+
+
+@router.get("/google/status")
+def google_status():
+    """Whether the server can offer Google sign-in.
+
+    The button is drawn from this rather than assumed, so a deployment with no
+    credentials shows a working email form instead of a button that fails.
+    """
+    return {"available": google_oauth.is_configured()}
+
+
+@router.get("/google/start")
+def google_start(invite: Optional[str] = None, next: str = "/"):
+    """Sends the browser to Google's consent screen."""
+    try:
+        state = google_oauth.make_state(invite_token=invite, next_path=next)
+        url = google_oauth.authorization_url(_redirect_uri(), state)
+    except google_oauth.GoogleAuthError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except AuthConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return RedirectResponse(url, status_code=307)
+
+
+@router.get("/google/callback")
+def google_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Where Google returns. Signs the person in, creating the account if new.
+
+    The session token goes back in the URL **fragment**, not the query string:
+    a fragment is never sent to a server, so it stays out of access logs and
+    out of the Referer header on the next navigation. The SPA reads it and
+    clears it from the address bar immediately.
+    """
+    def fail(message: str) -> RedirectResponse:
+        # Errors go back to the app rather than rendering a bare API page, so
+        # someone who declines consent lands somewhere they can try again.
+        from urllib.parse import quote
+        return RedirectResponse(
+            settings.PUBLIC_BASE_URL.rstrip("/") + f"/#auth_error={quote(message)}",
+            status_code=303,
+        )
+
+    if error:
+        return fail("Google sign-in was cancelled.")
+    if not code or not state:
+        return fail("That sign-in link was incomplete.")
+
+    try:
+        claims = google_oauth.read_state(state)
+        tokens = google_oauth.exchange_code(code, _redirect_uri())
+        identity = google_oauth.identity_from(tokens)
+    except google_oauth.GoogleAuthError as e:
+        return fail(str(e))
+
+    # An invitation decides the workspace and role; without one, a first-time
+    # signer-in gets a workspace of their own.
+    invited = None
+    if claims.get("invite"):
+        try:
+            invited = invite_repository.accept(claims["invite"], identity["email"])
+        except invite_repository.InviteError as e:
+            return fail(str(e))
+
+    user, created = user_repository.find_or_create_google_user(
+        email=identity["email"], name=identity["name"], google_sub=identity["google_sub"],
+        pharmacy_id=invited["pharmacy_id"] if invited else None,
+        role=invited["role"] if invited else user_repository.DEFAULT_ROLE,
+    )
+    if not user.get("is_active"):
+        return fail("That account has been disabled.")
+
+    try:
+        token = create_access_token(user["id"], user["email"], user["role"])
+    except AuthConfigError as e:
+        return fail(str(e))
+
+    user_repository.record_login(user["id"])
+    audit_repository.record(
+        "user.invite_accepted" if invited else ("auth.registered" if created else "auth.signed_in"),
+        actor=user, target_type="user", target_id=user["id"],
+        summary=f"{user['email']} signed in with Google" + (" (new account)" if created else ""),
+        provider="google",
+    )
+
+    from urllib.parse import quote
+    destination = claims.get("next") or "/"
+    return RedirectResponse(
+        settings.PUBLIC_BASE_URL.rstrip("/") + f"/#token={quote(token)}&next={quote(destination)}",
+        status_code=303,
+    )

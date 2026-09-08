@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     # enough to make offline cracking expensive, fast enough for a login.
     BCRYPT_ROUNDS: int = 12
 
+    # Google sign-in. Absent is a valid state: the server runs without it and
+    # the UI simply does not offer the button.
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # The origin browsers reach this app on, used to build the OAuth
+    # redirect_uri. Set explicitly rather than inferred from the request:
+    # behind the Vite dev proxy and behind Caddy the backend sees its own
+    # internal host, and a redirect_uri that disagrees with the one
+    # registered at Google is the single most common way this flow fails.
+    PUBLIC_BASE_URL: str = "http://localhost:5173"
+
     DEFAULT_PHARMACY_ID: str = "default-pharmacy"
     DEFAULT_PHARMACY_NAME: str = "My Pharmacy"
     DEFAULT_USER_ID: str = "default-user"

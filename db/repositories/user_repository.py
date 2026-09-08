@@ -85,7 +85,7 @@ def _read(query: str, **params):
         return session.execute_read(lambda tx: [r for r in tx.run(query, **params)])
 
 
-def create_user(email: str, name: str, password: str, role: str = DEFAULT_ROLE,
+def create_user(email: str, name: str, password: Optional[str] = None, role: str = DEFAULT_ROLE,
                 pharmacy_id: Optional[str] = None, pharmacy_name: Optional[str] = None) -> dict:
     """Creates an account, and by default the workspace it owns.
 
@@ -256,3 +256,40 @@ def update_user(user_id: str, name: Optional[str] = None,
     if record is None:
         raise UnknownUserError(user_id)
     return _public(record["u"])
+
+
+def find_or_create_google_user(
+    email: str, name: str, google_sub: str,
+    pharmacy_id: Optional[str] = None, role: str = DEFAULT_ROLE,
+) -> tuple[dict, bool]:
+    """Signs in a Google identity, creating the account on first use.
+
+    An address that already has a password account is *linked*, not
+    duplicated: the same person signing in a second way must land in the same
+    workspace, otherwise their invoices appear to vanish. The email is the
+    identity here, and Google has already asserted it is verified - which is
+    checked before this is called.
+
+    Returns the account and whether it was created just now.
+    """
+    email = normalize_email(email)
+    existing = credentials_for(email)
+    if existing:
+        _write(
+            "MATCH (u:User {id: $id}) SET u.google_sub = $sub, "
+            "u.auth_providers = CASE WHEN 'google' IN coalesce(u.auth_providers, []) "
+            "  THEN u.auth_providers ELSE coalesce(u.auth_providers, []) + 'google' END "
+            "RETURN u",
+            id=existing["id"], sub=google_sub,
+        )
+        return get_user(existing["id"]), False
+
+    created = create_user(
+        email=email, name=name, password=None,
+        role=role, pharmacy_id=pharmacy_id,
+    )
+    _write(
+        "MATCH (u:User {id: $id}) SET u.google_sub = $sub, u.auth_providers = ['google'] RETURN u",
+        id=created["id"], sub=google_sub,
+    )
+    return get_user(created["id"]), True
