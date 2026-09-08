@@ -85,6 +85,12 @@
 		reverse_proxy backend:8000
 	}
 
+	# Sign-in and account management. Slash form so /auth stays free as a
+	# client-side route, same as /reports.
+	handle /auth/* {
+		reverse_proxy backend:8000
+	}
+
 	# SPA fallback: /catalogue and /review/<id> are React Router routes with
 	# no file behind them, so a hard refresh must still serve index.html.
 	handle {

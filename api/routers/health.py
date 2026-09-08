@@ -1,9 +1,10 @@
 """Liveness and cache maintenance."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from models.schemas import HealthResponse
 from services import cache_service
+from api.deps import require_super_admin
 
 router = APIRouter(tags=["system"])
 
@@ -14,7 +15,7 @@ def health_check():
 
 
 @router.post("/clear-cache")
-def clear_cache(include_azure: bool = False):
+def clear_cache(include_azure: bool = False, user: dict = Depends(require_super_admin)):
     """Clears the local OCR result cache.
 
     The cached raw Azure Document Intelligence responses are NOT cleared by

@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { Cpu, Package, Lock } from 'lucide-react';
+import { Cpu, Package, Lock, Users } from 'lucide-react';
 import { ItemTypesPanel } from './ItemTypesPanel';
+import { UsersPanel } from '../features/accounts/UsersPanel';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * System settings.
@@ -18,14 +20,24 @@ import { ItemTypesPanel } from './ItemTypesPanel';
  * that would be a second lie in place of the first.
  */
 export const SaaSSettingsPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction'>('catalogue');
+  const { isSuperAdmin } = useAuth();
+  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction' | 'accounts'>('catalogue');
+
+  // Hidden for everyone else rather than shown-and-disabled: a tab that
+  // always refuses is a worse answer than a tab that is not there. The server
+  // rejects the calls regardless of what the UI draws.
+  const tabs = [
+    { id: 'catalogue', label: 'Catalogue', icon: Package },
+    { id: 'extraction', label: 'Extraction', icon: Cpu },
+    ...(isSuperAdmin ? [{ id: 'accounts', label: 'Accounts', icon: Users }] : [])
+  ];
 
   return (
     <div className="space-y-6 animate-fade-in relative">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-[#0f172a] tracking-tight">System Settings</h2>
-        <p className="text-gray-500 text-sm">Define the item types your catalogue uses, and review how invoices are read.</p>
+        <p className="text-gray-500 text-sm">Define the item types your catalogue uses, manage who can sign in, and review how invoices are read.</p>
       </div>
 
       {/* Inner split layout */}
@@ -34,10 +46,7 @@ export const SaaSSettingsPage: React.FC = () => {
         {/* Left Sub-nav panel (Col Span 3) */}
         <div className="md:col-span-3 space-y-6">
           <div className="bg-white rounded-2xl border border-[#e2e8f0] p-3 shadow-sm space-y-1">
-            {[
-              { id: 'catalogue', label: 'Catalogue', icon: Package },
-              { id: 'extraction', label: 'Extraction', icon: Cpu }
-            ].map((tab) => {
+            {tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
 
@@ -62,7 +71,9 @@ export const SaaSSettingsPage: React.FC = () => {
         {/* Right Settings Form panel (Col Span 9) */}
         <div className="md:col-span-9 space-y-6">
           
-          {activeTab === 'catalogue' ? (
+          {activeTab === 'accounts' && isSuperAdmin ? (
+            <UsersPanel />
+          ) : activeTab === 'catalogue' ? (
             <ItemTypesPanel />
           ) : (
             <div className="space-y-6">

@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse, ReviewQueueResponse, DuplicateResponse, BulkConfirmResponse, ReferenceStatus, ReferenceSuggestResponse, InventoryResponse } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse, ReviewQueueResponse, DuplicateResponse, BulkConfirmResponse, ReferenceStatus, ReferenceSuggestResponse, InventoryResponse, AccountUser, AccountsResponse } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -379,6 +379,55 @@ export const apiClient = {
   // Server-derived, not browser-stored: the stock figures are the same on
   // every machine because they are read from the invoices, not accumulated
   // in whichever browser happened to verify the bill.
+
+  // ---- Accounts ---------------------------------------------------------
+  // Super Admin only on the server; the UI hides the panel for everyone else,
+  // but the server is what actually enforces it.
+
+  async listAccounts(): Promise<AccountsResponse> {
+    const response = await fetch('/auth/users');
+    if (!response.ok) throw new Error('Failed to load accounts.');
+    return response.json();
+  },
+
+  async createAccount(payload: { email: string; name: string; password: string; role: string }): Promise<AccountUser> {
+    const response = await fetch('/auth/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create the account.');
+    }
+    return response.json();
+  },
+
+  async updateAccount(userId: string, payload: { name?: string; role?: string; is_active?: boolean }): Promise<AccountUser> {
+    const response = await fetch(`/auth/users/${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to update the account.');
+    }
+    return response.json();
+  },
+
+  async resetAccountPassword(userId: string, password: string): Promise<AccountUser> {
+    const response = await fetch(`/auth/users/${userId}/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to reset the password.');
+    }
+    return response.json();
+  },
 
   async getInventory(statuses?: string): Promise<InventoryResponse> {
     const query = statuses ? `?statuses=${encodeURIComponent(statuses)}` : '';

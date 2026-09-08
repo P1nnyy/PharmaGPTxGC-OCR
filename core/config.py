@@ -30,6 +30,18 @@ class Settings(BaseSettings):
     R2_BUCKET_NAME: str = ""
 
     # Bootstrap tenant used until real multi-user auth exists
+    # ---- Authentication ----
+    # No default. An unset secret is a fatal misconfiguration rather than a
+    # weak default, because a guessable signing key means anyone can mint a
+    # token for any account; core.security refuses to sign without it.
+    JWT_SECRET: str = ""
+    # Eight hours: a pharmacy shift. Long enough not to interrupt a review
+    # session, short enough that a forgotten browser stops working same-day.
+    JWT_EXPIRY_MINUTES: int = 480
+    # Bcrypt work factor. 12 is ~250ms per verify on this hardware - slow
+    # enough to make offline cracking expensive, fast enough for a login.
+    BCRYPT_ROUNDS: int = 12
+
     DEFAULT_PHARMACY_ID: str = "default-pharmacy"
     DEFAULT_PHARMACY_NAME: str = "My Pharmacy"
     DEFAULT_USER_ID: str = "default-user"

@@ -89,6 +89,12 @@ www.{$DOMAIN} {
 		reverse_proxy backend:8000
 	}
 
+	# Sign-in and account management. Slash form so /auth stays free as a
+	# client-side route, same as /reports.
+	handle /auth/* {
+		reverse_proxy backend:8000
+	}
+
 	# Everything else is the SPA. try_files falls back to index.html so
 	# client-side routes like /catalogue or /review/<id> resolve on a hard
 	# refresh instead of 404ing - there is no file at that path, only a

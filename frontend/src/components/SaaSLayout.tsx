@@ -1,24 +1,41 @@
+import { useAuth } from '../context/AuthContext';
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import { apiClient } from '../api/client';
 import {
-  LayoutDashboard,
-  Upload,
-  History,
-  Package,
-  Tags,
   BarChart3,
-  Settings,
-  Search,
   Bell,
-  HelpCircle,
-  Menu,
   ChevronDown,
-  Trash2 // Destructive database zap icon
+  HelpCircle,
+  History,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Package,
+  Search,
+  Settings,
+  Tags,
+  Trash2, // Destructive database zap icon
+  Upload
 } from 'lucide-react';
 
 export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, signOut } = useAuth();
+
+  // Initials from the signed-in name, falling back to the email's first
+  // letters. "PA" was hardcoded chrome; it now says who is actually here.
+  const displayName = user?.name || user?.email || 'Signed out';
+  const displayEmail = user?.email || '';
+  const initials = (user?.name || user?.email || '?')
+    .split(/[\s@._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join('') || '?';
+  // Roles are stored as snake_case; shown as words.
+  const roleLabel = (user?.role || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
   const location = useLocation();
   const navigate = useNavigate();
   const { isBackendActive, runs, refreshRuns } = useRun();
@@ -226,13 +243,20 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
         <div className="p-4 border-t border-[#e2e8f0] bg-[#eaeef6] space-y-3">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center shadow-inner">
-              PA
+              {initials}
             </div>
             <div className="flex-1 min-w-0">
-              <h4 className="text-xs font-semibold text-[#0f172a] truncate">Admin User</h4>
-              <p className="text-[10px] text-gray-500 truncate">admin@pharmagpt.co</p>
+              <h4 className="text-xs font-semibold text-[#0f172a] truncate">{displayName}</h4>
+              <p className="text-[10px] text-gray-500 truncate">{roleLabel || displayEmail}</p>
             </div>
-            <ChevronDown size={14} className="text-gray-500" />
+            <button
+              onClick={signOut}
+              title="Sign out"
+              aria-label="Sign out"
+              className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+            >
+              <LogOut size={14} />
+            </button>
           </div>
 
           <div className="pt-2 border-t border-gray-300/50 flex items-center justify-between text-[10px]">
@@ -297,12 +321,19 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
             <div className="p-4 border-t border-[#e2e8f0] bg-[#eaeef6] rounded-xl">
               <div className="flex items-center space-x-3">
                 <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center">
-                  PA
+                  {initials}
                 </div>
-                <div>
-                  <h4 className="text-xs font-semibold text-[#0f172a]">Admin User</h4>
-                  <p className="text-[9px] text-gray-500">admin@pharmagpt.co</p>
+                <div className="flex-1 min-w-0">
+                  <h4 className="text-xs font-semibold text-[#0f172a] truncate">{displayName}</h4>
+                  <p className="text-[9px] text-gray-500 truncate">{displayEmail}</p>
                 </div>
+                <button
+                  onClick={signOut}
+                  aria-label="Sign out"
+                  className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                >
+                  <LogOut size={14} />
+                </button>
               </div>
             </div>
           </aside>
@@ -350,11 +381,11 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
             {/* Profile widget */}
             <div className="hidden sm:flex items-center space-x-3 cursor-pointer p-1.5 hover:bg-[#f4f5fa] rounded-lg transition-colors" onClick={() => navigate('/settings')}>
               <div className="text-right">
-                <span className="text-xs font-semibold text-[#0f172a] block leading-none">Admin User</span>
-                <span className="text-[10px] text-gray-500">Pharmacy Central</span>
+                <span className="text-xs font-semibold text-[#0f172a] block leading-none">{displayName}</span>
+                <span className="text-[10px] text-gray-500">{roleLabel || 'Pharmacy Central'}</span>
               </div>
               <div className="w-8 h-8 rounded-full bg-blue-100 border border-blue-200 text-blue-600 font-bold flex items-center justify-center">
-                PA
+                {initials}
               </div>
             </div>
           </div>

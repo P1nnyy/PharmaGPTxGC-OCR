@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { RunProvider } from './context/RunContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 // Layouts
@@ -28,14 +29,48 @@ import { RowMathPage } from './pages/RowMathPage';
 import { QualityGatePage } from './pages/QualityGatePage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { LoginPage } from './pages/LoginPage';
 
 import './App.css';
+
+
+/**
+ * Nothing renders until we know who is asking.
+ *
+ * Gating here rather than per-route means a page added later is protected by
+ * default - the failure mode of route-by-route guards is the route someone
+ * forgets. The backend enforces this independently; this only decides what to
+ * draw.
+ */
+const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, loading } = useAuth();
+
+  // Held blank rather than showing the login form, which would flash at
+  // someone who is already signed in while their token is being checked.
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#f4f5fa] flex items-center justify-center">
+        <div className="text-xs text-gray-400 font-medium">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) return <LoginPage />;
+  return <>{children}</>;
+};
 
 export const App: React.FC = () => {
   return (
     <Router>
-      <RunProvider>
+      <AuthProvider>
         <ErrorBoundary>
+          <AuthGate>
+            {/* Mounted inside the gate, not outside it: RunProvider fetches
+                the invoice list as soon as it mounts, and outside the gate
+                that request goes out before anyone has signed in - returning
+                401 and leaving the app showing zero invoices to a user who
+                has plenty. */}
+            <RunProvider>
           <Routes>
             {/* User-facing SaaS portal paths wrapped in SaaSLayout */}
             <Route
@@ -212,8 +247,10 @@ export const App: React.FC = () => {
             {/* Catch-all redirect to user dashboard */}
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
+            </RunProvider>
+          </AuthGate>
         </ErrorBoundary>
-      </RunProvider>
+      </AuthProvider>
     </Router>
   );
 };

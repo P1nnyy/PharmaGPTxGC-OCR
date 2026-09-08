@@ -513,3 +513,19 @@ export interface InventoryResponse {
   low_stock_threshold: number;
   expiring_within_days: number;
 }
+
+// ---- Accounts -----------------------------------------------------------
+
+export interface AccountUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  is_active: boolean;
+  created_at: string | null;
+  last_login_at: string | null;
+}
+
+export interface AccountsResponse {
+  users: AccountUser[];
+}
