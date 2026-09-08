@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse, ReviewQueueResponse, DuplicateResponse, BulkConfirmResponse, ReferenceStatus, ReferenceSuggestResponse } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -252,6 +252,85 @@ export const apiClient = {
     const response = await fetch(`/products${suffix}`);
     if (!response.ok) {
       throw new Error('Failed to load products.');
+    }
+    return response.json();
+  },
+
+  // The catalogue banded by what each item still needs from a person. Each row
+  // carries its full product, so stepping through the queue costs no further
+  // requests - the per-item round trip was most of what made reviewing slow.
+  async getReviewQueue(band?: string): Promise<ReviewQueueResponse> {
+    const suffix = band && band !== 'all' ? `?band=${encodeURIComponent(band)}` : '';
+    const response = await fetch(`/products/review-queue${suffix}`);
+    if (!response.ok) {
+      throw new Error('Failed to load the review queue.');
+    }
+    return response.json();
+  },
+
+  // Merge suggestions. Read-only: acting on one goes through mergeProducts
+  // with the user choosing, exactly as a hand-picked merge does.
+  async getProductDuplicates(limit = 50): Promise<DuplicateResponse> {
+    const response = await fetch(`/products/duplicates?limit=${limit}`);
+    if (!response.ok) {
+      throw new Error('Failed to check for duplicates.');
+    }
+    return response.json();
+  },
+
+  // Approves a batch. Sends the exact ids the user was shown rather than a
+  // filter for the server to re-evaluate, so nothing that changed in between
+  // can be confirmed without having been seen.
+  async bulkConfirmProducts(productIds: string[]): Promise<BulkConfirmResponse> {
+    const response = await fetch('/products/bulk-confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product_ids: productIds })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to confirm products.');
+    }
+    return response.json();
+  },
+
+  // Whether the local reference index has been built. The UI must be able to
+  // say "reference data is not installed" rather than showing an empty result
+  // as though nothing matched.
+  async getReferenceStatus(): Promise<ReferenceStatus> {
+    const response = await fetch('/products/reference-status');
+    if (!response.ok) return { available: false };
+    return response.json();
+  },
+
+  // Reference proposals. Read-only, and batchable because the index is local
+  // — an empty id list means the whole catalogue.
+  async getReferenceSuggestions(productIds: string[] = []): Promise<ReferenceSuggestResponse> {
+    const response = await fetch('/products/reference-suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product_ids: productIds })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Reference lookup failed.');
+    }
+    return response.json();
+  },
+
+  // Writes approved proposals. The values are sent back rather than
+  // recomputed, so what lands is what the user was shown.
+  async applyReferenceSuggestions(
+    items: Array<{ product_id: string; fields: Record<string, any> }>
+  ): Promise<{ applied: string[]; skipped: Array<{ id: string; reason: string }> }> {
+    const response = await fetch('/products/reference-apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Could not apply reference details.');
     }
     return response.json();
   },

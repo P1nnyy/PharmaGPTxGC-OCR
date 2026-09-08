@@ -105,8 +105,11 @@ def init_graph_db():
         ensure_bootstrap_tenant()
         # Imported here rather than at module scope: product_repository imports
         # get_driver from this module, so a top-level import would be circular.
-        from db.product_repository import migrate_legacy_products
+        from db.product_repository import migrate_legacy_products, repair_provenance
 
         migrate_legacy_products()
+        # Self-heals records written before confirmed/suggested were enforced
+        # as disjoint. A no-op once there is nothing left to repair.
+        repair_provenance()
     except Exception as e:
         logger.warning(f"[NEO4J] Startup initialization skipped: {type(e).__name__}: {e}")

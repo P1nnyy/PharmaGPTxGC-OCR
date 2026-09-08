@@ -209,11 +209,22 @@ export interface Product {
   pack_multiplier: number | null;
   base_unit: string | null;
   manufacturer: string | null;
+  // Active ingredients and their strengths, from the reference catalogue.
+  composition?: string | null;
   hsn: string | null;
   schedule: string | null;
   notes: string | null;
   // Which fields a human actually approved, as opposed to the parser guessing.
   confirmed_fields: string[];
+  // Fields a person recorded as genuinely absent, rather than values they
+  // approved. Kept apart from confirmed_fields because a blank has no
+  // value to approve, and conflating them let empty fields display as
+  // confirmed and silence their own warnings.
+  acknowledged_fields?: string[];
+  // Fields PharmaGPT filled from the reference catalogue. Neither read from
+  // the invoice nor approved by anyone — labelled as a suggestion so it is
+  // never mistaken for either.
+  suggested_fields?: string[];
   review_status: 'needs_review' | 'confirmed';
   // Parser confidence, kept per field so the UI can show what to double-check.
   brand_confidence?: number;
@@ -319,6 +330,101 @@ export interface ProductSummary {
 export interface ProductListResponse {
   products: Product[];
   summary: ProductSummary;
+}
+
+// What a product still needs from a person. The three bands are the whole
+// point of the review screen: they separate the items that want thought from
+// the ones that want a signature.
+export type ReviewBand = 'ready' | 'review' | 'blocked';
+
+export interface ReviewAssessment {
+  product_id: string;
+  band: ReviewBand;
+  // Why it is in this band, in words. Shown instead of a score, because the
+  // reviewer's question is never "how confident" but "what is wrong with it".
+  reasons: string[];
+  // Imperfect but not blocking - a missing HSN, an unrecorded manufacturer.
+  caveats: string[];
+  weakest_field: string | null;
+  product: Product;
+}
+
+export interface ReviewQueueResponse {
+  items: ReviewAssessment[];
+  counts: Record<ReviewBand, number>;
+  total_outstanding: number;
+  catalogue_total: number;
+}
+
+export interface DuplicateCandidate {
+  product_ids: string[];
+  names: string[];
+  score: number;
+  verdict: 'likely' | 'possible';
+  reasons: string[];
+  suggested_target: string;
+}
+
+export interface DuplicateResponse {
+  candidates: DuplicateCandidate[];
+  scanned: number;
+}
+
+export interface BulkConfirmResponse {
+  confirmed: string[];
+  skipped: Array<{ id: string; reason: string }>;
+}
+
+// A proposal from the local reference catalogue. Split into three buckets
+// because they carry different authority: new_fields fills a blank,
+// expansions say the same thing more fully (MICR -> Micro Labs Ltd), and
+// conflicts are genuine disagreements that only a person should settle.
+export interface ReferenceCandidate {
+  brand_name: string;
+  manufacturer: string | null;
+  dosage_form: string | null;
+  primary_strength: string | null;
+  pack_size: number | null;
+  composition: string | null;
+  discontinued: boolean;
+  score: number;
+}
+
+export interface ReferenceContested {
+  field: string;
+  reason: string;
+}
+
+export interface ReferenceProposal {
+  product_id: string;
+  query: string;
+  status: 'ok' | 'no_match';
+  message?: string;
+  match_count?: number;
+  score?: number;
+  reasons?: string[];
+  composition?: string | null;
+  therapeutic_class?: string | null;
+  listed_price?: number | null;
+  fields: Record<string, any>;
+  new_fields: Record<string, any>;
+  expansions: Record<string, { current: any; suggested: any }>;
+  conflicts: Record<string, { current: any; suggested: any }>;
+  contested: ReferenceContested[];
+  candidates: ReferenceCandidate[];
+}
+
+export interface ReferenceSuggestResponse {
+  results: ReferenceProposal[];
+  matched: number;
+  fillable: number;
+  scanned: number;
+}
+
+export interface ReferenceStatus {
+  available: boolean;
+  source?: string;
+  rows?: string;
 }
 
 export interface CanonicalInvoice {
