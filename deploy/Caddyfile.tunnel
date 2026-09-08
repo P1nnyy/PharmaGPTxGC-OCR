@@ -15,9 +15,20 @@
 # Everything else - the auth gate, the API routing, the SPA fallback - is
 # identical, so behaviour behind the tunnel matches the VPS deployment.
 :80 {
-	basic_auth {
-		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
-	}
+	# No basic_auth here, deliberately. HTTP allows one Authorization header,
+	# and the application sends `Authorization: Bearer <jwt>` on every API
+	# call - which replaces the browser's automatic `Authorization: Basic`.
+	# Caddy then saw a Bearer where it wanted Basic, answered 401 with
+	# `WWW-Authenticate: Basic`, and the browser popped its native sign-in
+	# dialog on every request a signed-in user made. The two schemes cannot
+	# share the header, so the outer gate had to go once the app grew a real
+	# one of its own.
+	#
+	# Access is now the application's own: nothing reads or writes pharmacy
+	# data without a session, and each account is confined to its own
+	# workspace. BASIC_AUTH_USER / BASIC_AUTH_HASH are left in .env.prod,
+	# unused, in case this file is ever reused for a deployment with no
+	# application-level auth.
 
 	encode gzip
 
