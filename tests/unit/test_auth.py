@@ -35,6 +35,7 @@ def account(**overrides) -> dict:
         "id": "u1", "email": "pharmacist@example.com", "name": "Test",
         "role": "pharmacist", "is_active": True,
         "created_at": "2026-09-08T00:00:00Z", "last_login_at": None,
+        "pharmacy_id": "ph1",
     }
     base.update(overrides)
     return base

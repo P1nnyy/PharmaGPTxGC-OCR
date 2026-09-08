@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db.graph_db import ensure_bootstrap_tenant, ensure_constraints  # noqa: E402
+from db.graph_db import ensure_constraints  # noqa: E402
 from db.repositories import user_repository  # noqa: E402
 
 
@@ -47,10 +47,9 @@ def main() -> int:
             print("Passwords did not match.", file=sys.stderr)
             return 2
 
-    # The account hangs off the bootstrap Pharmacy, which may not exist yet on
-    # a fresh database.
+    # Each account provisions its own workspace, so nothing needs to exist
+    # first beyond the constraints.
     ensure_constraints()
-    ensure_bootstrap_tenant()
 
     try:
         user = user_repository.create_user(

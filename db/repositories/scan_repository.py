@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.config import settings
+from core.tenancy import current_tenant
 from core.logger import logger
 from db.graph_db import get_driver
 
@@ -54,7 +55,7 @@ def record_scan(
     Losing the count of that scan is a smaller harm than turning a good upload
     into a 500, so a ledger failure is logged and swallowed.
     """
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     try:
         driver = get_driver()
         with driver.session() as session:
@@ -122,7 +123,7 @@ def scan_activity(
     """
     if granularity not in GRANULARITIES:
         granularity = "month"
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
 
     driver = get_driver()
     with driver.session() as session:

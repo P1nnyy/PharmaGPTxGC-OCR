@@ -19,6 +19,7 @@ Two rules hold across the queries:
 from typing import Any, Optional
 
 from core.config import settings
+from core.tenancy import current_tenant
 from db.graph_db import get_driver
 
 # Reports cover verified invoices by default: an invoice still in review may
@@ -58,7 +59,7 @@ _LINE_ROLLUP = """
 
 
 def _run(query: str, **params) -> list[dict]:
-    params.setdefault("pharmacy_id", settings.DEFAULT_PHARMACY_ID)
+    params.setdefault("pharmacy_id", current_tenant())
     driver = get_driver()
     with driver.session() as session:
         return session.execute_read(lambda tx: [r.data() for r in tx.run(query, **params)])

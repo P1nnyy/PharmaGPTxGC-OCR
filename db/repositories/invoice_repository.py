@@ -2,6 +2,7 @@ import uuid
 from typing import Any, Optional
 
 from core.config import settings
+from core.tenancy import current_tenant
 from core.dates import normalize_expiry, normalize_invoice_date
 from core.logger import logger
 from db import product_repository
@@ -52,7 +53,7 @@ def save_invoice(
     image_object_key may be a single key or a list of keys, one per page, in
     page order.
     """
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     user_id = user_id or settings.DEFAULT_USER_ID
     invoice_id = invoice_id or str(uuid.uuid4())
     image_keys = _as_image_key_list(image_object_key)
@@ -558,7 +559,7 @@ def update_line_item_amounts(amounts: dict[str, float]) -> int:
 
 
 def list_invoices(pharmacy_id: Optional[str] = None) -> list[dict]:
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     driver = get_driver()
     with driver.session() as session:
         return session.execute_read(_list_invoices_tx, pharmacy_id)

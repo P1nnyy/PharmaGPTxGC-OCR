@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.config import settings
+from core.tenancy import current_tenant
 from core.logger import logger
 from db.graph_db import get_driver
 from extraction.normalizers.product_parser import (
@@ -824,7 +825,7 @@ def _shape_product(record) -> dict:
 
 
 def list_products(pharmacy_id: Optional[str] = None) -> list[dict]:
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     driver = get_driver()
     with driver.session() as session:
         records = session.execute_read(
@@ -847,7 +848,7 @@ def list_products(pharmacy_id: Optional[str] = None) -> list[dict]:
 def get_product(product_id: str, pharmacy_id: Optional[str] = None) -> Optional[dict]:
     """Full detail including every line item that fed this product, so the
     reviewer can see the actual invoice rows behind a merge before trusting it."""
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     driver = get_driver()
     with driver.session() as session:
         record = session.execute_read(
@@ -1366,7 +1367,7 @@ def reparse_products(pharmacy_id: Optional[str] = None) -> dict:
     is left exactly as the pharmacist set it, even when the parser now
     disagrees. Only guesses are re-made.
     """
-    pharmacy_id = pharmacy_id or settings.DEFAULT_PHARMACY_ID
+    pharmacy_id = pharmacy_id or current_tenant()
     driver = get_driver()
 
     with driver.session() as session:

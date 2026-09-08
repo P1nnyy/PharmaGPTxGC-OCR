@@ -25,6 +25,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    name: str = ""
+    password: str = Field(min_length=12)
+    confirm_password: str
+    pharmacy_name: str = ""
+
+
 class CreateUserRequest(BaseModel):
     email: str
     name: str = ""
@@ -74,6 +82,38 @@ def login(payload: LoginRequest):
     return {"access_token": token, "token_type": "bearer", "user": user_repository.get_user(record["id"])}
 
 
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(payload: RegisterRequest):
+    """Self-serve sign-up. Creates an account and the empty workspace it owns.
+
+    Public, and safe to be public only because of that second half: a new
+    account lands in a pharmacy of its own with nothing attached to it. There
+    is no shared pile to be dropped into, so a stranger registering sees an
+    empty application rather than someone else's invoices.
+    """
+    if payload.password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="The two passwords do not match.")
+    try:
+        user = user_repository.create_user(
+            email=payload.email, name=payload.name,
+            password=payload.password, pharmacy_name=payload.pharmacy_name,
+        )
+    except user_repository.UserExistsError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Signed in immediately: making someone register and then type the same
+    # credentials again is friction with nothing behind it, since registering
+    # already proved they hold the address.
+    try:
+        token = create_access_token(user["id"], user["email"], user["role"])
+    except AuthConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    user_repository.record_login(user["id"])
+    return {"access_token": token, "token_type": "bearer", "user": user_repository.get_user(user["id"])}
+
+
 @router.get("/me")
 def me(user: dict = Depends(current_user)):
     """Who the current token belongs to. The SPA calls this on load to decide
@@ -89,15 +129,19 @@ def roles(user: dict = Depends(current_user)):
 
 @router.get("/users")
 def list_users(user: dict = Depends(require_super_admin)):
-    return {"users": user_repository.list_users()}
+    return {"users": user_repository.list_users(user["pharmacy_id"])}
 
 
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 def create_user(payload: CreateUserRequest, user: dict = Depends(require_super_admin)):
     try:
+        # Staff join the admin's existing workspace rather than getting one
+        # of their own - that is the difference between adding a colleague
+        # and creating a separate customer.
         return user_repository.create_user(
             email=payload.email, name=payload.name,
             password=payload.password, role=payload.role,
+            pharmacy_id=user["pharmacy_id"],
         )
     except user_repository.UserExistsError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
@@ -120,7 +164,7 @@ def update_user(user_id: str, payload: UpdateUserRequest, user: dict = Depends(r
             raise HTTPException(status_code=400, detail="You cannot remove your own Super Admin role.")
 
     if payload.is_active is False or (payload.role and payload.role != "super_admin"):
-        _guard_last_admin(user_id)
+        _guard_last_admin(user_id, user["pharmacy_id"])
 
     try:
         return user_repository.update_user(
@@ -141,10 +185,10 @@ def set_password(user_id: str, payload: PasswordRequest, user: dict = Depends(re
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _guard_last_admin(user_id: str) -> None:
+def _guard_last_admin(user_id: str, pharmacy_id: str) -> None:
     """Refuses a change that would leave no active super admin at all."""
     others = [
-        u for u in user_repository.list_users()
+        u for u in user_repository.list_users(pharmacy_id)
         if u["id"] != user_id and u["role"] == "super_admin" and u["is_active"]
     ]
     if not others:

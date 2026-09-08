@@ -7,6 +7,7 @@ from fastapi import UploadFile, HTTPException
 from api.routers.uploads import upload_invoice
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
 from services.validators.content_validator import ContentAssessment
+from core.tenancy import tenant_scope
 
 # These tests exercise engine routing, not image content, and use a 1x1 GIF as
 # a stand-in payload. That is genuinely blank, so the pre-flight content gate
@@ -52,8 +53,20 @@ async def test_legacy_route_default(clean_env):
         assert response.text == "legacy text"
         mock_process.assert_called_once()
 
+@pytest.fixture
+def workspace():
+    """Ingestion writes into the caller's workspace, so one must be in scope.
+
+    The repository raises rather than defaulting to a shared tenant, which is
+    the behaviour that stops a mis-wired path writing into someone else's
+    pharmacy.
+    """
+    with tenant_scope("test-pharmacy"):
+        yield
+
+
 @pytest.mark.anyio
-async def test_azure_route_path(clean_env):
+async def test_azure_route_path(clean_env, workspace):
     """Verify that under azure config, upload_invoice invokes AzureDocumentIntelligenceEngine."""
     mock_file = MagicMock(spec=UploadFile)
     mock_file.content_type = "image/png"
@@ -121,7 +134,7 @@ async def test_content_gate_blocks_azure_call(clean_env):
 
 
 @pytest.mark.anyio
-async def test_content_gate_can_be_disabled(clean_env):
+async def test_content_gate_can_be_disabled(clean_env, workspace):
     """Escape hatch: with the gate off, the same payload reaches the engine."""
     mock_file = MagicMock(spec=UploadFile)
     mock_file.content_type = "image/png"

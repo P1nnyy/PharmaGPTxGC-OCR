@@ -77,32 +77,18 @@ def ensure_constraints():
     logger.info("[NEO4J] Constraints ensured.")
 
 
-def ensure_bootstrap_tenant():
-    """Creates the default Pharmacy/User used until real multi-tenant auth exists."""
-    driver = get_driver()
-    with driver.session() as session:
-        session.run(
-            """
-            MERGE (ph:Pharmacy {id: $pharmacy_id})
-            ON CREATE SET ph.name = $pharmacy_name, ph.created_at = datetime()
-            MERGE (u:User {id: $user_id})
-            ON CREATE SET u.email = $user_email, u.name = $pharmacy_name,
-                          u.role = 'owner', u.created_at = datetime()
-            MERGE (u)-[:MEMBER_OF {role: 'owner'}]->(ph)
-            """,
-            pharmacy_id=settings.DEFAULT_PHARMACY_ID,
-            pharmacy_name=settings.DEFAULT_PHARMACY_NAME,
-            user_id=settings.DEFAULT_USER_ID,
-            user_email=settings.DEFAULT_USER_EMAIL,
-        )
-    logger.info("[NEO4J] Bootstrap tenant ensured.")
+# ensure_bootstrap_tenant() is gone. It created a fixed Pharmacy and a
+# passwordless "owner" User from DEFAULT_PHARMACY_ID/DEFAULT_USER_ID, which
+# was the stand-in for authentication before there was any. Now that
+# registration provisions a workspace per account, a shared default tenant is
+# not a fallback - it is a pile every new account would land in, which is the
+# opposite of a clean slate.
 
 
 def init_graph_db():
     """Best-effort startup hook: never crashes the app if Neo4j is unreachable."""
     try:
         ensure_constraints()
-        ensure_bootstrap_tenant()
         # Imported here rather than at module scope: product_repository imports
         # get_driver from this module, so a top-level import would be circular.
         from db.product_repository import migrate_legacy_products, repair_provenance

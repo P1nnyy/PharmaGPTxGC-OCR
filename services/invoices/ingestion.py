@@ -19,6 +19,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from core.config import settings
+from core.tenancy import current_tenant
 from core.logger import logger
 from db.repositories import invoice_repository, scan_repository
 from services import image_storage
@@ -113,7 +114,7 @@ async def persist(
     # a mistake is tidied up.
     scan_id = await run_in_threadpool(
         scan_repository.record_scan,
-        settings.DEFAULT_PHARMACY_ID,
+        current_tenant(),
         len(pages),
         None,
         "extracted",
@@ -131,7 +132,7 @@ async def persist(
             object_keys.append(
                 await run_in_threadpool(
                     image_storage.upload_invoice_image,
-                    settings.DEFAULT_PHARMACY_ID,
+                    current_tenant(),
                     key_id,
                     page["bytes"],
                     page.get("content_type") or "image/jpeg",
@@ -143,7 +144,7 @@ async def persist(
             invoice_repository.save_invoice,
             invoice,
             object_keys,
-            settings.DEFAULT_PHARMACY_ID,
+            current_tenant(),
             settings.DEFAULT_USER_ID,
             invoice_id,
         )

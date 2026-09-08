@@ -16,6 +16,7 @@ subtracts here and the rest of the shape holds.
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from core.tenancy import current_tenant
 from db.graph_db import get_driver
 
 # Verified-only by default, for the same reason the reports are: an invoice
@@ -38,7 +39,8 @@ EXPIRING_WITHIN_DAYS = 180
 # product fall back to their own spelling and stay separate, which is the
 # honest reading - we do not know they are the same thing.
 _STOCK_QUERY = """
-    MATCH (inv:Invoice)-[:CONTAINS]->(li:LineItem)
+    MATCH (inv:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
+    MATCH (inv)-[:CONTAINS]->(li:LineItem)
     WHERE ($statuses IS NULL OR inv.status IN $statuses)
     OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
     OPTIONAL MATCH (li)-[:OF_ALIAS]->(al:ProductAlias)
@@ -118,7 +120,11 @@ def stock_on_hand(statuses: Optional[list[str]] = DEFAULT_STATUSES) -> dict[str,
     soon" means the same thing everywhere, and so it moves with the calendar
     instead of being pinned to a year someone typed once.
     """
-    rows = _run(_STOCK_QUERY, statuses=list(statuses) if statuses is not None else None)
+    rows = _run(
+        _STOCK_QUERY,
+        statuses=list(statuses) if statuses is not None else None,
+        pharmacy_id=current_tenant(),
+    )
 
     today = date.today()
     horizon = today + timedelta(days=EXPIRING_WITHIN_DAYS)

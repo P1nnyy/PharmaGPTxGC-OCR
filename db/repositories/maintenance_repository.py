@@ -8,18 +8,19 @@ Nothing in the request path should import this module.
 from typing import Any
 
 from core.config import settings
+from core.tenancy import current_tenant
 from db.graph_db import get_driver
 
 
 def _read(query: str, **params) -> list[dict]:
-    params.setdefault("pharmacy_id", settings.DEFAULT_PHARMACY_ID)
+    params.setdefault("pharmacy_id", current_tenant())
     driver = get_driver()
     with driver.session() as session:
         return session.execute_read(lambda tx: [r.data() for r in tx.run(query, **params)])
 
 
 def _write(query: str, **params) -> list[dict]:
-    params.setdefault("pharmacy_id", settings.DEFAULT_PHARMACY_ID)
+    params.setdefault("pharmacy_id", current_tenant())
     driver = get_driver()
     with driver.session() as session:
         return session.execute_write(lambda tx: [r.data() for r in tx.run(query, **params)])

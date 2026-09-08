@@ -8,7 +8,10 @@ what the route says it means.
 from datetime import date, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from api.routers.inventory import stock as stock_route
+from core.tenancy import tenant_scope
 from db.repositories import inventory_repository
 from db.repositories.inventory_repository import _parse_expiry, stock_on_hand
 
@@ -29,6 +32,18 @@ def row(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+@pytest.fixture(autouse=True)
+def workspace():
+    """Stock is tenant-scoped, so every read needs a workspace in scope.
+
+    Without one the repository raises rather than defaulting - that is
+    deliberate, and it is why this fixture exists instead of a fallback in
+    the production code.
+    """
+    with tenant_scope("test-pharmacy"):
+        yield
 
 
 def run_with(rows):

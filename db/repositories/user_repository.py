@@ -85,8 +85,17 @@ def _read(query: str, **params):
         return session.execute_read(lambda tx: [r for r in tx.run(query, **params)])
 
 
-def create_user(email: str, name: str, password: str, role: str = DEFAULT_ROLE) -> dict:
-    """Creates an account and returns it without its hash.
+def create_user(email: str, name: str, password: str, role: str = DEFAULT_ROLE,
+                pharmacy_id: Optional[str] = None, pharmacy_name: Optional[str] = None) -> dict:
+    """Creates an account, and by default the workspace it owns.
+
+    Registration provisions a new Pharmacy per account. That is what "a clean
+    slate" means concretely: invoices, products and vendors all hang off a
+    pharmacy, so a new tenant starts empty because there is nothing attached
+    to it yet - not because anything is filtered out of a shared pile.
+
+    Passing an existing `pharmacy_id` instead adds someone to a workspace that
+    already exists, which is how a Super Admin adds staff to their own.
 
     The uniqueness constraint on User.email is the authority on duplicates,
     not a prior lookup: checking first and inserting second leaves a window
@@ -95,38 +104,52 @@ def create_user(email: str, name: str, password: str, role: str = DEFAULT_ROLE) 
     email = normalize_email(email)
     if not email or "@" not in email:
         raise ValueError("A valid email address is required.")
-    if not password or len(password) < 12:
+    if password is not None and (not password or len(password) < 12):
         # Length beats composition rules: a 12-character passphrase resists
         # guessing better than "P@ss1" and people do not write it on a note.
         raise ValueError("Password must be at least 12 characters.")
 
-    record = None
+    display = (name or "").strip() or email.split("@")[0]
+    joining = pharmacy_id is not None
+    # Someone creating their own workspace administers it; someone being added
+    # to an existing one gets whatever role the admin chose.
+    effective_role = normalize_role(role) if joining else "super_admin"
+
+    params = dict(
+        id=str(uuid.uuid4()),
+        email=email,
+        name=display,
+        password_hash=hash_password(password) if password else None,
+        role=effective_role,
+        pharmacy_id=pharmacy_id or str(uuid.uuid4()),
+        pharmacy_name=(pharmacy_name or "").strip() or f"{display}'s pharmacy",
+    )
+
+    query = ("MATCH (ph:Pharmacy {id: $pharmacy_id})" if joining else
+             "MERGE (ph:Pharmacy {id: $pharmacy_id}) "
+             "ON CREATE SET ph.name = $pharmacy_name, ph.created_at = datetime()")
     try:
         record = _write(
-            """
-            MATCH (ph:Pharmacy {id: $pharmacy_id})
+            query + """
             CREATE (u:User {
                 id: $id, email: $email, name: $name,
                 password_hash: $password_hash, role: $role,
                 is_active: true, created_at: datetime(), last_login_at: null
             })
             MERGE (u)-[:MEMBER_OF {role: $role}]->(ph)
-            RETURN u
+            RETURN u, ph.id AS pharmacy_id
             """,
-            pharmacy_id=settings.DEFAULT_PHARMACY_ID,
-            id=str(uuid.uuid4()),
-            email=email,
-            name=(name or "").strip() or email.split("@")[0],
-            password_hash=hash_password(password),
-            role=normalize_role(role),
+            **params,
         )
     except Exception as e:
         if "already exists" in str(e) or "ConstraintValidationFailed" in type(e).__name__:
             raise UserExistsError(f"An account already exists for {email}.")
         raise
     if record is None:
-        raise RuntimeError("Bootstrap pharmacy is missing; cannot create a user.")
-    return _public(record["u"])
+        raise UnknownUserError("That workspace no longer exists.")
+    out = _public(record["u"])
+    out["pharmacy_id"] = record["pharmacy_id"]
+    return out
 
 
 def credentials_for(email: str) -> Optional[dict]:
@@ -145,23 +168,46 @@ def credentials_for(email: str) -> Optional[dict]:
 
 
 def get_user(user_id: str) -> Optional[dict]:
-    rows = _read("MATCH (u:User {id: $id}) RETURN u", id=user_id)
-    return _public(rows[0]["u"]) if rows else None
+    """The account plus the workspace it belongs to.
 
-
-def list_users() -> list[dict]:
-    """Every account, newest last. Accounts with no password (the bootstrap
-    tenant node) are excluded - they cannot sign in and showing them as users
-    would misrepresent who has access."""
+    `pharmacy_id` rides along on every request because it scopes every query
+    the caller will make; fetching it separately would mean each router
+    remembering to, and the one that forgot would read another tenant's data.
+    """
     rows = _read(
-        "MATCH (u:User) WHERE u.password_hash IS NOT NULL "
-        "RETURN u ORDER BY u.created_at ASC"
+        "MATCH (u:User {id: $id}) OPTIONAL MATCH (u)-[:MEMBER_OF]->(ph:Pharmacy) "
+        "RETURN u, ph.id AS pharmacy_id, ph.name AS pharmacy_name",
+        id=user_id,
+    )
+    if not rows:
+        return None
+    out = _public(rows[0]["u"])
+    out["pharmacy_id"] = rows[0]["pharmacy_id"]
+    out["pharmacy_name"] = rows[0]["pharmacy_name"]
+    return out
+
+
+def list_users(pharmacy_id: str) -> list[dict]:
+    """Everyone in one workspace, newest last.
+
+    Scoped rather than global: an admin manages their own staff, and the
+    account list is exactly the kind of query where a missing tenant filter
+    quietly leaks every customer's team to every other customer.
+    """
+    rows = _read(
+        "MATCH (u:User)-[:MEMBER_OF]->(:Pharmacy {id: $pharmacy_id}) "
+        "RETURN u ORDER BY u.created_at ASC",
+        pharmacy_id=pharmacy_id,
     )
     return [_public(r["u"]) for r in rows]
 
 
-def count_users() -> int:
-    rows = _read("MATCH (u:User) WHERE u.password_hash IS NOT NULL RETURN count(u) AS c")
+def count_users(pharmacy_id: Optional[str] = None) -> int:
+    if pharmacy_id:
+        rows = _read("MATCH (u:User)-[:MEMBER_OF]->(:Pharmacy {id: $pharmacy_id}) "
+                     "RETURN count(u) AS c", pharmacy_id=pharmacy_id)
+    else:
+        rows = _read("MATCH (u:User) RETURN count(u) AS c")
     return int(rows[0]["c"]) if rows else 0
 
 

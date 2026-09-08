@@ -11,6 +11,7 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException, status
 
 from core.security import decode_token
+from core.tenancy import set_current_tenant
 from db.repositories import user_repository
 
 _UNAUTHENTICATED = HTTPException(
@@ -49,6 +50,11 @@ def current_user(authorization: Optional[str] = Header(None)) -> dict:
     user = user_repository.get_user(claims["sub"])
     if user is None or not user.get("is_active"):
         raise _UNAUTHENTICATED
+
+    # From here on every repository call is scoped to this account's
+    # workspace. Set once, at the only point where identity is established,
+    # so no individual query has to remember.
+    set_current_tenant(user.get("pharmacy_id"))
     return user
 
 
