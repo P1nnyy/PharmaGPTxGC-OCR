@@ -474,3 +474,42 @@ export interface ItemTypesResponse {
   count_units: string[];
   measure_units: string[];
 }
+
+// ---- Inventory: stock derived from verified invoices ---------------------
+// Not a stored table — the backend composes these from the purchase history,
+// so a corrected quantity on the review screen corrects the stock figure with
+// nothing to re-sync. Quantities are what was received; with no dispensing
+// feed yet, that is not the same as what remains.
+
+export interface InventoryItem {
+  id: string;
+  product: string;
+  product_id: string | null;
+  batch: string | null;
+  expiry: string | null;
+  quantity: number;
+  free_quantity: number;
+  mrp: number | null;
+  gst: number | null;
+  source_invoice: string | null;
+  deliveries: number;
+  is_low_stock: boolean;
+  is_expired: boolean;
+  is_expiring_soon: boolean;
+}
+
+export interface InventoryStats {
+  total_skus: number;
+  total_quantity: number;
+  low_stock: number;
+  expiring_soon: number;
+  expired: number;
+}
+
+export interface InventoryResponse {
+  items: InventoryItem[];
+  stats: InventoryStats;
+  statuses: string[] | null;
+  low_stock_threshold: number;
+  expiring_within_days: number;
+}

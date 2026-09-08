@@ -64,6 +64,12 @@ www.{$DOMAIN} {
 		reverse_proxy backend:8000
 	}
 
+	# Only the API subpaths: /inventory itself is a page in the SPA, so it
+	# must not be forwarded. Same reason /reports uses a trailing slash.
+	handle /inventory/* {
+		reverse_proxy backend:8000
+	}
+
 	# Everything else is the SPA. try_files falls back to index.html so
 	# client-side routes like /catalogue or /review/<id> resolve on a hard
 	# refresh instead of 404ing - there is no file at that path, only a

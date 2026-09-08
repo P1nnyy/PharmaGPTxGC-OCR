@@ -1,66 +1,78 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Package, AlertTriangle, Calendar, BarChart2 } from 'lucide-react';
+import { apiClient } from '../api/client';
+import type { InventoryItem, InventoryStats } from '../api/types';
 
-interface InventoryItem {
-  id: string;
-  product: string;
-  batch: string;
-  expiry: string;
-  quantity: number;
-  mrp: number;
-  gst: number;
-  source_invoice: string;
-}
+// Stock is read from the server, not from this browser. It used to live in
+// localStorage, written by whichever machine happened to press "Mark as
+// Verified" - which is why the page was empty for everyone else, including on
+// the deployed site. The invoices were always the real record; now the page
+// reads them.
 
+const EMPTY_STATS: InventoryStats = {
+  total_skus: 0,
+  total_quantity: 0,
+  low_stock: 0,
+  expiring_soon: 0,
+  expired: 0
+};
 
+// Stored as ISO for sorting and comparison; pharmacists read expiry as MM/YY.
+const formatExpiry = (value: string | null): string => {
+  if (!value) return '—';
+  const match = /^(\d{4})-(\d{2})/.exec(value);
+  return match ? `${match[2]}/${match[1].slice(2)}` : value;
+};
+
+const formatMoney = (value: number | null): string =>
+  value === null || value === undefined ? '—' : `₹${value.toFixed(2)}`;
 
 export const InventoryPage: React.FC = () => {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [stats, setStats] = useState<InventoryStats>(EMPTY_STATS);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  // Load inventory on mount
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('pharmaflow_inventory');
-      let items: InventoryItem[] = [];
-      if (stored) {
-        items = JSON.parse(stored);
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiClient.getInventory();
+        if (cancelled) return;
+        setInventory(data.items);
+        setStats(data.stats);
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        // Say the load failed rather than rendering zeroes, which would read
+        // as "you have no stock" - a different and much worse claim.
+        setError(e instanceof Error ? e.message : 'Failed to load inventory.');
+        setInventory([]);
+        setStats(EMPTY_STATS);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      // Clean up any old dummy seed items if they exist
-      const cleaned = items.filter((item) => !item.id.startsWith('inv-seed-'));
-      localStorage.setItem('pharmaflow_inventory', JSON.stringify(cleaned));
-      setInventory(cleaned);
-    } catch (e) {
-      console.error(e);
-      setInventory([]);
-    }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Filter list
-  const filteredInventory = inventory.filter(
-    (item) =>
-      item.product.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.batch.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.source_invoice.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredInventory = inventory.filter((item) => {
+    const term = searchTerm.toLowerCase();
+    return (
+      (item.product || '').toLowerCase().includes(term) ||
+      (item.batch || '').toLowerCase().includes(term) ||
+      (item.source_invoice || '').toLowerCase().includes(term)
+    );
+  });
 
-  // Compute stat counters
-  const totalSKUs = inventory.length;
-  
-  const lowStockCount = inventory.filter((item) => item.quantity <= 10).length;
-
-  // Filter items expiring soon (e.g., in 2025 or before)
-  const expiringSoonCount = inventory.filter((item) => {
-    if (!item.expiry) return false;
-    const parts = item.expiry.split('/');
-    if (parts.length === 2) {
-      const year = parseInt(parts[1]);
-      return year <= 2026;
-    }
-    return false;
-  }).length;
-
-  const totalQuantity = inventory.reduce((sum, item) => sum + item.quantity, 0);
+  const totalSKUs = stats.total_skus;
+  const lowStockCount = stats.low_stock;
+  const expiringSoonCount = stats.expiring_soon;
+  const totalQuantity = stats.total_quantity;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -150,44 +162,45 @@ export const InventoryPage: React.FC = () => {
               {filteredInventory.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="text-center py-12 text-gray-400 font-medium">
-                    No matching stock items in inventory.
+                    {loading
+                      ? 'Loading stock from verified invoices...'
+                      : error
+                        ? error
+                        : inventory.length === 0
+                          ? 'No stock yet. Verify an invoice and its items appear here.'
+                          : 'No matching stock items in inventory.'}
                   </td>
                 </tr>
               ) : (
                 filteredInventory.map((item) => {
-                  const isLow = item.quantity <= 10;
-                  
-                  // Check if expiring soon (2025/2026 or before)
-                  let isExpiring = false;
-                  if (item.expiry) {
-                    const parts = item.expiry.split('/');
-                    if (parts.length === 2) {
-                      isExpiring = parseInt(parts[1]) <= 2026;
-                    }
-                  }
+                  // Both flags come from the server, which knows today's
+                  // date. The old client-side test hardcoded "year <= 2026"
+                  // and would have quietly called everything expiring.
+                  const isLow = item.is_low_stock;
+                  const isExpiring = item.is_expiring_soon || item.is_expired;
 
                   return (
                     <tr key={item.id} className="hover:bg-[#f8fafc] transition-colors">
                       <td className="p-4 pl-6 font-semibold text-[#0f172a]">{item.product}</td>
-                      <td className="p-4 font-mono font-medium">{item.batch}</td>
+                      <td className="p-4 font-mono font-medium">{item.batch || '—'}</td>
                       <td className="p-4">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                           isExpiring ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'text-gray-500'
                         }`}>
-                          {item.expiry}
+                          {formatExpiry(item.expiry)}
                         </span>
                       </td>
                       <td className="p-4 text-right">
                         <span className={`font-bold ${isLow ? 'text-red-600' : 'text-gray-900'}`}>
-                          {item.quantity} units
+                          {item.quantity.toLocaleString()} units
                         </span>
                         {isLow && (
                           <span className="block text-[9px] text-red-500 font-semibold">Low Stock</span>
                         )}
                       </td>
-                      <td className="p-4 text-right font-medium">₹{item.mrp.toFixed(2)}</td>
-                      <td className="p-4 text-right text-gray-500 font-medium">{item.gst}%</td>
-                      <td className="p-4 pr-6 text-gray-500 font-mono text-[10px]">{item.source_invoice}</td>
+                      <td className="p-4 text-right font-medium">{formatMoney(item.mrp)}</td>
+                      <td className="p-4 text-right text-gray-500 font-medium">{item.gst === null || item.gst === undefined ? '—' : `${item.gst}%`}</td>
+                      <td className="p-4 pr-6 text-gray-500 font-mono text-[10px]">{item.source_invoice || '—'}</td>
                     </tr>
                   );
                 })

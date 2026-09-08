@@ -6,7 +6,7 @@ status codes. Business rules live in `services/`, Cypher in `db/repositories/`.
 
 from fastapi import APIRouter
 
-from api.routers import health, invoices, item_types, products, reports, uploads
+from api.routers import health, inventory, invoices, item_types, products, reports, uploads
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -15,5 +15,6 @@ api_router.include_router(uploads.router)
 api_router.include_router(products.router)
 api_router.include_router(item_types.router)
 api_router.include_router(reports.router)
+api_router.include_router(inventory.router)
 
 __all__ = ["api_router"]

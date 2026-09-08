@@ -60,6 +60,12 @@
 		reverse_proxy backend:8000
 	}
 
+	# Only the API subpaths: /inventory itself is a page in the SPA, so it
+	# must not be forwarded. Same reason /reports uses a trailing slash.
+	handle /inventory/* {
+		reverse_proxy backend:8000
+	}
+
 	# SPA fallback: /catalogue and /review/<id> are React Router routes with
 	# no file behind them, so a hard refresh must still serve index.html.
 	handle {

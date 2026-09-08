@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import { apiClient } from '../api/client';
@@ -91,13 +91,23 @@ export const InvoiceHistoryPage: React.FC = () => {
     .filter((r) => r.status === 'verified')
     .reduce((sum, r) => sum + (r.grand_total || 0), 0);
 
-  const totalSKUsCount = (() => {
-    try {
-      const stored = localStorage.getItem('pharmaflow_inventory');
-      if (stored) return JSON.parse(stored).length;
-    } catch {}
-    return 0;
-  })();
+  // Server-derived, like the Inventory page itself. Reading localStorage here
+  // counted only what this browser had verified, so the tile read zero
+  // everywhere else.
+  const [totalSKUsCount, setTotalSKUsCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getInventory()
+      .then((data) => {
+        if (!cancelled) setTotalSKUsCount(data.stats.total_skus);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const pendingReviewCount = runs.filter((r) => r.status === 'needs_review' || r.status === 'failed').length;
 

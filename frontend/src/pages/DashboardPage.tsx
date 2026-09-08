@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { apiClient } from '../api/client';
 import { useRun } from '../context/RunContext';
 import {
   Upload,
@@ -16,19 +17,24 @@ export const DashboardPage: React.FC = () => {
   const { runs } = useRun();
   const navigate = useNavigate();
 
-  // Load inventory list to count SKUs
-  const getInventoryCount = () => {
-    try {
-      const stored = localStorage.getItem('pharmaflow_inventory');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return parsed.length;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return 0; // Baseline zero count for testing
-  };
+  // SKU count comes from the server. It used to be read from localStorage,
+  // which meant the tile only ever counted what THIS browser had verified -
+  // zero on any other machine, including the deployed site.
+  const [inventoryItemsCount, setInventoryItemsCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getInventory()
+      .then((data) => {
+        if (!cancelled) setInventoryItemsCount(data.stats.total_skus);
+      })
+      // A failed tile stays at zero rather than breaking the dashboard.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Compute stat metrics based on Runs storage
   const totalInvoicesCount = runs.length;
@@ -36,7 +42,6 @@ export const DashboardPage: React.FC = () => {
     (r) => r.status === 'needs_review' || r.status === 'failed'
   ).length;
   const verifiedCount = runs.filter((r) => r.status === 'verified').length;
-  const inventoryItemsCount = getInventoryCount();
 
   // Grab the 5 most recent runs
   const recentInvoices = runs.slice(0, 5);

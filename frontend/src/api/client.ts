@@ -1,4 +1,4 @@
-import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse, ReviewQueueResponse, DuplicateResponse, BulkConfirmResponse, ReferenceStatus, ReferenceSuggestResponse } from './types';
+import type { RunSummary, OCRBlock, SelectedTable, CandidateTable, SemanticColumn, QualityGate, RowMathResult, Artifact, Product, ProductListResponse, EnrichmentResult, ItemType, ItemTypesResponse, ReviewQueueResponse, DuplicateResponse, BulkConfirmResponse, ReferenceStatus, ReferenceSuggestResponse, InventoryResponse } from './types';
 import {
   clearWorkbenchRunStorage,
   getDetailsData,
@@ -372,6 +372,18 @@ export const apiClient = {
   async listItemTypes(includeInactive = false): Promise<ItemTypesResponse> {
     const response = await fetch(`/item-types?include_inactive=${includeInactive}`);
     if (!response.ok) throw new Error('Failed to load item types.');
+    return response.json();
+  },
+
+  // ---- Inventory --------------------------------------------------------
+  // Server-derived, not browser-stored: the stock figures are the same on
+  // every machine because they are read from the invoices, not accumulated
+  // in whichever browser happened to verify the bill.
+
+  async getInventory(statuses?: string): Promise<InventoryResponse> {
+    const query = statuses ? `?statuses=${encodeURIComponent(statuses)}` : '';
+    const response = await fetch(`/inventory/stock${query}`);
+    if (!response.ok) throw new Error('Failed to load inventory.');
     return response.json();
   },
 
