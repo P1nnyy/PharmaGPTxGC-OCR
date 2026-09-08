@@ -6,7 +6,6 @@ import { apiClient } from '../api/client';
 import {
   BarChart3,
   Bell,
-  ChevronDown,
   HelpCircle,
   History,
   LayoutDashboard,
