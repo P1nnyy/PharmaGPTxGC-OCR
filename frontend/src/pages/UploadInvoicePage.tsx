@@ -63,11 +63,37 @@ export const UploadInvoicePage: React.FC = () => {
   // the wrong filename on the way out and discarding the other result.
   const [jobs, setJobs] = useState<UploadJob[]>([]);
   const jobSeq = useRef(0);
+  // The queue is the only place an upload reports itself, and on a phone it
+  // is far below the fold, so a starting job has to bring it into view.
+  const queueRef = useRef<HTMLDivElement>(null);
 
   const updateJob = (id: number, patch: Partial<UploadJob>) =>
     setJobs((prev) => prev.map((job) => (job.id === id ? { ...job, ...patch } : job)));
 
   const activeJobs = jobs.filter((j) => j.status === 'uploading' || j.status === 'extracting');
+
+  // Below `lg` the queue is stacked under the dropzone, the multi-page card
+  // and the feature grid - roughly a screen and a half down - so progress,
+  // success and failure all happened off-screen. From the phone the whole
+  // upload therefore looked like nothing: the picker closed, the dropzone was
+  // unchanged, and even the error explaining why sat where it could not be
+  // seen. Desktop needs none of this; the queue is already beside the dropzone
+  // there.
+  //
+  // This is an effect rather than a call inside processFile because the queue
+  // MOVES on the same state change (see `order-first` below). Scrolling before
+  // React has committed that reorder measures the element where it used to be
+  // and lands on the wrong part of the page.
+  const prevJobCount = useRef(0);
+  useEffect(() => {
+    if (
+      jobs.length > prevJobCount.current &&
+      !window.matchMedia('(min-width: 1024px)').matches
+    ) {
+      queueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    prevJobCount.current = jobs.length;
+  }, [jobs.length]);
 
   // Multi-page invoice states
   const [multiDragActive, setMultiDragActive] = useState(false);
@@ -144,6 +170,12 @@ export const UploadInvoicePage: React.FC = () => {
     if (e.target.files && e.target.files[0]) {
       processFile(e.target.files[0]);
     }
+    // Clear the input, as the multi-page one does. A file input only fires
+    // `change` when the selection differs from what it already holds, so
+    // after a failed upload, picking the SAME photo again fired nothing at
+    // all - the picker closed and the page did not react, which reads as the
+    // app ignoring the retry rather than as a retry being refused.
+    e.target.value = '';
   };
 
   const triggerFileInput = () => {
@@ -195,7 +227,7 @@ export const UploadInvoicePage: React.FC = () => {
       clearInterval(progressTimer);
       updateJob(id, {
         status: 'failed',
-        error: err.message || 'Invoice processing failed. Please check image format validity.'
+        error: err.message || 'Invoice processing failed before it could be saved.'
       });
     }
   };
@@ -642,10 +674,17 @@ export const UploadInvoicePage: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Side queue and tips sidebar */}
-        <div className="space-y-6">
+        {/* Right Side queue and tips sidebar.
+
+            While an upload has something to report, this moves to the TOP on
+            small screens (`order-first`), because scrolling to it once is not
+            enough on its own - the user reads the result, scrolls back to the
+            dropzone, and every later change is off-screen again. At `lg` and
+            up the grid puts it back beside the dropzone, where it always
+            fitted. */}
+        <div className={`space-y-6 ${jobs.length > 0 ? 'order-first lg:order-none' : ''}`}>
           {/* Processing Queue panel */}
-          <div className="bg-white rounded-2xl border border-[#e2e8f0] p-5 shadow-sm space-y-4">
+          <div ref={queueRef} className="bg-white rounded-2xl border border-[#e2e8f0] p-5 shadow-sm space-y-4 scroll-mt-4">
             <div className="flex items-center justify-between pb-3 border-b border-[#e2e8f0]">
               <h4 className="text-xs font-bold text-[#0f172a] uppercase tracking-wider">Processing Queue</h4>
               {activeJobs.length > 0 && (
@@ -742,7 +781,16 @@ export const UploadInvoicePage: React.FC = () => {
                         <div className="bg-red-50 border border-red-200/50 p-2 rounded-lg flex items-start space-x-2 text-[10px] text-red-700">
                           <AlertTriangle size={12} className="text-red-600 shrink-0 mt-0.5" />
                           <div className="space-y-1">
-                            <span className="font-semibold font-mono block">Extraction Failed</span>
+                            {/* Not "Extraction Failed". An upload passes through
+                                several stages - reading the file, the Azure
+                                call, then saving - and this card is shown for a
+                                failure at any of them. Naming one stage in the
+                                heading sent a real save failure (the workspace
+                                was missing, Azure had already returned a
+                                perfectly good invoice) to be investigated as an
+                                OCR problem. The stage that actually failed is in
+                                the message below. */}
+                            <span className="font-semibold font-mono block">Upload Failed</span>
                             <p className="text-[9px] text-gray-500 leading-normal">{job.error}</p>
                           </div>
                         </div>

@@ -9,6 +9,7 @@ tokens for a hosted identity provider later means changing this file and
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 
 from core.security import decode_token
 from core.tenancy import set_current_tenant
@@ -30,7 +31,7 @@ def _bearer(authorization: Optional[str]) -> Optional[str]:
     return token.strip() if scheme.lower() == "bearer" and token.strip() else None
 
 
-def current_user(authorization: Optional[str] = Header(None)) -> dict:
+async def current_user(authorization: Optional[str] = Header(None)) -> dict:
     """Resolves the caller, or raises 401.
 
     The account is re-read from the graph on every request rather than trusted
@@ -38,6 +39,17 @@ def current_user(authorization: Optional[str] = Header(None)) -> dict:
     deactivating an account take effect immediately instead of whenever the
     holder's token happens to expire - the difference between revoking access
     and asking politely.
+
+    This is `async def` for a reason that is not stylistic. A sync dependency
+    is run by FastAPI in a worker thread, via `anyio.to_thread.run_sync`, which
+    executes it inside a *copy* of the request's context. Values copy inwards
+    but not back out, so `set_current_tenant` below took effect only for the
+    duration of this function and was discarded before the endpoint ran - every
+    tenant-scoped query then raised TenantUnavailableError. Awaiting from the
+    request's own context is what makes the tenant stick.
+
+    The graph lookup is the one blocking call here, so it goes to a worker
+    thread explicitly rather than stalling the event loop.
     """
     token = _bearer(authorization)
     if not token:
@@ -47,7 +59,7 @@ def current_user(authorization: Optional[str] = Header(None)) -> dict:
     if not claims or not claims.get("sub"):
         raise _UNAUTHENTICATED
 
-    user = user_repository.get_user(claims["sub"])
+    user = await run_in_threadpool(user_repository.get_user, claims["sub"])
     if user is None or not user.get("is_active"):
         raise _UNAUTHENTICATED
 

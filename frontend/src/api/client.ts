@@ -97,8 +97,16 @@ export const apiClient = {
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.detail || 'Upload failed');
+      // Tolerate a non-JSON body, as the multi-page path already does. A 502
+      // from the edge while the backend restarts is HTML, and parsing it threw
+      // a SyntaxError that replaced the real failure with "Unexpected token
+      // '<'" in the card the user reads.
+      const err = await response.json().catch(() => ({} as any));
+      const detail = err.detail;
+      throw new Error(
+        (typeof detail === 'string' ? detail : detail?.message) ||
+        `Upload failed (${response.status}).`
+      );
     }
 
     const backendData = await response.json();

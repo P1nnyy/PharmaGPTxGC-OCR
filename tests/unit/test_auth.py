@@ -122,36 +122,47 @@ class TestLogin:
 
 
 class TestCurrentUser:
-    def test_rejects_a_missing_or_malformed_header(self):
+    """`current_user` is awaited here because it is `async def`, and that is
+    load-bearing rather than incidental: it is what lets it set the request's
+    workspace where the endpoint can still see it. See
+    test_tenancy.TestTheWorkspaceReachesTheEndpoint."""
+
+    @pytest.mark.anyio
+    async def test_rejects_a_missing_or_malformed_header(self):
         for header in (None, "", "Basic abc", "Bearer", "token-without-scheme"):
             with pytest.raises(HTTPException) as e:
-                deps.current_user(authorization=header)
+                await deps.current_user(authorization=header)
             assert e.value.status_code == 401
 
-    def test_resolves_a_valid_token_to_the_live_account(self):
+    @pytest.mark.anyio
+    async def test_resolves_a_valid_token_to_the_live_account(self):
         token = create_access_token("u1", "pharmacist@example.com", "pharmacist")
         with patch.object(user_repository, "get_user", return_value=account()):
-            assert deps.current_user(authorization=f"Bearer {token}")["id"] == "u1"
+            resolved = await deps.current_user(authorization=f"Bearer {token}")
+        assert resolved["id"] == "u1"
 
-    def test_deactivation_takes_effect_without_waiting_for_expiry(self):
+    @pytest.mark.anyio
+    async def test_deactivation_takes_effect_without_waiting_for_expiry(self):
         # The token is still cryptographically valid; the account is not.
         token = create_access_token("u1", "pharmacist@example.com", "pharmacist")
         with patch.object(user_repository, "get_user", return_value=account(is_active=False)):
             with pytest.raises(HTTPException):
-                deps.current_user(authorization=f"Bearer {token}")
+                await deps.current_user(authorization=f"Bearer {token}")
 
-    def test_a_deleted_account_stops_working_immediately(self):
+    @pytest.mark.anyio
+    async def test_a_deleted_account_stops_working_immediately(self):
         token = create_access_token("gone", "gone@example.com", "super_admin")
         with patch.object(user_repository, "get_user", return_value=None):
             with pytest.raises(HTTPException):
-                deps.current_user(authorization=f"Bearer {token}")
+                await deps.current_user(authorization=f"Bearer {token}")
 
-    def test_role_comes_from_the_graph_not_the_token(self):
+    @pytest.mark.anyio
+    async def test_role_comes_from_the_graph_not_the_token(self):
         # A token minted while the holder was an admin must not keep admin
         # rights after they are demoted.
         token = create_access_token("u1", "a@b.com", "super_admin")
         with patch.object(user_repository, "get_user", return_value=account(role="auditor")):
-            user = deps.current_user(authorization=f"Bearer {token}")
+            user = await deps.current_user(authorization=f"Bearer {token}")
             with pytest.raises(HTTPException) as e:
                 deps.require_super_admin(user)
         assert e.value.status_code == 403
