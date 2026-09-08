@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
 import {
   Upload,
@@ -35,6 +35,21 @@ interface UploadJob {
 export const UploadInvoicePage: React.FC = () => {
   const { uploadInvoiceFile, uploadInvoicePages } = useRun();
   const navigate = useNavigate();
+
+  // Trial allowance. Shown before the wall rather than after it: finding out
+  // the limit exists by being refused mid-upload is a worse way to learn it.
+  const [scanQuota, setScanQuota] = useState<{
+    scans_remaining: number | null; scan_limit: number | null; unlocked: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/auth/shop')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d?.quota) setScanQuota(d.quota); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const multiInputRef = useRef<HTMLInputElement>(null);
 
@@ -294,8 +309,30 @@ export const UploadInvoicePage: React.FC = () => {
     }
   };
 
+  const quotaBanner = scanQuota && !scanQuota.unlocked && (
+    <div className={`rounded-2xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
+      scanQuota.scans_remaining === 0
+        ? 'bg-red-50 border-red-200 text-red-800'
+        : 'bg-amber-50 border-amber-200 text-amber-800'
+    }`}>
+      <p className="text-[11px] sm:text-xs">
+        {scanQuota.scans_remaining === 0
+          ? `You have used your ${scanQuota.scan_limit} trial scans.`
+          : `${scanQuota.scans_remaining} of ${scanQuota.scan_limit} trial scans left.`}{' '}
+        Add your shop's details to scan without a limit.
+      </p>
+      <Link
+        to="/settings"
+        className="bg-[#0f172a] hover:bg-slate-800 text-white font-semibold rounded-lg px-3.5 py-1.5 text-[11px] whitespace-nowrap text-center"
+      >
+        Add shop details
+      </Link>
+    </div>
+  );
+
   return (
     <div className="space-y-6 animate-fade-in">
+      {quotaBanner}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-[#0f172a] tracking-tight">Upload New Invoice</h2>

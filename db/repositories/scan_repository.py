@@ -210,3 +210,22 @@ def mark_failed(scan_id: Optional[str], error: str) -> None:
             )
     except Exception as exc:
         logger.warning(f"[SCAN LEDGER] Could not mark scan {scan_id} failed: {exc}")
+
+
+def count_scans(pharmacy_id: Optional[str] = None) -> int:
+    """How many scans this workspace has ever run.
+
+    Counted from the ledger rather than from Invoice nodes on purpose: the
+    ledger is append-only, so deleting an invoice does not hand back an
+    allowance. Counting invoices would make the quota a formality - delete,
+    re-upload, repeat.
+    """
+    workspace = pharmacy_id or current_tenant()
+    driver = get_driver()
+    with driver.session() as session:
+        return session.execute_read(
+            lambda tx: tx.run(
+                "MATCH (s:ScanEvent {pharmacy_id: $pharmacy_id}) RETURN count(s) AS c",
+                pharmacy_id=workspace,
+            ).single()["c"]
+        )

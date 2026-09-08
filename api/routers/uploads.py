@@ -5,7 +5,7 @@ import uuid
 from typing import List
 
 from PIL import Image
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from core.config import settings
@@ -18,6 +18,7 @@ from services import cache_service, ocr_engine
 from services.error_handler import classify_error
 from services.invoices import ingestion
 from services.validators.image_validator import ImageValidator
+from api.deps import scan_quota
 
 router = APIRouter(tags=["uploads"])
 
@@ -28,6 +29,7 @@ async def upload_invoice_multipage(
     confirmed_single_order: bool = False,
     force: bool = False,
     bypass_cache: bool = False,
+    user: dict = Depends(scan_quota),
 ):
     """Processes several images as the pages of ONE invoice.
 
@@ -144,6 +146,7 @@ async def upload_invoice(
     extract: bool = False,
     benchmark_mode: bool = False,
     bypass_cache: bool = False,
+    user: dict = Depends(scan_quota),
 ):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")

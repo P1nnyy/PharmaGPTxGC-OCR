@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from api.deps import current_user, require_super_admin
+from api.deps import current_user, require_super_admin, scan_quota_state
 from core import google_oauth
 from core.config import settings
 from core.security import AuthConfigError, create_access_token, verify_password
@@ -378,6 +378,7 @@ def get_shop(user: dict = Depends(current_user)):
         "shop": profile,
         "missing": pharmacy_repository.missing_fields(profile),
         "required": list(pharmacy_repository.REQUIRED_FIELDS),
+        "quota": scan_quota_state(user["pharmacy_id"]),
     }
 
 
