@@ -29,24 +29,21 @@ import { RowMathPage } from './pages/RowMathPage';
 import { QualityGatePage } from './pages/QualityGatePage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
 import { SettingsPage } from './pages/SettingsPage';
-import { LoginPage } from './pages/LoginPage';
 
 import './App.css';
 
 
 /**
- * Nothing renders until we know who is asking.
+ * Held blank only while the stored token is being checked.
  *
- * Gating here rather than per-route means a page added later is protected by
- * default - the failure mode of route-by-route guards is the route someone
- * forgets. The backend enforces this independently; this only decides what to
- * draw.
+ * Signing in is no longer required to *look* at the application - the pages
+ * render and can be browsed, and every data endpoint returns 401 until
+ * someone signs in, so there is nothing behind the empty states to leak. The
+ * sign-in dialog lives in the layout, over whatever page you were on.
  */
 const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, loading } = useAuth();
+  const { loading } = useAuth();
 
-  // Held blank rather than showing the login form, which would flash at
-  // someone who is already signed in while their token is being checked.
   if (loading) {
     return (
       <div className="min-h-screen bg-[#f4f5fa] flex items-center justify-center">
@@ -54,8 +51,6 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       </div>
     );
   }
-
-  if (!user) return <LoginPage />;
   return <>{children}</>;
 };
 

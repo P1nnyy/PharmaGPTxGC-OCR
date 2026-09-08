@@ -22,11 +22,17 @@ export interface AuthUser {
 
 interface AuthState {
   user: AuthUser | null;
+  googleAvailable: boolean;
   /** True until the stored token has been checked, so the app does not flash
    *  the login screen at someone who is already signed in. */
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  register: (fields: {
+    email: string; name: string; password: string;
+    confirm_password: string; pharmacy_name?: string; invite_token?: string;
+  }) => Promise<void>;
   signOut: () => void;
+  refresh: () => Promise<void>;
   isSuperAdmin: boolean;
 }
 
@@ -38,6 +44,7 @@ installAuthFetch();
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [googleAvailable, setGoogleAvailable] = useState(false);
 
   const signOut = useCallback(() => {
     setToken(null);
@@ -45,6 +52,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => onSessionExpired(() => setUser(null)), []);
+
+  // Google hands the session back in the URL fragment. Read it, store it, and
+  // strip it from the address bar immediately so it is not left in history or
+  // copied when someone shares the link.
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash || hash.length < 2) return;
+    const params = new URLSearchParams(hash.slice(1));
+    const token = params.get('token');
+    const authError = params.get('auth_error');
+    if (token || authError) {
+      if (token) setToken(token);
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+      if (authError) window.dispatchEvent(new CustomEvent('pharmagpt:auth-error', { detail: authError }));
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch('/auth/google/status')
+      .then((r) => (r.ok ? r.json() : { available: false }))
+      .then((d) => setGoogleAvailable(Boolean(d.available)))
+      .catch(() => setGoogleAvailable(false));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,9 +117,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(data.user);
   }, []);
 
+  const register = useCallback(async (fields: {
+    email: string; name: string; password: string;
+    confirm_password: string; pharmacy_name?: string; invite_token?: string;
+  }) => {
+    const response = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Could not create the account.');
+    }
+    const data = await response.json();
+    setToken(data.access_token);
+    setUser(data.user);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (!getToken()) return;
+    const response = await fetch('/auth/me');
+    if (response.ok) setUser(await response.json());
+  }, []);
+
   const value = useMemo<AuthState>(
-    () => ({ user, loading, signIn, signOut, isSuperAdmin: user?.role === 'super_admin' }),
-    [user, loading, signIn, signOut]
+    () => ({ user, loading, googleAvailable, signIn, register, signOut, refresh,
+             isSuperAdmin: user?.role === 'super_admin' }),
+    [user, loading, googleAvailable, signIn, register, signOut, refresh]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

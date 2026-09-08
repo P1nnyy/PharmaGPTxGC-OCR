@@ -1,4 +1,5 @@
 import { useAuth } from '../context/AuthContext';
+import { AuthModal } from '../features/auth/AuthModal';
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useRun } from '../context/RunContext';
@@ -21,6 +22,7 @@ import {
 
 export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, signOut } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
 
   // Initials from the signed-in name, falling back to the email's first
   // letters. "PA" was hardcoded chrome; it now says who is actually here.
@@ -339,6 +341,25 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
         </div>
       )}
 
+      <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+
+      {/* Signed out, the pages still render but every data endpoint returns
+          401. Saying so once here is more honest than letting each panel show
+          its own error and look broken. */}
+      {!user && (
+        <div className="fixed bottom-0 inset-x-0 z-40 bg-[#0f172a] text-white px-5 py-3 flex items-center justify-between gap-4">
+          <p className="text-[11px] sm:text-xs">
+            You are browsing signed out — sign in to see your data.
+          </p>
+          <button
+            onClick={() => setAuthOpen(true)}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg px-3.5 py-1.5 text-[11px] whitespace-nowrap transition-colors"
+          >
+            Register/Sign in
+          </button>
+        </div>
+      )}
+
       {/* MAIN CONTAINER */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* GLOBAL TOP BAR */}
@@ -377,7 +398,18 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
             
             <div className="h-8 w-px bg-[#e2e8f0] hidden sm:block" />
 
+            {/* Signed out: one green call to action where the profile sits. */}
+            {!user && (
+              <button
+                onClick={() => setAuthOpen(true)}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl px-4 py-2 text-xs transition-colors shadow-sm"
+              >
+                Register/Sign in
+              </button>
+            )}
+
             {/* Profile widget */}
+            {user && (
             <div className="hidden sm:flex items-center space-x-3 cursor-pointer p-1.5 hover:bg-[#f4f5fa] rounded-lg transition-colors" onClick={() => navigate('/settings')}>
               <div className="text-right">
                 <span className="text-xs font-semibold text-[#0f172a] block leading-none">{displayName}</span>
@@ -387,6 +419,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
                 {initials}
               </div>
             </div>
+            )}
           </div>
         </header>
 

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Cpu, Package, Lock, Users } from 'lucide-react';
+import { Cpu, Package, Lock, Users, Store } from 'lucide-react';
 import { ItemTypesPanel } from './ItemTypesPanel';
 import { UsersPanel } from '../features/accounts/UsersPanel';
+import { ShopPanel } from '../features/accounts/ShopPanel';
 import { useAuth } from '../context/AuthContext';
 
 /**
@@ -21,12 +22,13 @@ import { useAuth } from '../context/AuthContext';
  */
 export const SaaSSettingsPage: React.FC = () => {
   const { isSuperAdmin } = useAuth();
-  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction' | 'accounts'>('catalogue');
+  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction' | 'accounts' | 'shop'>('shop');
 
   // Hidden for everyone else rather than shown-and-disabled: a tab that
   // always refuses is a worse answer than a tab that is not there. The server
   // rejects the calls regardless of what the UI draws.
   const tabs = [
+    { id: 'shop', label: 'Shop', icon: Store },
     { id: 'catalogue', label: 'Catalogue', icon: Package },
     { id: 'extraction', label: 'Extraction', icon: Cpu },
     ...(isSuperAdmin ? [{ id: 'accounts', label: 'Accounts', icon: Users }] : [])
@@ -71,7 +73,9 @@ export const SaaSSettingsPage: React.FC = () => {
         {/* Right Settings Form panel (Col Span 9) */}
         <div className="md:col-span-9 space-y-6">
           
-          {activeTab === 'accounts' && isSuperAdmin ? (
+          {activeTab === 'shop' ? (
+            <ShopPanel />
+          ) : activeTab === 'accounts' && isSuperAdmin ? (
             <UsersPanel />
           ) : activeTab === 'catalogue' ? (
             <ItemTypesPanel />
