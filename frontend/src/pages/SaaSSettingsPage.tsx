@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { Cpu, Package, Lock, Users, Store } from 'lucide-react';
+import { Cpu, Package, Lock, Users, Store, History } from 'lucide-react';
 import { ItemTypesPanel } from './ItemTypesPanel';
 import { UsersPanel } from '../features/accounts/UsersPanel';
 import { ShopPanel } from '../features/accounts/ShopPanel';
+import { InvitesPanel } from '../features/accounts/InvitesPanel';
+import { ActivityPanel } from '../features/accounts/ActivityPanel';
 import { useAuth } from '../context/AuthContext';
 
 /**
@@ -22,7 +24,7 @@ import { useAuth } from '../context/AuthContext';
  */
 export const SaaSSettingsPage: React.FC = () => {
   const { isSuperAdmin } = useAuth();
-  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction' | 'accounts' | 'shop'>('shop');
+  const [activeTab, setActiveTab] = useState<'catalogue' | 'extraction' | 'accounts' | 'shop' | 'activity'>('shop');
 
   // Hidden for everyone else rather than shown-and-disabled: a tab that
   // always refuses is a worse answer than a tab that is not there. The server
@@ -31,7 +33,8 @@ export const SaaSSettingsPage: React.FC = () => {
     { id: 'shop', label: 'Shop', icon: Store },
     { id: 'catalogue', label: 'Catalogue', icon: Package },
     { id: 'extraction', label: 'Extraction', icon: Cpu },
-    ...(isSuperAdmin ? [{ id: 'accounts', label: 'Accounts', icon: Users }] : [])
+    ...(isSuperAdmin ? [{ id: 'accounts', label: 'Accounts', icon: Users },
+                        { id: 'activity', label: 'Activity', icon: History }] : [])
   ];
 
   return (
@@ -75,8 +78,13 @@ export const SaaSSettingsPage: React.FC = () => {
           
           {activeTab === 'shop' ? (
             <ShopPanel />
+          ) : activeTab === 'activity' && isSuperAdmin ? (
+            <ActivityPanel />
           ) : activeTab === 'accounts' && isSuperAdmin ? (
-            <UsersPanel />
+            <div className="space-y-5">
+              <InvitesPanel />
+              <UsersPanel />
+            </div>
           ) : activeTab === 'catalogue' ? (
             <ItemTypesPanel />
           ) : (

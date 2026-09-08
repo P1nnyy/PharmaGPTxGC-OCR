@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { RunProvider } from './context/RunContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { JoinPage } from './features/auth/JoinPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 // Layouts
@@ -238,6 +239,11 @@ export const App: React.FC = () => {
             <Route path="/row-math/:runId" element={<Navigate to="/debug/row-math/:runId" replace />} />
             <Route path="/quality-gate/:runId" element={<Navigate to="/debug/quality-gate/:runId" replace />} />
             <Route path="/artifacts/:runId" element={<Navigate to="/debug/artifacts/:runId" replace />} />
+
+            {/* Invitation acceptance. Deliberately outside SaaSLayout: the
+                visitor is not a member yet, so the workspace's navigation
+                would be showing them something they cannot open. */}
+            <Route path="/join/:token" element={<JoinPage />} />
 
             {/* Catch-all redirect to user dashboard */}
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

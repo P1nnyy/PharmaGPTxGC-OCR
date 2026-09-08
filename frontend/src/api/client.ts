@@ -429,6 +429,44 @@ export const apiClient = {
     return response.json();
   },
 
+  async listInvites(): Promise<{ invites: any[] }> {
+    const response = await fetch('/auth/invites');
+    if (!response.ok) throw new Error('Failed to load invitations.');
+    return response.json();
+  },
+
+  async createInvite(payload: { email: string; role: string }): Promise<any> {
+    const response = await fetch('/auth/invites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create the invitation.');
+    }
+    return response.json();
+  },
+
+  async revokeInvite(inviteId: string): Promise<any> {
+    const response = await fetch(`/auth/invites/${inviteId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to withdraw the invitation.');
+    }
+    return response.json();
+  },
+
+  async getAudit(params: { limit?: number; action?: string; before?: string } = {}): Promise<any> {
+    const q = new URLSearchParams();
+    if (params.limit) q.set('limit', String(params.limit));
+    if (params.action) q.set('action', params.action);
+    if (params.before) q.set('before', params.before);
+    const response = await fetch(`/auth/audit${q.toString() ? '?' + q : ''}`);
+    if (!response.ok) throw new Error('Failed to load the activity log.');
+    return response.json();
+  },
+
   async getInventory(statuses?: string): Promise<InventoryResponse> {
     const query = statuses ? `?statuses=${encodeURIComponent(statuses)}` : '';
     const response = await fetch(`/inventory/stock${query}`);
