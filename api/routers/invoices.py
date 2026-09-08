@@ -1,9 +1,11 @@
 """Invoice read, edit and delete."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.schemas.invoices import InvoiceUpdate
 from core.logger import logger
+from api.deps import current_user
+from db.repositories import audit_repository
 from db.repositories import invoice_repository
 from enrichment import reference_service
 from services import image_storage
@@ -31,7 +33,7 @@ def get_invoice(invoice_id: str):
 
 
 @router.patch("/invoices/{invoice_id}")
-def update_invoice(invoice_id: str, payload: InvoiceUpdate):
+def update_invoice(invoice_id: str, payload: InvoiceUpdate, user: dict = Depends(current_user)):
     header = payload.model_dump(exclude={"status", "line_items"}, exclude_none=True)
     line_items = (
         [item.model_dump() for item in payload.line_items]
@@ -143,10 +145,18 @@ def recompute_invoice_amounts(invoice_id: str):
 
 
 @router.delete("/invoices/{invoice_id}")
-def delete_invoice(invoice_id: str):
+def delete_invoice(invoice_id: str, user: dict = Depends(current_user)):
     result = invoice_repository.delete_invoice(invoice_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
+
+    # Recorded after the fact, with the invoice number copied in: once the
+    # node is gone there is nothing left to look the number up from, and
+    # "deleted invoice <uuid>" answers nobody's question.
+    audit_repository.record(
+        "invoice.deleted", actor=user, target_type="invoice", target_id=invoice_id,
+        summary=f"{user['email']} deleted invoice {result.get('invoice_number') or invoice_id}",
+    )
 
     # Remove every page image, not just page 1 - a multi-page invoice would
     # otherwise leave its remaining pages orphaned in R2 forever.

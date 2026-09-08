@@ -31,6 +31,13 @@ CONSTRAINTS = [
     # would make a product's form ambiguous.
     "CREATE CONSTRAINT item_type_id IF NOT EXISTS FOR (n:ItemType) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT item_type_name IF NOT EXISTS FOR (n:ItemType) REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT invitation_id IF NOT EXISTS FOR (n:Invitation) REQUIRE n.id IS UNIQUE",
+    # The token is the credential, so it must resolve to at most one invitation.
+    "CREATE CONSTRAINT invitation_token IF NOT EXISTS FOR (n:Invitation) REQUIRE n.token IS UNIQUE",
+    "CREATE CONSTRAINT audit_event_id IF NOT EXISTS FOR (n:AuditEvent) REQUIRE n.id IS UNIQUE",
+    # The audit trail is always read as "this workspace, newest first", so the
+    # workspace is indexed; without it every read scans every tenant's events.
+    "CREATE INDEX audit_event_scope IF NOT EXISTS FOR (n:AuditEvent) ON (n.pharmacy_id)",
     # The scan ledger. Append-only and never deleted, so that "how many scans
     # have I run" does not fall when an invoice is tidied away.
     "CREATE CONSTRAINT scan_event_id IF NOT EXISTS FOR (n:ScanEvent) REQUIRE n.id IS UNIQUE",

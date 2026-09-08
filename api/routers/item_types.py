@@ -4,12 +4,19 @@ Split out of the old single-module api/routes.py when the backend moved to one
 router per resource. The handlers are unchanged; only their home is.
 """
 
+# Item types are part of Settings, and Settings is Super Admin only - an
+# invited member can use the vocabulary but not redefine it underneath
+# everyone else's products. Reading stays open to any signed-in user because
+# the product pickers depend on it.
+
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from api.deps import require_super_admin
 from db import item_type_repository
+from db.repositories import audit_repository
 
 router = APIRouter(tags=["item-types"])
 
@@ -43,7 +50,7 @@ def list_item_types(include_inactive: bool = False):
 
 
 @router.post("/item-types")
-def create_item_type(payload: ItemTypeCreate):
+def create_item_type(payload: ItemTypeCreate, user: dict = Depends(require_super_admin)):
     try:
         return item_type_repository.create_item_type(payload.model_dump())
     except ValueError as exc:
@@ -51,7 +58,7 @@ def create_item_type(payload: ItemTypeCreate):
 
 
 @router.patch("/item-types/{type_id}")
-def update_item_type(type_id: str, payload: ItemTypeUpdate):
+def update_item_type(type_id: str, payload: ItemTypeUpdate, user: dict = Depends(require_super_admin)):
     try:
         updated = item_type_repository.update_item_type(
             type_id, payload.model_dump(exclude_unset=True)
@@ -64,7 +71,7 @@ def update_item_type(type_id: str, payload: ItemTypeUpdate):
 
 
 @router.delete("/item-types/{type_id}")
-def delete_item_type(type_id: str):
+def delete_item_type(type_id: str, user: dict = Depends(require_super_admin)):
     result = item_type_repository.delete_item_type(type_id)
     if result["deleted"]:
         return {"status": "deleted"}
