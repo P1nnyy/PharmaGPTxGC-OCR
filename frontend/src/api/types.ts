@@ -25,6 +25,9 @@ export interface RunSummary {
   invoice_number?: string | null;
   invoice_date?: string | null;
   image_url?: string | null;
+  // Who scanned it. The queue is the shop's, not the uploader's, so a row
+  // that does not say whose scan it is invites "where did this come from?"
+  uploaded_by_name?: string | null;
 }
 
 export interface OCRBlock {

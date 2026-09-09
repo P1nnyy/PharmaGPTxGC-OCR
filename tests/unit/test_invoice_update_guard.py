@@ -25,6 +25,12 @@ from db.repositories.invoice_repository import (
 )
 
 
+# Endpoints resolve this through Depends in production; calling them directly
+# means supplying it, and the activity trail needs a person to name.
+REVIEWER = {"id": "u-test", "email": "reviewer@example.com", "name": "Test Reviewer",
+            "role": "super_admin", "pharmacy_id": "ph-test", "is_active": True}
+
+
 class FakeResult:
     def __init__(self, row):
         self._row = row
@@ -183,7 +189,7 @@ def test_route_turns_the_refusal_into_409():
         side_effect=EmptyLineItemsError("inv-1", 16),
     ):
         with pytest.raises(HTTPException) as exc:
-            update_invoice("inv-1", InvoiceUpdate(line_items=[]))
+            update_invoice("inv-1", InvoiceUpdate(line_items=[]), user=REVIEWER)
 
     assert exc.value.status_code == 409
     assert "16 line item" in exc.value.detail
@@ -197,7 +203,7 @@ def test_route_defaults_the_opt_in_to_false():
     with patch("api.routers.invoices.invoice_repository.update_invoice", return_value=True) as mock_update, \
          patch("api.routers.invoices.invoice_repository.get_invoice", return_value={}), \
          patch("api.routers.invoices.attach_image_urls"):
-        update_invoice("inv-1", InvoiceUpdate(line_items=[]))
+        update_invoice("inv-1", InvoiceUpdate(line_items=[]), user=REVIEWER)
 
     assert mock_update.call_args.kwargs["allow_empty_line_items"] is False
 
@@ -209,6 +215,6 @@ def test_route_forwards_an_explicit_opt_in():
     with patch("api.routers.invoices.invoice_repository.update_invoice", return_value=True) as mock_update, \
          patch("api.routers.invoices.invoice_repository.get_invoice", return_value={}), \
          patch("api.routers.invoices.attach_image_urls"):
-        update_invoice("inv-1", InvoiceUpdate(line_items=[], allow_empty_line_items=True))
+        update_invoice("inv-1", InvoiceUpdate(line_items=[], allow_empty_line_items=True), user=REVIEWER)
 
     assert mock_update.call_args.kwargs["allow_empty_line_items"] is True

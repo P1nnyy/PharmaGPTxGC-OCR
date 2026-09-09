@@ -362,7 +362,14 @@ export const InvoiceHistoryPage: React.FC = () => {
                   <td className="p-4 font-semibold text-[#0f172a] hover:underline cursor-pointer" onClick={() => navigate(`/review/${r.run_id}`)}>
                     {dispInvoiceNumber}
                   </td>
-                  <td className="p-4 font-medium">{seller}</td>
+                  <td className="p-4 font-medium">
+                    <span className="block">{seller}</span>
+                    {r.uploaded_by_name && (
+                      <span className="block text-[10px] text-gray-400 font-normal mt-0.5">
+                        Scanned by {r.uploaded_by_name}
+                      </span>
+                    )}
+                  </td>
                   <td className="p-4 text-right font-bold text-[#0f172a]">{amount}</td>
                   <td className="p-4 text-center">
                         <span

@@ -92,6 +92,7 @@ async def persist(
     invoice,
     pages: list[dict[str, Any]],
     invoice_id: Optional[str] = None,
+    uploaded_by: Optional[str] = None,
 ) -> dict:
     """Stores page images in R2 and the invoice in the graph.
 
@@ -145,7 +146,9 @@ async def persist(
             invoice,
             object_keys,
             current_tenant(),
-            settings.DEFAULT_USER_ID,
+            # Whoever is signed in, not a shared default. "Who uploaded this"
+            # is the question the review screen now has to answer.
+            uploaded_by,
             invoice_id,
         )
 

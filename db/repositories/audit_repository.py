@@ -47,6 +47,7 @@ def record(
     target_id: Optional[str] = None,
     summary: Optional[str] = None,
     pharmacy_id: Optional[str] = None,
+    changes: Optional[list[str]] = None,
     **details: Any,
 ) -> None:
     """Writes one event.
@@ -88,9 +89,13 @@ def record(
                     target_type=target_type,
                     target_id=target_id,
                     summary=summary,
-                    # Flattened to strings: Neo4j cannot store a map on a node,
-                    # and a stringified detail still reads fine in the trail.
-                    details=[f"{k}={v}" for k, v in sorted(details.items()) if v is not None],
+                    # Flattened to strings: Neo4j cannot store a map on a node.
+                    # Field changes keep their "Label: before -> after" shape
+                    # verbatim, because the UI parses that shape to lay the
+                    # before and after out in columns; prefixing them with a
+                    # kwarg name would make the field read as "change_0=CGST".
+                    details=(list(changes or [])
+                             + [f"{k}={v}" for k, v in sorted(details.items()) if v is not None]),
                 )
             )
     except Exception as e:
@@ -119,6 +124,7 @@ def list_events(
     action: Optional[str] = None,
     actor_id: Optional[str] = None,
     before: Optional[str] = None,
+    target_id: Optional[str] = None,
 ) -> dict:
     """One workspace's trail, newest first.
 
@@ -140,6 +146,7 @@ def list_events(
                     WHERE ($action IS NULL OR e.action = $action)
                       AND ($actor_id IS NULL OR e.actor_id = $actor_id)
                       AND ($before IS NULL OR toString(e.at) < $before)
+                      AND ($target_id IS NULL OR e.target_id = $target_id)
                     RETURN e.id AS id, e.at AS at, e.actor_id AS actor_id,
                            e.actor_email AS actor_email, e.actor_name AS actor_name,
                            e.action AS action, e.target_type AS target_type,
@@ -149,7 +156,7 @@ def list_events(
                     LIMIT $limit
                     """,
                     pharmacy_id=workspace, action=action, actor_id=actor_id,
-                    before=before, limit=limit,
+                    before=before, limit=limit, target_id=target_id,
                 )
             ]
         )

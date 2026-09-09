@@ -19,6 +19,7 @@ from services.error_handler import classify_error
 from services.invoices import ingestion
 from services.validators.image_validator import ImageValidator
 from api.deps import scan_quota
+from db.repositories import audit_repository
 
 router = APIRouter(tags=["uploads"])
 
@@ -127,8 +128,10 @@ async def upload_invoice_multipage(
                     for upload, data in zip(files, page_bytes)
                 ],
                 invoice_id=str(uuid.uuid4()),
+                uploaded_by=user["id"],
             )
         )
+        _record_upload(user, response, len(files))
         return response
 
     except Exception as e:
@@ -183,8 +186,10 @@ async def upload_invoice(
                         }
                     ],
                     invoice_id=str(uuid.uuid4()),
+                    uploaded_by=user["id"],
                 )
             )
+            _record_upload(user, response, 1)
             return response
 
         logger.info("Routing extraction to OCR engine")
@@ -231,4 +236,24 @@ async def _run_legacy_ocr(file_bytes: bytes, invoice_id: str, bypass_cache: bool
             "tables": result.get("tables", []),
             "image_validation": validation,
         },
+    )
+
+
+def _record_upload(user: dict, response: dict, page_count: int) -> None:
+    """Notes the upload in the workspace's activity.
+
+    Written here rather than inside the repository so it captures the person,
+    not just the request: the repository is also used by scripts and
+    backfills, where there is no one to name.
+    """
+    invoice_id = response.get("invoice_id") or response.get("id")
+    if not invoice_id:
+        return
+    who = user.get("name") or user.get("email") or "Someone"
+    reference = response.get("invoice_number") or invoice_id
+    audit_repository.record(
+        "invoice.created", actor=user, target_type="invoice", target_id=invoice_id,
+        summary=f"{who} uploaded invoice {reference}",
+        invoice=reference,
+        pages=page_count if page_count > 1 else None,
     )

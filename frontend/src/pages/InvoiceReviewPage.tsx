@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { buildInvoiceChecks, deriveImpliedAdjustment, type CheckStatus } from './invoiceChecks';
 import { apiClient } from '../api/client';
 import { splitCombinedTax } from './taxSplit';
+import { InvoiceActivity } from '../features/invoices/InvoiceActivity';
 import { useRun } from '../context/RunContext';
 import {
   ZoomIn,
@@ -2284,7 +2285,7 @@ export const InvoiceReviewPage: React.FC = () => {
 
         {/* Full-width Expandable Invoice Details Metadata Panel */}
         <div className={`shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${
-          isDetailsExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'
+          isDetailsExpanded ? 'max-h-[1200px] opacity-100' : 'max-h-0 opacity-0'
         }`}>
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
             <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2">
@@ -2399,6 +2400,22 @@ export const InvoiceReviewPage: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Who touched this invoice, and what they changed. Sits with the
+              metadata rather than in a separate tab because it answers a
+              question asked while looking at these same figures: the reviewer
+              about to approve a tax value wants to know who last moved it and
+              from what. */}
+          {runId && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3 mt-3">
+              <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2">
+                Activity
+              </h4>
+              <div className="max-h-[280px] overflow-y-auto pr-1">
+                <InvoiceActivity invoiceId={runId} />
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {/* END STICKY HEADER BLOCK */}

@@ -70,7 +70,8 @@ function mapInvoiceToRunSummary(inv: any): RunSummary {
     grand_total: inv.grand_total ?? null,
     invoice_number: inv.invoice_number ?? null,
     invoice_date: inv.invoice_date ?? null,
-    image_url: inv.image_url ?? null
+    image_url: inv.image_url ?? null,
+    uploaded_by_name: inv.uploaded_by_name ?? null
   };
 }
 

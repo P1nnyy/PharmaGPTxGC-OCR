@@ -6,6 +6,7 @@ from api.schemas.invoices import InvoiceUpdate
 from core.logger import logger
 from api.deps import current_user
 from db.repositories import audit_repository
+from services.invoices import changes as change_log
 from db.repositories import invoice_repository
 from enrichment import reference_service
 from services import image_storage
@@ -41,6 +42,18 @@ def update_invoice(invoice_id: str, payload: InvoiceUpdate, user: dict = Depends
         else None
     )
 
+    # Read before writing, so the trail can say what a value changed *from*.
+    # "Someone changed the tax" is not an answer anyone can act on months
+    # later; "changed CGST from 178.16 to 89.08" is.
+    previous = invoice_repository.get_invoice(invoice_id) or {}
+    field_changes = change_log.header_changes(previous, header)
+    row_change = change_log.line_item_change(
+        len(previous.get("line_items") or []),
+        len(line_items) if line_items is not None else None,
+    )
+    if row_change:
+        field_changes = field_changes + [row_change]
+
     try:
         ok = invoice_repository.update_invoice(
             invoice_id,
@@ -56,6 +69,29 @@ def update_invoice(invoice_id: str, payload: InvoiceUpdate, user: dict = Depends
 
     if not ok:
         raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found.")
+
+    actor_name = user.get("name") or user.get("email") or "Someone"
+    reference = previous.get("invoice_number") or invoice_id
+
+    # Recorded only when something actually moved. The review screen resends
+    # every field on every save, so logging each save regardless would bury
+    # the real edits under a pile of "no changes".
+    if field_changes:
+        audit_repository.record(
+            "invoice.updated", actor=user, target_type="invoice", target_id=invoice_id,
+            summary=change_log.summarise(actor_name, field_changes),
+            invoice=reference,
+            changes=change_log.as_details(field_changes),
+        )
+
+    # Verification is its own event, not a field edit: it is the moment the
+    # invoice stops being a draft and its items enter the catalogue.
+    if payload.status == "verified" and previous.get("status") != "verified":
+        audit_repository.record(
+            "invoice.verified", actor=user, target_type="invoice", target_id=invoice_id,
+            summary=f"{actor_name} approved invoice {reference}",
+            invoice=reference,
+        )
 
     # Verifying is the moment an invoice's items enter the catalogue, so it is
     # where they get matched against the reference. Doing it here rather than
@@ -167,3 +203,22 @@ def delete_invoice(invoice_id: str, user: dict = Depends(current_user)):
             logger.warning(f"Failed to delete R2 object {image_ref}: {e}")
 
     return {"message": "Invoice deleted.", "id": invoice_id}
+
+
+@router.get("/invoices/{invoice_id}/activity")
+def invoice_activity(invoice_id: str, user: dict = Depends(current_user)):
+    """Everything that has happened to this invoice, oldest first.
+
+    Readable by any member of the workspace, not just admins: knowing who
+    changed a figure you are about to approve is part of reviewing it, and
+    hiding that from the person doing the reviewing would defeat the point.
+    Scoped to the caller's workspace by the repository, so one shop cannot
+    read another's history.
+    """
+    trail = audit_repository.list_events(
+        pharmacy_id=user["pharmacy_id"], target_id=invoice_id, limit=200,
+    )
+    # Oldest first here, unlike the workspace-wide feed: this reads as the
+    # story of one invoice, and a story runs forwards.
+    events = list(reversed(trail.get("events", [])))
+    return {"events": events, "count": len(events)}

@@ -9,6 +9,13 @@ from extraction.normalizers.canonical_invoice import CanonicalInvoice
 from services.validators.content_validator import ContentAssessment
 from core.tenancy import tenant_scope
 
+
+# Endpoints resolve this through Depends in production; calling them directly
+# means supplying it, and the activity trail needs a person to name.
+REVIEWER = {"id": "u-test", "email": "reviewer@example.com", "name": "Test Reviewer",
+            "role": "super_admin", "pharmacy_id": "ph-test", "is_active": True}
+
+
 # These tests exercise engine routing, not image content, and use a 1x1 GIF as
 # a stand-in payload. That is genuinely blank, so the pre-flight content gate
 # would (correctly) reject it - stub it out the same way ImageValidator is.
@@ -47,7 +54,7 @@ async def test_legacy_route_default(clean_env):
              "errors": []
          }):
          
-        response = await upload_invoice(file=mock_file)
+        response = await upload_invoice(file=mock_file, user=REVIEWER)
         
         assert response.cached is False
         assert response.text == "legacy text"
@@ -93,7 +100,7 @@ async def test_azure_route_path(clean_env, workspace):
          }), \
          patch("builtins.open", mock_open()):
          
-        response = await upload_invoice(file=mock_file)
+        response = await upload_invoice(file=mock_file, user=REVIEWER)
         
         assert response["invoice_number"] == "INV-AZURE-789"
         assert response["seller_name"] == "Apothecary Agencies"
@@ -126,7 +133,7 @@ async def test_content_gate_blocks_azure_call(clean_env):
          }):
 
         with pytest.raises(HTTPException) as excinfo:
-            await upload_invoice(file=mock_file)
+            await upload_invoice(file=mock_file, user=REVIEWER)
 
         assert excinfo.value.status_code == 400
         # a blank upload must not reach the paid extractor
@@ -155,5 +162,5 @@ async def test_content_gate_can_be_disabled(clean_env, workspace):
          }), \
          patch("builtins.open", mock_open()):
 
-        await upload_invoice(file=mock_file)
+        await upload_invoice(file=mock_file, user=REVIEWER)
         mock_extract.assert_called_once()

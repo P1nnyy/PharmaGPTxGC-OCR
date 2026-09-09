@@ -54,7 +54,8 @@ def save_invoice(
     page order.
     """
     pharmacy_id = pharmacy_id or current_tenant()
-    user_id = user_id or settings.DEFAULT_USER_ID
+    # No DEFAULT_USER_ID fallback: it attributed every upload to one shared
+    # account, which is exactly the question this data is supposed to answer.
     invoice_id = invoice_id or str(uuid.uuid4())
     image_keys = _as_image_key_list(image_object_key)
 
@@ -81,8 +82,14 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
         """
         MERGE (ph:Pharmacy {id: $pharmacy_id})
         ON CREATE SET ph.name = $pharmacy_id, ph.created_at = datetime()
-        MERGE (u:User {id: $user_id})
-        ON CREATE SET u.email = $user_id, u.role = 'owner', u.created_at = datetime()
+        // MATCH, not MERGE. Merging on a user id conjured an account whenever
+        // one did not exist - which is how every invoice here came to be
+        // attributed to a resurrected "default-user" that had been deleted.
+        // An upload with no identifiable uploader is recorded as having none,
+        // because an audit trail that invents its actor is worse than one
+        // that admits a gap.
+        WITH ph
+        OPTIONAL MATCH (u:User {id: $user_id})
         CREATE (inv:Invoice {
             id: $invoice_id,
             invoice_number: $invoice_number,
@@ -115,7 +122,9 @@ def _write_invoice_tx(tx, invoice_id: str, pharmacy_id: str, user_id: str, image
             created_at: datetime()
         })
         CREATE (inv)-[:BELONGS_TO]->(ph)
-        CREATE (inv)-[:UPLOADED_BY]->(u)
+        FOREACH (_ IN CASE WHEN u IS NULL THEN [] ELSE [1] END |
+            CREATE (inv)-[:UPLOADED_BY]->(u)
+        )
         RETURN inv.id AS id
         """,
         pharmacy_id=pharmacy_id,
@@ -605,7 +614,12 @@ def _list_invoices_tx(tx, pharmacy_id: str) -> list[dict]:
         """
         MATCH (inv:Invoice)-[:BELONGS_TO]->(:Pharmacy {id: $pharmacy_id})
         OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
-        RETURN inv, v.name AS vendor_name
+        // Shop-wide by design: the queue is the shop's work, not the
+        // uploader's, so a teammate's scan is every colleague's to review.
+        // Naming who uploaded it is what keeps that from being confusing.
+        OPTIONAL MATCH (inv)-[:UPLOADED_BY]->(up:User)
+        RETURN inv, v.name AS vendor_name,
+               coalesce(up.name, up.email) AS uploaded_by_name
         ORDER BY inv.created_at DESC
         """,
         pharmacy_id=pharmacy_id,
@@ -615,6 +629,7 @@ def _list_invoices_tx(tx, pharmacy_id: str) -> list[dict]:
         data = _serialize_node(record["inv"])
         if not data.get("seller_name"):
             data["seller_name"] = record["vendor_name"]
+        data["uploaded_by_name"] = record["uploaded_by_name"]
         invoices.append(data)
     return invoices
 
@@ -637,6 +652,7 @@ def _delete_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         MATCH (inv:Invoice {id: $id})
         WITH inv, inv.source_image_ref AS image_ref, inv.source_image_refs AS image_refs
         OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
+        OPTIONAL MATCH (inv)-[:UPLOADED_BY]->(up:User)
         OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
         OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
         OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
@@ -728,13 +744,14 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         """
         MATCH (inv:Invoice {id: $invoice_id})
         OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
+        OPTIONAL MATCH (inv)-[:UPLOADED_BY]->(up:User)
         OPTIONAL MATCH (inv)-[:CONTAINS]->(li:LineItem)
         OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
         OPTIONAL MATCH (li)-[:OF_ALIAS]->(al:ProductAlias)
         OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
-        WITH inv, v, li, p, al, b
+        WITH inv, v, up, li, p, al, b
         ORDER BY coalesce(li.row_index, 0)
-        RETURN inv, v, collect({item: li, product: p, alias: al, batch: b}) AS rows
+        RETURN inv, v, up, collect({item: li, product: p, alias: al, batch: b}) AS rows
         """,
         invoice_id=invoice_id,
     ).single()
@@ -743,6 +760,15 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
         return None
 
     data = _serialize_node(record["inv"])
+    # Who uploaded it, by name. Null when the uploader is not identifiable -
+    # invoices saved before uploads carried an identity have no one to name,
+    # and inventing one would be worse than the gap.
+    uploader = _serialize_node(record["up"]) if record["up"] else None
+    data["uploaded_by"] = {
+        "id": uploader.get("id"),
+        "name": uploader.get("name") or uploader.get("email"),
+        "email": uploader.get("email"),
+    } if uploader else None
     vendor = _serialize_node(record["v"]) if record["v"] else None
     data["seller"] = vendor
     if not data.get("seller_name") and vendor:
