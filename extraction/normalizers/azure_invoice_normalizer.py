@@ -2,6 +2,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional
 from core.dates import normalize_invoice_date
+from core.gstin import same_state as gstin_same_state
 from core.logger import logger
 from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem
 from extraction.normalizers.amount_inference import (
@@ -828,6 +829,42 @@ def salvage_tick_marked_qty(qty_text: Optional[str]) -> Optional[float]:
         return float(mapped)
     except ValueError:
         return None
+
+def split_combined_tax(
+    combined: Optional[float],
+    seller_gstin: Optional[str],
+    buyer_gstin: Optional[str],
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Splits one combined tax figure into (cgst, sgst, igst).
+
+    Azure reports a single TotalTax and never splits it, but the reports show
+    CGST and SGST as separate columns - so parking the whole figure on cgst
+    produced an invoice reading "CGST 178.16" against a blank SGST, beside
+    rows where the two matched. The total was right and the breakdown was a
+    fiction.
+
+    The split is derived, not guessed. GST law fixes CGST and SGST at exactly
+    half each for an intra-state supply, and makes the whole amount IGST for
+    an inter-state one - which is the case the old code got backwards, booking
+    inter-state tax as cgst. The state is the first two digits of each GSTIN.
+
+    With either GSTIN unreadable the supply type is genuinely unknown, so the
+    combined figure stays on cgst: the total remains correct and nothing is
+    invented.
+    """
+    if combined is None:
+        return None, None, None
+
+    intra = gstin_same_state(seller_gstin, buyer_gstin)
+    if intra is True:
+        half = round(combined / 2.0, 2)
+        # Odd paise land on SGST rather than being dropped, so the halves
+        # still add back to the printed total.
+        return half, round(combined - half, 2), None
+    if intra is False:
+        return None, None, combined
+    return combined, None, None
+
 
 def extract_gst_percent(sgst_raw: Any, cgst_raw: Any, igst_raw: Any) -> Optional[float]:
     """Combines SGST and CGST percentages, or falls back to IGST percent.
@@ -2299,14 +2336,25 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     # If nothing above gave us a tax total, prefer the invoice's own
     # precomputed totals (Azure's doc-level TotalTax field, or failing that
     # the sum of each line's own Tot.Tax column) over re-deriving it from
-    # per-item rate/GST% math. Azure doesn't split these into CGST/SGST, so
-    # the combined figure is carried on cgst alone (sgst stays None) -
-    # frontend tax totals sum cgst+sgst+igst, so this still surfaces correctly.
-    if cgst is None and sgst is None:
-        if doc_tax is not None:
-            cgst = doc_tax
-        elif has_line_tax:
-            cgst = round(sum_line_tax, 2)
+    # per-item rate/GST% math.
+    #
+    # Azure reports one combined TotalTax and never splits it. Parking that
+    # whole figure on cgst used to be considered good enough because the
+    # frontend sums cgst+sgst+igst for a total - but the reports show the
+    # halves as separate columns, so an invoice came out reading CGST 178.16
+    # against a blank SGST, next to rows where the two matched. The total was
+    # right and the breakdown was a fiction.
+    #
+    # The split is not a guess. For an intra-state supply GST law fixes CGST
+    # and SGST at exactly half each, and for an inter-state supply the whole
+    # amount is IGST - which the old code got wrong in the other direction,
+    # booking inter-state tax as cgst. Both states are known here: the GSTINs
+    # were resolved above, and the first two digits are the state code.
+    if cgst is None and sgst is None and igst is None:
+        combined = doc_tax if doc_tax is not None else (
+            round(sum_line_tax, 2) if has_line_tax else None
+        )
+        cgst, sgst, igst = split_combined_tax(combined, seller_gstin, buyer_gstin)
 
     # Same precedence for discount: the invoice's own printed discount
     # figure, then the sum of each line's own Disc.Amt column.

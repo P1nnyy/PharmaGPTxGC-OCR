@@ -88,13 +88,29 @@ def parse(gstin: str) -> dict:
     }
 
 
+def state_code_of(gstin: Optional[str]) -> Optional[str]:
+    """The GST state code, or None if the value does not carry a real one.
+
+    Checked against the published list rather than just taken as the first
+    two characters: OCR noise like "garbage" or a truncated read would
+    otherwise yield a confident-looking "ga" that is not a state at all.
+    """
+    value = normalize(gstin or "")
+    code = value[:2]
+    return code if code in STATE_CODES else None
+
+
 def same_state(a: Optional[str], b: Optional[str]) -> Optional[bool]:
     """Whether two GSTINs are in one state - the CGST+SGST vs IGST question.
 
-    None when either side is unknown, so a caller can tell "different states"
-    apart from "we could not tell", which are very different answers when the
-    tax split on an invoice is being checked.
+    None when either side is unknown or unreadable, so a caller can tell
+    "different states" apart from "we could not tell". The distinction decides
+    whether tax is split into CGST and SGST or booked entirely as IGST, and a
+    misread number must not produce a confident wrong answer: comparing raw
+    prefixes would read a garbled GSTIN as a different state and silently
+    reclassify an intra-state purchase as inter-state.
     """
-    if not a or not b or len(a) < 2 or len(b) < 2:
+    code_a, code_b = state_code_of(a), state_code_of(b)
+    if code_a is None or code_b is None:
         return None
-    return a[:2] == b[:2]
+    return code_a == code_b
