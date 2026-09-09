@@ -102,6 +102,13 @@ PACK_CODES: dict[str, PackCode] = {
     "PCS": PackCode(None, "UNIT", True, _CONVENTION),
     "NO": PackCode(None, "UNIT", True, _CONVENTION),
     "NOS": PackCode(None, "UNIT", True, _CONVENTION),
+    # Bare "N" for "numbers" - the commonest count suffix on Indian invoices
+    # and, until now, the one code that was missing. Unrecognised, "1X100N"
+    # matched no numeric pattern at all and was stored as opaque text, so the
+    # catalogue showed a liquid's pack as "1x100N" with no units per pack.
+    # Note this only says the supplier wrote a count; for a form measured by
+    # volume or weight the form overrides it - see _measure_pack_display.
+    "N": PackCode(None, "UNIT", True, _CONVENTION),
     # --- measured contents (conventional) ---
     "GR": PackCode(None, "GM", False, _CONVENTION),
     "G": PackCode(None, "GM", False, _CONVENTION),

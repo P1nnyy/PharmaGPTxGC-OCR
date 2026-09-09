@@ -214,6 +214,47 @@ def _normalize_strength(value: str, unit: str) -> str:
     return f"{compact}{unit.upper()}"
 
 
+
+# Units that measure contents rather than count items.
+_MEASURE_UNITS = {"ML", "GM", "L"}
+
+
+def _measure_pack_display(
+    display: Optional[str], base_unit: Optional[str]
+) -> Optional[tuple[str, int]]:
+    """Rewrites a count-shaped pack as a measured one, for forms sold by volume.
+
+    Indian distributors print a count suffix on everything - "1X100N", where N
+    is "numbers" - regardless of what is in the pack. On a solution that reads
+    as a hundred dispensable somethings, and the catalogue then shows a 100ml
+    bottle as "1x100N" with a dispensing unit of ML, which is the mismatch a
+    pharmacist notices immediately.
+
+    The form is the stronger signal. A solution, syrup or cream is one
+    container whose number describes how much is inside it, so the trailing
+    figure is a measure and the units per pack is 1. Returns None when the
+    display is not count-shaped, leaving anything already carrying a unit -
+    "60x5ML", sixty vials of 5ml - untouched.
+    """
+    if not display or not base_unit or base_unit.upper() not in _MEASURE_UNITS:
+        return None
+
+    unit = base_unit.upper()
+    # Already measured; nothing to correct.
+    if re.search(r"(ML|GM|L)$", display, re.IGNORECASE):
+        return None
+
+    grid = re.fullmatch(r"(?P<outer>\d+)\s*[*xX×]\s*(?P<inner>\d+)", display.strip())
+    if grid:
+        return f"{grid.group('outer')}x{grid.group('inner')}{unit}", 1
+
+    count = re.fullmatch(r"(?P<n>\d+)\s*['’]?S", display.strip(), re.IGNORECASE)
+    if count:
+        return f"{count.group('n')}{unit}", 1
+
+    return None
+
+
 def _parse_pack_token(
     token: str,
 ) -> tuple[Optional[str], Optional[int], Optional[str], Optional[Any]]:
@@ -476,6 +517,26 @@ def parse_product_name(name: Optional[str], pack_column: Optional[str] = None) -
                 value=1,
                 confidence=min(parsed.form.confidence, 0.7),
                 evidence=f"a {parsed.form.value.lower()} is dispensed as one container",
+            )
+
+    # A count suffix on a form that is sold by volume or weight is the
+    # distributor's boilerplate, not a fact about the pack. "1X100N" on a
+    # solution is a 100ml bottle, and reading its trailing number as a count
+    # both mislabels the pack and multiplies the stock figure by a hundred.
+    if parsed.form.known and parsed.form.value in _SINGLE_CONTAINER_FORMS:
+        corrected = _measure_pack_display(parsed.pack_size.value, parsed.base_unit.value)
+        if corrected:
+            display, multiplier = corrected
+            parsed.pack_size = ParsedField(
+                value=display,
+                confidence=parsed.pack_size.confidence,
+                evidence=parsed.pack_size.evidence,
+            )
+            parsed.pack_multiplier = ParsedField(
+                value=multiplier,
+                confidence=min(parsed.form.confidence, 0.7),
+                evidence=f"a {parsed.form.value.lower()} is one container; "
+                         f"its {display} is a size, not a count",
             )
 
     # --- brand ------------------------------------------------------------
