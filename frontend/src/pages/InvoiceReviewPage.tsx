@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { buildInvoiceChecks, deriveImpliedAdjustment, type CheckStatus } from './invoiceChecks';
 import { apiClient } from '../api/client';
+import { splitCombinedTax } from './taxSplit';
 import { useRun } from '../context/RunContext';
 import {
   ZoomIn,
@@ -1081,9 +1082,19 @@ export const InvoiceReviewPage: React.FC = () => {
    * papered over by moving the total. Where the invoice printed no grand total
    * at all there is nothing to protect, and it follows the parts as before.
    */
-  const handleTotalsChange = (key: 'subtotal' | 'discount' | 'roundoff', raw: string) => {
+  const handleTotalsChange = (
+    key: 'subtotal' | 'discount' | 'roundoff' | 'cgst' | 'sgst' | 'igst',
+    raw: string
+  ) => {
     setHeader((prev) => {
       const next: any = { ...prev, [key]: raw };
+
+      // Editing a component makes any figure previously typed into the Tax
+      // box stale, so that box goes back to showing the sum of the parts
+      // rather than what someone typed before overriding the split.
+      if (key === 'cgst' || key === 'sgst' || key === 'igst') {
+        next.tax_input = undefined;
+      }
 
       const num = (value: any) => {
         const parsed = parseFloat(String(value ?? '').replace(/[^0-9.\-]/g, ''));
@@ -1091,7 +1102,10 @@ export const InvoiceReviewPage: React.FC = () => {
       };
       const subtotal = num(next.subtotal);
       const discount = num(next.discount);
-      const tax = num(prev.cgst) + num(prev.sgst) + num(prev.igst);
+      // Read from `next`, not `prev`: editing CGST has to move the grand
+      // total on the same keystroke that discount would, or the reviewer
+      // fixes the tax and watches the total stay wrong.
+      const tax = num(next.cgst) + num(next.sgst) + num(next.igst);
       const roundoff = num(next.roundoff);
 
       // Only when the total on screen is ours to recompute, and only when
@@ -1099,6 +1113,48 @@ export const InvoiceReviewPage: React.FC = () => {
       // would put a zero where a figure read off the invoice belongs.
       if (grandTotalIsDerived && String(next.subtotal ?? '').trim() !== '') {
         next.grand_total = parseFloat((subtotal - discount + tax + roundoff).toFixed(2));
+      }
+      return next;
+    });
+  };
+
+  /**
+   * Sets the whole tax from a single figure, split by supply type.
+   *
+   * This is the box a reviewer reaches for when extraction came back with no
+   * tax at all: the invoice says one number, and typing it should not require
+   * knowing whether this supplier is in-state. The split uses the same rule
+   * the pipeline does, so a hand-entered figure and an extracted one produce
+   * the same breakdown.
+   *
+   * Clearing it clears all three components rather than leaving a stale half
+   * behind - a blank tax box above a populated CGST row would be a lie.
+   */
+  const handleTaxTotalChange = (raw: string) => {
+    setHeader((prev) => {
+      const cleaned = String(raw ?? '').replace(/[^0-9.\-]/g, '');
+      const parsed = parseFloat(cleaned);
+      const combined = cleaned.trim() === '' || !Number.isFinite(parsed) ? null : parsed;
+      const split = splitCombinedTax(combined, prev.seller_gstin, prev.buyer_gstin);
+
+      const next: any = {
+        ...prev,
+        cgst: split.cgst,
+        sgst: split.sgst,
+        igst: split.igst,
+        // Kept verbatim so a half-typed "1" does not reformat under the
+        // cursor into the split of one rupee.
+        tax_input: raw
+      };
+
+      const num = (value: any) => {
+        const p = parseFloat(String(value ?? '').replace(/[^0-9.\-]/g, ''));
+        return Number.isFinite(p) ? p : 0;
+      };
+      if (grandTotalIsDerived && String(next.subtotal ?? '').trim() !== '') {
+        next.grand_total = parseFloat(
+          (num(next.subtotal) - num(next.discount) + (combined ?? 0) + num(next.roundoff)).toFixed(2)
+        );
       }
       return next;
     });
@@ -1973,8 +2029,46 @@ export const InvoiceReviewPage: React.FC = () => {
                     invoice can carry several GST slabs at once, and the amount
                     beside it is their sum. */}
                 <span className="text-gray-500 font-medium">Tax +</span>
-                <span className="font-semibold text-slate-800">{formatCurrencyOrDash(computedGstTotal)}</span>
+                {isLocked ? (
+                  <span className="font-semibold text-slate-800">{formatCurrencyOrDash(computedGstTotal)}</span>
+                ) : (
+                  <TotalsInput
+                    value={(header as any).tax_input ?? computedGstTotal}
+                    onChange={handleTaxTotalChange}
+                    placeholder="0.00"
+                  />
+                )}
               </div>
+
+              {/* The components, spelled out and separately editable.
+                  Extraction can miss the tax entirely - a blank cell in the
+                  supplier's GST summary is all it takes - and until now there
+                  was nowhere to put the figure back. Typing into Tax above
+                  fills these using the same rule the pipeline uses; typing
+                  into one of these overrides that split, for the invoice that
+                  states something other than an even half. */}
+              {!isLocked && (
+                <div className="pl-3 border-l-2 border-slate-100 space-y-1.5">
+                  {(['cgst', 'sgst', 'igst'] as const).map((key) => (
+                    <div key={key} className="flex items-center justify-between">
+                      <span className="text-[11px] text-gray-400 font-medium uppercase tracking-wide">
+                        {key}
+                      </span>
+                      <TotalsInput
+                        value={(header as any)[key]}
+                        onChange={(v) => handleTotalsChange(key, v)}
+                        placeholder="—"
+                        className="w-20 text-[11px]"
+                      />
+                    </div>
+                  ))}
+                  {!hasGstValues && (
+                    <p className="text-[10px] text-amber-600 font-medium">
+                      No tax was extracted from this invoice — enter it above.
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center justify-between">
                 <span className="text-gray-500 font-medium">Discount -</span>

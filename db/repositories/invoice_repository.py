@@ -424,11 +424,41 @@ def update_invoice(
         )
 
 
+# The money fields among the editable ones. Values arriving from the review
+# screen are whatever the reviewer typed - "89.08" is a string, and stored as
+# one it would break every consumer that adds it up. Reports sum cgst+sgst+igst
+# and the review screen calls toFixed on them; both fail on a string in ways
+# that surface far from the edit that caused it.
+_NUMERIC_HEADER_FIELDS = {
+    "subtotal", "discount", "cgst", "sgst", "igst", "grand_total", "roundoff",
+}
+
 _EDITABLE_HEADER_FIELDS = {
     "invoice_number", "invoice_date", "seller_name", "seller_gstin",
     "seller_address", "seller_phone", "drug_license", "buyer_gstin",
     "subtotal", "discount", "cgst", "sgst", "igst", "grand_total", "roundoff",
 }
+
+
+def _to_stored_number(value):
+    """Coerces a typed money value to a float, or None.
+
+    An empty box means "not stated" and must clear the field rather than
+    store 0.0 - a zero tax is a claim about the invoice, and absence is not.
+    Anything unparseable is also None: keeping the raw text would put a
+    string where every consumer expects a number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def _update_invoice_tx(
@@ -465,7 +495,12 @@ def _update_invoice_tx(
             set_clauses.append(f"inv.{key} = ${key}")
             # The review UI is the other door values come in through, and a date
             # typed by hand is no more canonical than one read by OCR.
-            params[key] = normalize_invoice_date(value) if key == "invoice_date" else value
+            if key == "invoice_date":
+                params[key] = normalize_invoice_date(value)
+            elif key in _NUMERIC_HEADER_FIELDS:
+                params[key] = _to_stored_number(value)
+            else:
+                params[key] = value
 
     if status:
         set_clauses.append("inv.status = $status")
