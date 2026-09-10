@@ -24,6 +24,11 @@ pack — how every figure drills back to its documents, the four cross-checks
 that run on load, why 4(A)(5) is provisional until GSTR-2B is wired in, and
 why the outward rows cannot be corrected in 3B at all.
 
+**Running the shop day to day?** See
+[docs/MANAGEMENT_REPORTS.md](docs/MANAGEMENT_REPORTS.md) for margin, expiry
+risk and the rest — including why expiry is really two numbers, and why the
+stock ledger needed a purchase side before any of it was possible.
+
 ## Quick Start (local)
 
 ```bash
