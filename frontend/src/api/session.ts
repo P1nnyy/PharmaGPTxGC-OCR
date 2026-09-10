@@ -20,7 +20,8 @@ const TOKEN_KEY = 'pharmagpt_token';
 // token to a third party.
 const API_PREFIXES = [
   '/auth/', '/health', '/upload-invoice', '/clear-cache',
-  '/invoices', '/products', '/item-types', '/reports/', '/inventory/', '/tax-periods/'
+  '/invoices', '/products', '/item-types', '/reports/', '/inventory/', '/tax-periods/',
+  '/statutory/'
 ];
 
 type Listener = () => void;

@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends
 
 from api.deps import current_user
 from api.routers import (
-    auth, health, inventory, invoices, item_types, products, reports, tax_periods, uploads,
+    auth, health, inventory, invoices, item_types, products, reports, statutory,
+    tax_periods, uploads,
 )
 
 _authenticated = [Depends(current_user)]
@@ -38,5 +39,6 @@ api_router.include_router(item_types.router, dependencies=_authenticated)
 api_router.include_router(reports.router, dependencies=_authenticated)
 api_router.include_router(inventory.router, dependencies=_authenticated)
 api_router.include_router(tax_periods.router, dependencies=_authenticated)
+api_router.include_router(statutory.router, dependencies=_authenticated)
 
 __all__ = ["api_router"]
