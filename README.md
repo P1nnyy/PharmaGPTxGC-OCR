@@ -14,6 +14,10 @@ and are deliberately kept out of `requirements.txt` and the production image.
 
 **Deploying to a domain?** See [DEPLOY.md](DEPLOY.md).
 
+**Filing GSTR-1?** See [docs/GSTR1.md](docs/GSTR1.md) for the outward-supply
+aggregation engine — what each table holds, how the period close and its
+immutability lock work, and why a nil return still has to be filed.
+
 ## Quick Start (local)
 
 ```bash
