@@ -159,10 +159,11 @@ class TestCrossCheck:
 
 class TestPurchaseRegisterItcSource:
     def invoice(self, **kwargs):
+        # As `statutory_repository` hands it over: already integer paise.
         base = {
             "invoice_id": "I1", "invoice_number": "INV-1",
             "seller_gstin": "27BBBBB0000B1Z5",
-            "cgst": 300.00, "sgst": 300.00, "igst": 0.0,
+            "cgst_paise": 30000, "sgst_paise": 30000, "igst_paise": 0,
         }
         base.update(kwargs)
         return base
@@ -189,7 +190,7 @@ class TestPurchaseRegisterItcSource:
 
     def test_an_invoice_with_no_tax_is_excluded_separately(self):
         claim = PurchaseRegisterSource().claim_for(
-            ["092026"], [self.invoice(cgst=0.0, sgst=0.0, igst=0.0)]
+            ["092026"], [self.invoice(cgst_paise=0, sgst_paise=0, igst_paise=0)]
         )
         assert claim.excluded[0]["reason"] == EXCLUSION_NO_TAX
 

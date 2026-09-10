@@ -30,7 +30,6 @@ saying so would be the most expensive silence in this codebase.
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
-from core.money import paise_from_legacy_rupees
 from services.statutory.model import Drill, DrillKind, Figure
 
 # What each source is called on the wire and in the UI.
@@ -118,13 +117,14 @@ class PurchaseRegisterSource:
         excluded: list = []
 
         for invoice in invoices:
-            # Purchase-side money is stored as floats and predates the
-            # integer-paise rule, so it is converted once here and every
-            # figure downstream is exact.
-            row_cgst = paise_from_legacy_rupees(invoice.get("cgst")) or 0
-            row_sgst = paise_from_legacy_rupees(invoice.get("sgst")) or 0
-            row_igst = paise_from_legacy_rupees(invoice.get("igst")) or 0
-            row_cess = paise_from_legacy_rupees(invoice.get("cess")) or 0
+            # Already paise. Purchase-side money is stored as floats, but it is
+            # converted once in `statutory_repository` and never again - a
+            # second conversion here would either double-scale the figure or,
+            # worse, read a key that is not there and silently claim nothing.
+            row_cgst = int(invoice.get("cgst_paise") or 0)
+            row_sgst = int(invoice.get("sgst_paise") or 0)
+            row_igst = int(invoice.get("igst_paise") or 0)
+            row_cess = int(invoice.get("cess_paise") or 0)
             tax = row_cgst + row_sgst + row_igst + row_cess
 
             if not invoice.get("seller_gstin"):
