@@ -407,6 +407,33 @@ class TestDocumentsIssuedTable13:
         assert summary.gaps == [3, 4]
         assert aggregate_documents_issued(docs).has_gaps
 
+    def test_finds_two_documents_sharing_a_number(self):
+        # Not a gap, and worse than one: two bills with the same serial are
+        # indistinguishable in a return, and the offline serial-block design
+        # has no conflict resolver downstream to catch it.
+        docs = [
+            bill("D1", taxable_line(100_00), bill_number="CTR-000001",
+                 series_prefix="CTR-", serial_sequence=1),
+            bill("D2", taxable_line(100_00), bill_number="CTR-000002",
+                 series_prefix="CTR-", serial_sequence=2),
+            bill("D3", taxable_line(100_00), bill_number="CTR-000002",
+                 series_prefix="CTR-", serial_sequence=2),
+        ]
+        summary = self.series(*docs)["CTR-"]
+        assert summary.duplicates == [2]
+        assert summary.gaps == []
+        assert summary.total_issued == 3
+        assert aggregate_documents_issued(docs).has_duplicates
+
+    def test_a_clean_series_has_no_duplicates(self):
+        docs = [
+            bill(f"D{n}", taxable_line(100_00), bill_number=f"CTR-{n:06d}",
+                 series_prefix="CTR-", serial_sequence=n)
+            for n in (1, 2, 3)
+        ]
+        assert self.series(*docs)["CTR-"].duplicates == []
+        assert not aggregate_documents_issued(docs).has_duplicates
+
     def test_keeps_separate_series_apart(self):
         docs = [
             bill("D1", taxable_line(100_00), bill_number="CTR-000001",

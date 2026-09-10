@@ -119,6 +119,13 @@ Gaps are surfaced as blocking. A missing number in the middle of a series is
 either a bill issued on a device that never synced — in which case the return
 is missing its supplies — or a number that was skipped.
 
+**Duplicates** are surfaced too, and cannot be acknowledged away. Two documents
+sharing a serial are indistinguishable in a return, Rule 46(b) makes a serial
+unique within the financial year, and the offline serial-block design has no
+conflict resolver downstream to catch it — the atomic block allocation is the
+only thing preventing it, so a duplicate reaching here means that guarantee has
+already failed and somebody has to look.
+
 ---
 
 ## Aggregate turnover is declared, never derived
@@ -183,7 +190,7 @@ record. The blocking/warning split is not about how serious something sounds —
 it is about whether filing makes it worse.
 
 **Blocking** — the return would be rejected, or would state a wrong figure:
-negative B2CS bucket, series gap, missing B2B HSN, HSN not in the master,
+negative B2CS bucket, series gap, duplicate serial, missing B2B HSN, HSN not in the master,
 missing or invalid UQC, a document with no place of supply, rate blocks that do
 not reconcile to the header, a B2CL bill needing review, a B2B credit note
 (Table 9B, which this engine does not build, so it is excluded and said so),

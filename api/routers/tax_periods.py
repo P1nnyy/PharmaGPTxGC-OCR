@@ -210,6 +210,7 @@ def _serialise(identity: dict, filing_period, result) -> dict:
                     "cancelled": s.cancelled,
                     "net_issued": s.net_issued,
                     "gaps": s.gaps,
+                    "duplicates": s.duplicates,
                 }
                 for s in tables["documents"].series
             ],

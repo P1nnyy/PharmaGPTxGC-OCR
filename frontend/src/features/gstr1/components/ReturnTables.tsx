@@ -228,6 +228,7 @@ const DocumentsIssued: React.FC<{ rows: Gstr1Return['tables']['documents_issued'
             <Th right>Cancelled</Th>
             <Th right>Net</Th>
             <Th>Gaps</Th>
+            <Th>Duplicates</Th>
           </>
         }
       >
@@ -246,6 +247,16 @@ const DocumentsIssued: React.FC<{ rows: Gstr1Return['tables']['documents_issued'
                 <span className="font-semibold" style={{ color: '#8f1d1d' }}>
                   {row.gaps.slice(0, 8).join(', ')}
                   {row.gaps.length > 8 ? ` +${row.gaps.length - 8} more` : ''}
+                </span>
+              )}
+            </Td>
+            <Td>
+              {row.duplicates.length === 0 ? (
+                <span className="text-gray-300">none</span>
+              ) : (
+                <span className="font-semibold" style={{ color: '#8f1d1d' }}>
+                  {row.duplicates.slice(0, 8).join(', ')}
+                  {row.duplicates.length > 8 ? ` +${row.duplicates.length - 8} more` : ''}
                 </span>
               )}
             </Td>

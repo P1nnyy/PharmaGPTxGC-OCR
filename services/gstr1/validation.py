@@ -383,6 +383,20 @@ def _check_aggregates(report: ValidationReport, tables: dict) -> None:
         )
 
     for series in tables["documents"].series:
+        if series.duplicates:
+            report.add(
+                code="SERIES_DUPLICATE", severity=BLOCKING, acknowledgeable=False,
+                message=(
+                    f"Series {series.series_prefix} has more than one document numbered "
+                    f"{', '.join(str(d) for d in series.duplicates[:10])}"
+                    f"{'…' if len(series.duplicates) > 10 else ''}. Rule 46(b) makes a "
+                    "serial unique within the financial year, and two bills sharing one "
+                    "are indistinguishable in a return. Find out which is which before "
+                    "filing."
+                ),
+                record_type="SERIES", record_id=series.series_prefix,
+                context={"duplicates": series.duplicates},
+            )
         if not series.gaps:
             continue
         report.add(

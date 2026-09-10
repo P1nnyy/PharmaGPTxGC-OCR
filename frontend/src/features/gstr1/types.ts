@@ -109,6 +109,7 @@ export interface SeriesRow {
   cancelled: number;
   net_issued: number;
   gaps: number[];
+  duplicates: number[];
 }
 
 export interface Gstr1Return {

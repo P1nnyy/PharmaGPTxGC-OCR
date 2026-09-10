@@ -18,7 +18,7 @@ this go negative?" stays a question about an aggregate - which is exactly what
 Table 7's guard has to ask.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Iterable, Optional
@@ -537,6 +537,10 @@ class SeriesSummary:
     total_issued: int = 0
     cancelled: int = 0
     gaps: list = field(default_factory=list)
+    # Numbers used by more than one document. Distinct from a gap and more
+    # serious: two bills sharing a serial are indistinguishable in a return,
+    # and the offline design has no conflict resolver downstream to catch it.
+    duplicates: list = field(default_factory=list)
 
     @property
     def net_issued(self) -> int:
@@ -551,6 +555,10 @@ class DocumentsIssued:
     @property
     def has_gaps(self) -> bool:
         return any(s.gaps for s in self.series)
+
+    @property
+    def has_duplicates(self) -> bool:
+        return any(s.duplicates for s in self.series)
 
 
 def aggregate_documents_issued(documents: Iterable[OutwardDocument]) -> DocumentsIssued:
@@ -595,6 +603,7 @@ def aggregate_documents_issued(documents: Iterable[OutwardDocument]) -> Document
             total_issued=len(group),
             cancelled=sum(1 for d in group if d.status == DocumentStatus.CANCELLED),
             gaps=[n for n in range(first.serial_sequence, last.serial_sequence + 1) if n not in present],
+            duplicates=sorted(n for n, count in Counter(sequences).items() if count > 1),
         )
         issued.series.append(summary)
 
