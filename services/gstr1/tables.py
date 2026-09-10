@@ -26,6 +26,7 @@ from typing import Iterable, Optional
 from core.hsn import normalize_hsn
 from services.gstr1.model import (
     DocumentStatus,
+    DocumentType,
     OutwardDocument,
     SupplyClass,
     SupplyType,
@@ -222,6 +223,10 @@ def qualifies_for_b2cl(document: OutwardDocument) -> bool:
     """
     return (
         document.is_reportable
+        # Invoices only. A credit note to an unregistered person nets into the
+        # Table 7 aggregate; a large inter-state one would be Table 9B's
+        # CDNUR, which this engine does not build.
+        and document.document_type == DocumentType.INVOICE
         and not document.is_b2b
         and document.supply_type == SupplyType.INTER
         and document.invoice_value_paise > B2CL_THRESHOLD_PAISE
@@ -289,6 +294,22 @@ class B2bInvoice:
     rate_blocks: list = field(default_factory=list)
 
 
+def credit_notes_to_registered(documents: Iterable[OutwardDocument]) -> list:
+    """B2B credit notes, which Table 4A must not swallow.
+
+    A credit note against a registered person is reported in Table 9B (CDNR),
+    which is a document-level table of its own and outside what this engine
+    builds. It is collected here rather than ignored so the validation report
+    can say it has been left out - listing it in Table 4A would file a
+    reduction as if it were a supply, and dropping it silently would understate
+    the shop's credit notes with nothing to show for it.
+    """
+    return [
+        d for d in reportable(documents)
+        if d.is_b2b and d.document_type == DocumentType.CREDIT_NOTE
+    ]
+
+
 def aggregate_b2b(documents: Iterable[OutwardDocument]) -> list:
     """Table 4A. Supplies to registered persons, invoice-wise.
 
@@ -296,10 +317,13 @@ def aggregate_b2b(documents: Iterable[OutwardDocument]) -> list:
     commonly handled by the pharmacy raising its own outward tax invoice
     against the distributor's GSTIN, which is an outward B2B supply and has to
     be reported as one.
+
+    Invoices only. A credit note to a registered person belongs in Table 9B -
+    see `credit_notes_to_registered`.
     """
     entries = []
     for document in reportable(documents):
-        if not document.is_b2b:
+        if not document.is_b2b or document.document_type != DocumentType.INVOICE:
             continue
         entries.append(
             B2bInvoice(
