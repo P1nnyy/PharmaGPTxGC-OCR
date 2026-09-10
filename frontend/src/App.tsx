@@ -17,6 +17,7 @@ import { InvoiceHistoryPage } from './pages/InvoiceHistoryPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { InventoryPage } from './pages/InventoryPage';
 import { ReportsPage } from './features/reports';
+import { Gstr1Page } from './features/gstr1';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
 
 // Old Developer Pages (under debug route)
@@ -135,6 +136,14 @@ export const App: React.FC = () => {
               element={
                 <SaaSLayout>
                   <ReportsPage />
+                </SaaSLayout>
+              }
+            />
+            <Route
+              path="/gst-returns"
+              element={
+                <SaaSLayout>
+                  <Gstr1Page />
                 </SaaSLayout>
               }
             />

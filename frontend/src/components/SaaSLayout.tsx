@@ -7,6 +7,7 @@ import { apiClient } from '../api/client';
 import {
   BarChart3,
   Bell,
+  FileText,
   HelpCircle,
   History,
   LayoutDashboard,
@@ -54,6 +55,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
     { name: 'Products', path: '/catalogue', icon: Tags },
     { name: 'Inventory', path: '/inventory', icon: Package },
     { name: 'Reports', path: '/reports', icon: BarChart3 },
+    { name: 'GST Returns', path: '/gst-returns', icon: FileText },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];
 
