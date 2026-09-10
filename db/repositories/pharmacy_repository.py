@@ -14,8 +14,16 @@ comparing the seller's state code with ours.
 from typing import Any, Optional
 
 from core.gstin import GstinError, parse as parse_gstin
+from core.hsn import policy_digits, policy_for_aato
 from core.tenancy import current_tenant
 from db.graph_db import get_driver
+
+# How often this shop files GSTR-1. A shop on QRMP files one return per
+# quarter; everyone else files monthly. Nothing about an outward return may
+# assume monthly — the aggregation window, the filing lock and the documents
+# table all follow this, and a quarterly filer aggregated by month would file
+# three returns where one was due.
+FILING_FREQUENCIES = {"MONTHLY", "QUARTERLY"}
 
 # What a shop must tell us before it can scan. Deliberately short: each of
 # these earns its place by changing how an invoice is read or reported, and
@@ -32,9 +40,17 @@ WRITABLE_FIELDS = (
     "fssai_number",          # only if they stock nutraceuticals
     "address_line1", "address_line2", "city", "pincode",
     "phone", "contact_email",
+    # --- tax identity: what decides the shape of an outward return.
+    "filing_frequency",       # MONTHLY or QUARTERLY (QRMP)
+    "hsn_digit_policy",       # an explicit override; normally derived from AATO
+    "aato_paise",             # declared aggregate turnover, PAN-wide, in paise
+    "aato_financial_year",    # the FY start year that declaration covers
+    "aato_source",            # where the figure came from, for the audit trail
 )
 
-_PUBLIC = WRITABLE_FIELDS + ("id", "name", "pan", "state_code", "state", "profile_complete")
+_PUBLIC = WRITABLE_FIELDS + (
+    "id", "name", "pan", "state_code", "state", "profile_complete",
+)
 
 
 class ProfileError(ValueError):
@@ -93,6 +109,31 @@ def update_profile(fields: dict[str, Any], pharmacy_id: Optional[str] = None) ->
             raise ProfileError("An Indian PIN code is six digits.")
         clean["pincode"] = pin
 
+    if "filing_frequency" in clean and clean["filing_frequency"]:
+        frequency = str(clean["filing_frequency"]).strip().upper()
+        if frequency not in FILING_FREQUENCIES:
+            raise ProfileError(
+                "Filing frequency is MONTHLY or QUARTERLY. A shop on QRMP files "
+                "quarterly."
+            )
+        clean["filing_frequency"] = frequency
+
+    if "hsn_digit_policy" in clean and clean["hsn_digit_policy"]:
+        policy = str(clean["hsn_digit_policy"]).strip().upper()
+        if policy not in {"FOUR_DIGIT", "SIX_DIGIT"}:
+            raise ProfileError("HSN digit policy is FOUR_DIGIT or SIX_DIGIT.")
+        clean["hsn_digit_policy"] = policy
+
+    # Turnover is money, so it is paise and it is an integer. A float here
+    # would be a float on the threshold that decides how many HSN digits get
+    # filed, which is not a place to lose precision.
+    if "aato_paise" in clean and clean["aato_paise"] is not None:
+        value = clean["aato_paise"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ProfileError("Aggregate turnover must be an integer number of paise.")
+        if value < 0:
+            raise ProfileError("Aggregate turnover cannot be negative.")
+
     if not clean:
         existing = get_profile(workspace)
         if existing is None:
@@ -135,3 +176,49 @@ def own_gstin(pharmacy_id: Optional[str] = None) -> Optional[str]:
     """This workspace's GSTIN, for telling buyer from seller on a scan."""
     profile = get_profile(pharmacy_id)
     return (profile or {}).get("gstin")
+
+
+def tax_identity(pharmacy_id: Optional[str] = None) -> dict:
+    """Everything an outward return needs to know about who is filing it.
+
+    Resolved rather than raw, because two of these are decisions rather than
+    stored values and both of them change what gets filed.
+
+    **Filing frequency** defaults to MONTHLY when unset. That is the common
+    case and the safe one: a monthly filer aggregated monthly is right, whereas
+    defaulting a monthly filer to quarterly would silently merge three months
+    into one return. The engine still refuses to close a period when the
+    frequency was never set — see the validation report — so this default gets
+    a shop as far as *previewing* a return and no further.
+
+    **HSN digits** come from an explicit `hsn_digit_policy` if the shop set
+    one, otherwise from declared aggregate turnover. Turnover is *declared*,
+    not derived: AATO is PAN-wide across every GSTIN on the PAN, and this
+    workspace holds the sales of exactly one of them. Computing it from what we
+    can see would understate it for any multi-GSTIN business and quietly file
+    four digits where six were owed. So it is asked for, kept with the year it
+    covers and where it came from, and cross-checked against our own sales
+    rather than replaced by them.
+    """
+    profile = get_profile(pharmacy_id) or {}
+    declared_aato = profile.get("aato_paise")
+    policy = profile.get("hsn_digit_policy") or policy_for_aato(declared_aato)
+    return {
+        "gstin": profile.get("gstin"),
+        "pan": profile.get("pan"),
+        "state_code": profile.get("state_code"),
+        "state": profile.get("state"),
+        "legal_name": profile.get("legal_name"),
+        "trade_name": profile.get("trade_name"),
+        # None, not "MONTHLY", when unset — the caller has to be able to tell
+        # "this shop files monthly" from "nobody has said", because only one of
+        # those is safe to file on.
+        "filing_frequency": profile.get("filing_frequency"),
+        "effective_filing_frequency": profile.get("filing_frequency") or "MONTHLY",
+        "hsn_digit_policy": policy,
+        "hsn_digits": policy_digits(policy),
+        "hsn_policy_is_declared": bool(profile.get("hsn_digit_policy")),
+        "aato_paise": declared_aato,
+        "aato_financial_year": profile.get("aato_financial_year"),
+        "aato_source": profile.get("aato_source"),
+    }
