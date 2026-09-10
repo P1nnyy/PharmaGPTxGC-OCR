@@ -73,6 +73,12 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT stock_movement_id IF NOT EXISTS FOR (n:StockMovement) REQUIRE n.id IS UNIQUE",
     "CREATE INDEX stock_movement_scope IF NOT EXISTS FOR (n:StockMovement) ON (n.pharmacy_id)",
     "CREATE CONSTRAINT sale_line_id IF NOT EXISTS FOR (n:SaleLine) REQUIRE n.id IS UNIQUE",
+    # The ITC reversal ledger. Append-only like the stock ledger, and read
+    # per workspace and tax period by the 3B worksheet and the reversal
+    # register, so both are indexed.
+    "CREATE CONSTRAINT itc_reversal_id IF NOT EXISTS FOR (n:ItcReversal) REQUIRE n.id IS UNIQUE",
+    "CREATE INDEX itc_reversal_scope IF NOT EXISTS FOR (n:ItcReversal) ON (n.pharmacy_id)",
+    "CREATE INDEX itc_reversal_period IF NOT EXISTS FOR (n:ItcReversal) ON (n.tax_period)",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key

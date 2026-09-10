@@ -15,7 +15,7 @@ to agree about what 12% of a figure is, and the only way to guarantee that is
 for both sides to round in the same direction at the same step.
 """
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional, Union
 
 # Rates are held in integer basis points: 1200 bp is 12.00%. A float
@@ -129,6 +129,39 @@ def parse_rupees_to_paise(value: Money) -> Optional[int]:
     except (InvalidOperation, ValueError):
         return None
     return -paise if negative else paise
+
+
+def paise_from_legacy_rupees(value: Money) -> Optional[int]:
+    """Reads a *stored float* rupee figure into paise. The legacy boundary.
+
+    Separate from `parse_rupees_to_paise`, and deliberately more forgiving,
+    because the two read different things. That one reads what a person typed,
+    where a third decimal place is a typo worth refusing. This one reads a
+    float that is already in the database - the purchase side (`Invoice`,
+    `LineItem`) predates the integer-paise rule and stores rupees as floats -
+    where a third decimal place is not a typo but the ordinary residue of
+    binary arithmetic. `1234.56` round-trips through a float as
+    `1234.5600000000001`, and refusing that would refuse a real invoice.
+
+    So it rounds to the nearest paisa rather than refusing. That is the best
+    available reading of a figure whose precision was already lost before it
+    got here, and rounding once on the way in is what keeps everything
+    downstream exact.
+
+    Use it **only** at a read boundary over legacy float storage. Anything
+    written from now on is paise, and passing a typed figure through here
+    instead of `parse_rupees_to_paise` would silently accept a typo.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value * 100
+    try:
+        # Via Decimal(str(...)) so the half-up rule is applied to the decimal
+        # the float is nearest to, not to its binary expansion.
+        return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 def paise_to_rupees(paise: Optional[int]) -> Optional[float]:
