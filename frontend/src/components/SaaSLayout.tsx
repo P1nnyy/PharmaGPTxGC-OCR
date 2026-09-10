@@ -18,7 +18,8 @@ import {
   Search,
   Settings,
   Tags,
-  Trash2, // Destructive database zap icon
+  Trash2,
+  TrendingUp, // Destructive database zap icon
   Upload
 } from 'lucide-react';
 
@@ -57,6 +58,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
     { name: 'Inventory', path: '/inventory', icon: Package },
     { name: 'Reports', path: '/reports', icon: BarChart3 },
     { name: 'GST Returns', path: '/gst-returns', icon: FileText },
+    { name: 'Business Reports', path: '/business-reports', icon: TrendingUp },
     { name: 'Statutory Reports', path: '/statutory-reports', icon: ClipboardList },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];

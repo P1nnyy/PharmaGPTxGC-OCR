@@ -19,6 +19,7 @@ import { InventoryPage } from './pages/InventoryPage';
 import { ReportsPage } from './features/reports';
 import { Gstr1Page } from './features/gstr1';
 import { StatutoryPage } from './features/statutory';
+import { ManagementPage } from './features/management';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
 
 // Old Developer Pages (under debug route)
@@ -155,6 +156,22 @@ export const App: React.FC = () => {
                   <StatutoryPage />
                 </SaaSLayout>
               }
+            />
+            <Route
+              path="/reports/expiry-risk"
+              element={<SaaSLayout><ManagementPage initialTab="expiry-risk" /></SaaSLayout>}
+            />
+            <Route
+              path="/reports/daily-sales"
+              element={<SaaSLayout><ManagementPage initialTab="daily-sales" /></SaaSLayout>}
+            />
+            <Route
+              path="/reports/stock-ledger"
+              element={<SaaSLayout><ManagementPage initialTab="stock-ledger" /></SaaSLayout>}
+            />
+            <Route
+              path="/business-reports"
+              element={<SaaSLayout><ManagementPage /></SaaSLayout>}
             />
             <Route
               path="/settings"

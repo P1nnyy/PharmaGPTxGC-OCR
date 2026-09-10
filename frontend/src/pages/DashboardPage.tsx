@@ -1,288 +1,194 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { apiClient } from '../api/client';
-import { useRun } from '../context/RunContext';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
-  Upload,
-  FileText,
-  AlertCircle,
-  CheckCircle2,
-  Package,
-  ArrowRight,
-  TrendingUp,
-  MessageSquare
+  AlertCircle, ArrowDownRight, ArrowRight, ArrowUpRight,
+  CheckCircle2, Loader2, RefreshCw
 } from 'lucide-react';
 
-export const DashboardPage: React.FC = () => {
-  const { runs } = useRun();
-  const navigate = useNavigate();
+import { managementApi } from '../features/management/api';
+import type { DashboardCard, DashboardReport } from '../features/management/types';
 
-  // SKU count comes from the server. It used to be read from localStorage,
-  // which meant the tile only ever counted what THIS browser had verified -
-  // zero on any other machine, including the deployed site.
-  const [inventoryItemsCount, setInventoryItemsCount] = useState(0);
+/**
+ * Four cards, each one a number somebody can act on.
+ *
+ * This page used to show lifetime scans, invoices processed and products in
+ * catalogue. Every one of those describes the software's activity rather than
+ * the shop's, and none of them changes what anybody does today - which is why
+ * a dashboard made of them gets opened once and then ignored.
+ *
+ * The test each card here had to pass: **if this number moves, does the
+ * shopkeeper do something differently?** Input credit at risk from expiry
+ * passes it hardest, which is why it is not buried at the bottom.
+ *
+ * Every figure comes from `/management/dashboard`. Nothing is computed here.
+ */
 
-  useEffect(() => {
-    let cancelled = false;
-    apiClient
-      .getInventory()
-      .then((data) => {
-        if (!cancelled) setInventoryItemsCount(data.stats.total_skus);
-      })
-      // A failed tile stays at zero rather than breaking the dashboard.
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+const rupees = new Intl.NumberFormat('en-IN', {
+  style: 'currency', currency: 'INR', maximumFractionDigits: 0
+});
 
-  // Compute stat metrics based on Runs storage
-  const totalInvoicesCount = runs.length;
-  const pendingReviewCount = runs.filter(
-    (r) => r.status === 'needs_review' || r.status === 'failed'
-  ).length;
-  const verifiedCount = runs.filter((r) => r.status === 'verified').length;
+const TONES = {
+  neutral: { border: '#e2e8f0', background: '#ffffff', ink: '#0f172a', accent: '#64748b' },
+  good: { border: '#c6e9d4', background: '#f4fbf7', ink: '#1c6b41', accent: '#1c9c66' },
+  warn: { border: '#f5dfae', background: '#fffbf3', ink: '#7a5205', accent: '#b8860b' },
+  bad: { border: '#f3c9c9', background: '#fff7f7', ink: '#8f1d1d', accent: '#d03b3b' }
+} as const;
 
-  // Grab the 5 most recent runs
-  const recentInvoices = runs.slice(0, 5);
-
+const Delta: React.FC<{ percent?: number | null; label?: string; was?: number }> = ({
+  percent, label, was
+}) => {
+  if (percent === null || percent === undefined) {
+    return <span className="text-[11px] text-gray-400">{label ? `${label} — no comparison` : ''}</span>;
+  }
+  const up = percent >= 0;
+  const Icon = up ? ArrowUpRight : ArrowDownRight;
   return (
-    <div className="space-y-8 animate-fade-in">
-      {/* Welcome Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-[#0f172a] tracking-tight">Good morning, Admin.</h2>
-          <p className="text-gray-500 text-sm">Here's your invoice overview for today.</p>
-        </div>
-        <button
-          onClick={() => navigate('/upload')}
-          className="bg-[#1b5dfc] hover:bg-[#154ecb] text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-all duration-200 flex items-center space-x-2 shadow-lg shadow-blue-500/15 cursor-pointer"
-        >
-          <Upload size={16} />
-          <span>Upload Invoice</span>
-        </button>
-      </div>
-
-      {/* Summary Cards Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {/* Total Invoices */}
-        <div className="bg-white p-6 rounded-2xl border border-[#e2e8f0] shadow-sm flex items-center space-x-4">
-          <div className="p-3 bg-blue-50 rounded-xl text-[#1b5dfc]">
-            <FileText size={24} />
-          </div>
-          <div>
-            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Total Invoices</span>
-            <strong className="text-2xl font-bold text-[#0f172a]">{totalInvoicesCount}</strong>
-          </div>
-        </div>
-
-        {/* Pending Review */}
-        <div className="bg-white p-6 rounded-2xl border border-[#e2e8f0] shadow-sm flex items-center space-x-4 relative overflow-hidden">
-          <div className="p-3 bg-amber-50 rounded-xl text-amber-600">
-            <AlertCircle size={24} />
-          </div>
-          <div>
-            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Pending Review</span>
-            <strong className="text-2xl font-bold text-[#0f172a]">{pendingReviewCount}</strong>
-          </div>
-          {pendingReviewCount > 0 && (
-            <span className="absolute top-3 right-3 bg-amber-100 text-amber-700 text-[9px] font-bold px-2 py-0.5 rounded-full">
-              Attention Required
-            </span>
-          )}
-        </div>
-
-        {/* Verified Today */}
-        <div className="bg-white p-6 rounded-2xl border border-[#e2e8f0] shadow-sm flex items-center space-x-4">
-          <div className="p-3 bg-green-50 rounded-xl text-green-600">
-            <CheckCircle2 size={24} />
-          </div>
-          <div>
-            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Verified Today</span>
-            <strong className="text-2xl font-bold text-[#0f172a]">{verifiedCount}</strong>
-          </div>
-        </div>
-
-        {/* Inventory Items */}
-        <div className="bg-white p-6 rounded-2xl border border-[#e2e8f0] shadow-sm flex items-center space-x-4">
-          <div className="p-3 bg-indigo-50 rounded-xl text-indigo-600">
-            <Package size={24} />
-          </div>
-          <div>
-            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Inventory SKUs</span>
-            <strong className="text-2xl font-bold text-[#0f172a]">
-              {inventoryItemsCount.toLocaleString()}
-            </strong>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Content Sections: Invoices Table & Support */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recent Invoices Table (Span 2) */}
-        <div className="lg:col-span-2 bg-white rounded-2xl border border-[#e2e8f0] shadow-sm overflow-hidden flex flex-col justify-between">
-          <div>
-            <div className="p-6 border-b border-[#e2e8f0] flex items-center justify-between">
-              <h3 className="text-base font-bold text-[#0f172a]">Recent Invoices</h3>
-              <button
-                onClick={() => navigate('/history')}
-                className="text-xs font-semibold text-[#1b5dfc] hover:text-[#154ecb] flex items-center space-x-1"
-              >
-                <span>View All</span>
-                <ArrowRight size={14} />
-              </button>
-            </div>
-            
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-[#f8fafc] border-b border-[#e2e8f0] text-gray-400 font-semibold text-[10px] uppercase tracking-wider">
-                    <th className="p-4 pl-6">Invoice #</th>
-                    <th className="p-4">Seller</th>
-                    <th className="p-4">Date</th>
-                    <th className="p-4 text-right">Amount</th>
-                    <th className="p-4 text-center">Status</th>
-                    <th className="p-4 text-center pr-6">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#e2e8f0] text-xs text-gray-700">
-                  {recentInvoices.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="text-center py-12 text-gray-400">
-                        No invoice records available. Upload an invoice to get started.
-                      </td>
-                    </tr>
-                  ) : (
-                    recentInvoices.map((inv) => {
-                      const seller = inv.seller_name || '—';
-                      const amount = inv.grand_total
-                        ? `₹${inv.grand_total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : (inv.confidence ? `₹${(inv.confidence * 1500).toFixed(2)}` : '—');
-                      const dispInvoiceNumber = inv.invoice_number ? `#${inv.invoice_number}` : `#${inv.run_id.substring(0, 8)}`;
-
-                      return (
-                        <tr key={inv.run_id} className="hover:bg-[#f8fafc] transition-colors">
-                          <td className="p-4 pl-6 font-semibold text-[#0f172a]">
-                            {dispInvoiceNumber}
-                          </td>
-                          <td className="p-4 font-medium max-w-[150px] truncate">
-                            {seller}
-                          </td>
-                          <td className="p-4 text-gray-500">
-                            {new Date(inv.timestamp).toLocaleDateString(undefined, {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric',
-                            })}
-                          </td>
-                          <td className="p-4 text-right font-bold text-[#0f172a]">
-                            {amount}
-                          </td>
-                          <td className="p-4 text-center">
-                            <span
-                              className={`inline-block px-2.5 py-1 rounded-full text-[10px] font-bold ${
-                                inv.status === 'verified'
-                                  ? 'bg-green-50 text-green-700 border border-green-200'
-                                  : inv.status === 'safe_for_erp'
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-amber-50 text-amber-700 border border-amber-200'
-                              }`}
-                            >
-                              {inv.status === 'verified'
-                                ? 'Verified'
-                                : inv.status === 'safe_for_erp'
-                                  ? 'Auto Verified'
-                                  : 'Needs Review'}
-                            </span>
-                          </td>
-                          <td className="p-4 text-center pr-6">
-                            <button
-                              onClick={() => navigate(`/review/${inv.run_id}`)}
-                              className="p-1.5 bg-[#f4f5fa] hover:bg-[#e2e8f0] text-[#1b5dfc] rounded-lg transition-colors cursor-pointer"
-                              title="Review Invoice"
-                            >
-                              <ArrowRight size={14} />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div className="p-4 bg-[#f8fafc] border-t border-[#e2e8f0] text-center text-[10px] text-gray-400">
-            Showing last {recentInvoices.length} invoices. Filter and edit in Invoice History.
-          </div>
-        </div>
-
-        {/* Right side widgets: Support card */}
-        <div className="space-y-6 flex flex-col justify-between">
-          {/* Support widget */}
-          <div className="bg-[#1b5dfc] text-white p-6 rounded-2xl border border-transparent shadow-lg shadow-blue-500/15 flex flex-col justify-between flex-1">
-            <div className="space-y-4">
-              <div className="p-3 bg-white/10 rounded-xl w-fit text-white">
-                <MessageSquare size={24} />
-              </div>
-              <h3 className="text-lg font-bold">Need Assistance?</h3>
-              <p className="text-blue-100 text-xs leading-relaxed">
-                Our automated OCR can handle batch processing for complex invoices. Contact support for training sessions or layout troubleshooting.
-              </p>
-            </div>
-            <button
-              onClick={() => window.open('mailto:support@pharmagpt.co')}
-              className="w-full mt-6 bg-white hover:bg-blue-50 text-[#1b5dfc] font-semibold py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
-            >
-              Talk to Support
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Inventory Trends Section */}
-      <div className="bg-white p-6 rounded-2xl border border-[#e2e8f0] shadow-sm">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h3 className="text-base font-bold text-[#0f172a]">Inventory Trends</h3>
-            <p className="text-gray-400 text-xs">Real-time stock movement across categories.</p>
-          </div>
-          {inventoryItemsCount > 0 && (
-            <div className="flex items-center space-x-1.5 text-green-600 bg-green-50 px-2.5 py-1 rounded-full text-xs font-semibold">
-              <TrendingUp size={14} />
-              <span>+12.4% this month</span>
-            </div>
-          )}
-        </div>
-
-        {inventoryItemsCount === 0 ? (
-          <div className="h-48 w-full flex flex-col items-center justify-center border border-dashed border-gray-200 rounded-xl text-gray-400 text-xs">
-            <Package size={24} className="mb-2 text-gray-300" />
-            <span>No stock records in inventory to plot trends.</span>
-          </div>
-        ) : (
-          /* Custom Mock SVG Bar Chart */
-          <div className="h-48 w-full flex items-end justify-between px-4 pt-4 border-b border-gray-100">
-            {[40, 25, 75, 30, 65, 50, 90, 45, 80, 60, 70, 95].map((val, idx) => (
-              <div key={idx} className="flex flex-col items-center flex-1 group">
-                <div 
-                  className="w-8/12 bg-gradient-to-t from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 rounded-t-md transition-all duration-300 relative"
-                  style={{ height: `${val}%` }}
-                >
-                  <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-[#0f172a] text-white text-[9px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity font-mono pointer-events-none">
-                    {val * 10}SKUs
-                  </div>
-                </div>
-                <span className="text-[9px] text-gray-400 mt-2 font-mono">
-                  {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][idx]}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
+    <span className="inline-flex items-center gap-1 text-[11px]">
+      <span className={`inline-flex items-center gap-0.5 font-semibold ${
+        up ? 'text-[#1c6b41]' : 'text-[#8f1d1d]'
+      }`}>
+        <Icon size={12} aria-hidden />{Math.abs(percent)}%
+      </span>
+      <span className="text-gray-500">
+        {label}{was !== undefined ? ` (${rupees.format(was)})` : ''}
+      </span>
+    </span>
   );
 };
 
-export default DashboardPage;
+const Card: React.FC<{ card: DashboardCard }> = ({ card }) => {
+  const tone = TONES[card.tone];
+  const value = card.unit === 'currency' ? rupees.format(card.value) : String(card.value);
+
+  return (
+    <Link
+      to={card.link}
+      className="group rounded-2xl border p-5 flex flex-col gap-1.5 transition-shadow hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1b5dfc]"
+      style={{ borderColor: tone.border, background: tone.background }}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider"
+              style={{ color: tone.accent }}>
+          {card.title}
+        </span>
+        <ArrowRight
+          size={14}
+          className="text-gray-300 group-hover:text-[#1b5dfc] transition-colors"
+          aria-hidden
+        />
+      </span>
+
+      <strong className="text-3xl font-bold leading-tight tabular-nums" style={{ color: tone.ink }}>
+        {value}
+      </strong>
+
+      <span className="text-xs text-gray-600">{card.detail}</span>
+
+      {card.comparison_label && (
+        <Delta
+          percent={card.comparison_percent}
+          label={card.comparison_label}
+          was={card.comparison_value}
+        />
+      )}
+
+      {card.secondary && (
+        <span className="text-[11px] text-gray-500">
+          {card.secondary.label}: <strong className="tabular-nums">
+            {typeof card.secondary.value === 'number'
+              ? rupees.format(card.secondary.value)
+              : card.secondary.value}
+          </strong>
+        </span>
+      )}
+
+      {card.note && (
+        <span className="text-[11px] leading-snug mt-0.5" style={{ color: tone.ink }}>
+          {card.note}
+        </span>
+      )}
+    </Link>
+  );
+};
+
+export const DashboardPage: React.FC = () => {
+  const [report, setReport] = useState<DashboardReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setReport(await managementApi.dashboard());
+    } catch (caught) {
+      // Say the load failed rather than rendering zeroes, which would read as
+      // "no sales, no stock, nothing expiring" - a very different claim.
+      setError(caught instanceof Error ? caught.message : 'Could not load the dashboard.');
+      setReport(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const blocking = report?.cards.find((c) => c.id === 'compliance_actions');
+  const atRisk = report?.cards.find((c) => c.id === 'itc_at_risk');
+
+  return (
+    <div className="flex flex-col gap-6 p-6 max-w-[1400px] mx-auto">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-[#0f172a]">Today</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            {report ? `As of ${report.as_of}` : 'Where the shop stands right now.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm bg-white hover:bg-gray-50"
+        >
+          <RefreshCw size={14} aria-hidden /> Refresh
+        </button>
+      </header>
+
+      {loading && (
+        <p className="flex items-center gap-2 text-sm text-gray-500">
+          <Loader2 size={16} className="animate-spin" aria-hidden /> Working out where things stand…
+        </p>
+      )}
+
+      {error && (
+        <div className="rounded-xl border border-[#f3c9c9] bg-[#fdecec] p-4 text-sm text-[#8f1d1d] flex gap-2.5">
+          <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
+          {error}
+        </div>
+      )}
+
+      {report && !loading && (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {report.cards.map((card) => <Card key={card.id} card={card} />)}
+          </div>
+
+          {/* One line under the cards, and only when there is something to say. */}
+          {atRisk && atRisk.value > 0 ? (
+            <p className="text-sm text-gray-600">
+              The quickest win today is usually the expiry list —{' '}
+              <Link to="/reports/expiry-risk" className="text-[#1b5dfc] hover:underline">
+                see what can still go back to the distributor
+              </Link>.
+            </p>
+          ) : blocking && blocking.value === 0 ? (
+            <p className="flex items-center gap-2 text-sm text-gray-600">
+              <CheckCircle2 size={15} className="text-emerald-600" aria-hidden />
+              Nothing expiring soon and nothing blocking this period's return.
+            </p>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+};

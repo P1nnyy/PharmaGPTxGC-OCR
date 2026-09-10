@@ -10,7 +10,7 @@ import tailwindcss from '@tailwindcss/vite'
 // prefix would hand the page itself to the backend, which answers 404. The
 // real fix is to namespace the whole API under '/api' — worth doing, but it
 // touches the deployed edge config, so it is not bundled into this change.
-const API_PATHS = ['/health', '/upload-invoice', '/clear-cache', '/invoices', '/products', '/item-types', '/reports/', '/inventory/', '/tax-periods/', '/statutory/', '/auth/']
+const API_PATHS = ['/health', '/upload-invoice', '/clear-cache', '/invoices', '/products', '/item-types', '/reports/', '/inventory/', '/tax-periods/', '/statutory/', '/management/', '/auth/']
 
 // Overridable so the dev server can point at a backend running somewhere other
 // than the default port — e.g. verifying a branch against a local instance
