@@ -18,6 +18,12 @@ and are deliberately kept out of `requirements.txt` and the production image.
 aggregation engine — what each table holds, how the period close and its
 immutability lock work, and why a nil return still has to be filed.
 
+**Filing GSTR-3B, or reconciling before you file?** See
+[docs/STATUTORY_REPORTS.md](docs/STATUTORY_REPORTS.md) for the seven-report
+pack — how every figure drills back to its documents, the four cross-checks
+that run on load, why 4(A)(5) is provisional until GSTR-2B is wired in, and
+why the outward rows cannot be corrected in 3B at all.
+
 ## Quick Start (local)
 
 ```bash
