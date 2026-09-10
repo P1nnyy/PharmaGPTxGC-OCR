@@ -18,6 +18,7 @@ import { ProductsPage } from './pages/ProductsPage';
 import { InventoryPage } from './pages/InventoryPage';
 import { ReportsPage } from './features/reports';
 import { Gstr1Page } from './features/gstr1';
+import { StatutoryPage } from './features/statutory';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
 
 // Old Developer Pages (under debug route)
@@ -144,6 +145,14 @@ export const App: React.FC = () => {
               element={
                 <SaaSLayout>
                   <Gstr1Page />
+                </SaaSLayout>
+              }
+            />
+            <Route
+              path="/statutory-reports"
+              element={
+                <SaaSLayout>
+                  <StatutoryPage />
                 </SaaSLayout>
               }
             />

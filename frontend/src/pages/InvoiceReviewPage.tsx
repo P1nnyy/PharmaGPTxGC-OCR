@@ -325,13 +325,6 @@ const getFreeQty = (item: TableLineItem): number | null => {
   return item.free_quantity;
 };
 
-// Helper: Billed Qty + Free Qty
-const getReceivedQty = (item: TableLineItem): number => {
-  const billed = item.quantity ?? 0;
-  const free = item.free_quantity ?? 0;
-  return billed + free;
-};
-
 // Helper: the quantity shown in the Qty column — what actually arrived,
 // billed plus free. A "2.75 + 0.25" scheme line means 3 units on the shelf,
 // so 3 is the number the reviewer is checking against the physical delivery.
@@ -1463,42 +1456,19 @@ export const InvoiceReviewPage: React.FC = () => {
       await apiClient.updateInvoice(runId, buildUpdatePayload('verified'));
       setInvoiceStatus('verified');
 
-      // Keep the local inventory rollup (not yet migrated to the backend)
-      // in sync with the verified line items.
-      const storedInventory = localStorage.getItem('pharmaflow_inventory');
-      const inventory = storedInventory ? JSON.parse(storedInventory) : [];
-
-      lineItems.forEach((item) => {
-        if (!item.product_name.trim()) return;
-
-        const totalQty = getReceivedQty(item);
-        const mrp = item.mrp || 0;
-        const gst = item.gst_percent || 0;
-
-        const existingIdx = inventory.findIndex(
-          (inv: any) =>
-            inv.product.toLowerCase().trim() === item.product_name.toLowerCase().trim() &&
-            inv.batch.toLowerCase().trim() === (item.batch || 'N/A').toLowerCase().trim()
-        );
-
-        if (existingIdx >= 0) {
-          inventory[existingIdx].quantity += totalQty;
-          inventory[existingIdx].source_invoice = header.invoice_number || runId || 'Unknown';
-        } else {
-          inventory.push({
-            id: `inv-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-            product: item.product_name,
-            batch: item.batch || 'N/A',
-            expiry: item.expiry || 'N/A',
-            quantity: totalQty,
-            mrp: mrp || parseFloat(item.rate as any) || 0,
-            gst: gst,
-            source_invoice: header.invoice_number || runId || 'Unknown'
-          });
-        }
-      });
-
-      localStorage.setItem('pharmaflow_inventory', JSON.stringify(inventory));
+      // No local stock rollup is written here any more. It used to build a
+      // `pharmaflow_inventory` array in this browser from the verified lines,
+      // which meant stock existed only on the machine that pressed Verify -
+      // and the Inventory page already reads the server instead, so the array
+      // was written and never read.
+      //
+      // Removing it is not tidying. These lines feed a statutory return, and
+      // GST records have to be retained for 72 months; a store a cache clear
+      // destroys cannot hold them. The invoice is the record, it is already
+      // saved above, and `/inventory/stock` composes stock from invoices.
+      //
+      // The "clear local data" prompts still look for the old key, so a
+      // browser carrying a stale copy can still be cleaned out.
       await refreshRuns();
       navigate('/history');
     } catch (e: any) {

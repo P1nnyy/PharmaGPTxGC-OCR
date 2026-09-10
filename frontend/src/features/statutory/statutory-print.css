@@ -1,0 +1,109 @@
+/*
+ * Print rules for the statutory report pack.
+ *
+ * These reports get printed and filed. A pharmacy keeps GST records for 72
+ * months and an officer asking questions in year four is holding paper, not a
+ * browser tab - so what comes out of the printer has to stand on its own.
+ *
+ * Three things that follow from that:
+ *
+ *  - The page header repeats the shop, GSTIN and period. A loose sheet with a
+ *    column of figures and no period on it is evidence of nothing.
+ *  - Table rows do not break across pages, and headers repeat on each page.
+ *    A row split down the middle is a row somebody has to reassemble.
+ *  - Anything interactive disappears: tabs, buttons, filters, the drill
+ *    affordance. A printed underline suggesting you can click it is noise.
+ *
+ * The cross-check banner deliberately survives. If the pack did not reconcile,
+ * the paper has to say so - that is exactly the fact somebody would otherwise
+ * lose between the screen and the file.
+ */
+
+@media print {
+  /* Colour matters here: the failing-check banner is red for a reason. */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 14mm 10mm;
+    size: A4 landscape;
+  }
+
+  html, body {
+    background: #fff !important;
+  }
+
+  /* The app chrome: navigation, sidebar, toolbars. */
+  .print\:hidden,
+  nav,
+  aside.app-sidebar,
+  .statutory-toolbar,
+  .statutory-tabs {
+    display: none !important;
+  }
+
+  .statutory-page {
+    padding: 0 !important;
+    max-width: none !important;
+  }
+
+  /* Repeated on every sheet, so a page that gets separated still says what it
+     is and what period it covers. */
+  .statutory-print-header {
+    display: block !important;
+    margin-bottom: 8mm;
+    padding-bottom: 3mm;
+    border-bottom: 1px solid #333;
+  }
+
+  .statutory-card {
+    border: 1px solid #d4d4d8 !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    break-inside: auto;
+    margin-bottom: 6mm;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+  }
+
+  thead {
+    display: table-header-group; /* repeat headers on every page */
+  }
+
+  tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  th, td {
+    padding: 2mm 2.5mm !important;
+    border-bottom: 1px solid #e4e4e7 !important;
+  }
+
+  th {
+    background: #f4f4f5 !important;
+    font-size: 8pt;
+  }
+
+  /* Wide registers must not be clipped at the paper edge. */
+  .overflow-x-auto {
+    overflow: visible !important;
+  }
+
+  /* A number that was clickable on screen is just a number on paper. */
+  button {
+    all: unset !important;
+    font: inherit !important;
+    color: inherit !important;
+  }
+
+  a[href]::after {
+    content: '';
+  }
+}
