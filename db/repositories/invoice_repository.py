@@ -5,6 +5,7 @@ from core.config import settings
 from core.tenancy import current_tenant
 from core.dates import normalize_expiry, normalize_invoice_date
 from core.logger import logger
+from core.money import paise_from_legacy_rupees, tax_on_exclusive
 from db import product_repository
 from db.graph_db import get_driver
 from extraction.normalizers.canonical_invoice import CanonicalInvoice
@@ -539,6 +540,7 @@ def _update_invoice_tx(
 
     if status == "verified":
         _record_vendor_items(tx, invoice_id)
+        _replace_purchase_movements(tx, invoice_id)
 
     return True
 
@@ -818,3 +820,196 @@ def _get_invoice_tx(tx, invoice_id: str) -> Optional[dict]:
     data["line_items"] = line_items
 
     return data
+
+
+# ------------------------------------------------- the purchase side of stock
+
+
+def _generation_key(rows: list) -> str:
+    """A fingerprint of what an invoice's lines currently say.
+
+    Used to tell "verified again, nothing changed" from "verified again after a
+    correction". Without it, re-verifying an unchanged invoice would supersede
+    a generation and write an identical one - churn that makes the ledger
+    harder to read for no gain.
+    """
+    import hashlib
+
+    material = "|".join(
+        f"{r.get('product_id')}~{r.get('batch_number')}~{r.get('received')}"
+        f"~{r.get('taxable_paise')}~{r.get('gst_rate_bp')}~{r.get('expiry')}"
+        for r in rows
+    )
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _purchase_rows(tx, invoice_id: str) -> list:
+    """This invoice's lines, as stock movements would record them.
+
+    Received quantity is billed **plus free**, matching what
+    `inventory_repository` already counts as being on the shelf: a 10+2 scheme
+    puts twelve packs there, and costing them as ten would overstate unit cost
+    by a fifth. That is also why cost is carried as a line total and a
+    quantity rather than as a per-unit figure - the weighted average is taken
+    once, over sums, instead of averaging numbers that were each rounded.
+    """
+    records = tx.run(
+        """
+        MATCH (inv:Invoice {id: $id})-[:CONTAINS]->(li:LineItem)
+        OPTIONAL MATCH (li)-[:OF_PRODUCT]->(p:Product)
+        OPTIONAL MATCH (li)-[:OF_BATCH]->(b:Batch)
+        OPTIONAL MATCH (inv)-[:SUPPLIED_BY]->(v:Vendor)
+        RETURN li.id AS line_item_id, li.row_index AS row_index,
+               p.id AS product_id,
+               coalesce(b.batch_number, li.batch, '') AS batch_number,
+               coalesce(b.expiry_date, li.expiry) AS expiry,
+               coalesce(li.quantity, 0.0) AS quantity,
+               coalesce(li.free_quantity, 0.0) AS free_quantity,
+               li.amount AS amount, li.mrp AS mrp, li.gst_percent AS gst_percent,
+               v.id AS vendor_id, inv.invoice_date AS occurred_on,
+               inv.pharmacy_id AS pharmacy_id
+        ORDER BY li.row_index
+        """,
+        id=invoice_id,
+    )
+
+    rows = []
+    for record in records:
+        received = float(record["quantity"] or 0) + float(record["free_quantity"] or 0)
+        if not record["product_id"] or received <= 0:
+            # A line with no matched product cannot move a product's stock, and
+            # a line with no quantity moves nothing. Both are left out rather
+            # than recorded as zero movements nobody can act on.
+            continue
+        taxable_paise = paise_from_legacy_rupees(record["amount"]) or 0
+        gst_rate_bp = int(round(float(record["gst_percent"] or 0) * 100))
+        rows.append({
+            "line_item_id": record["line_item_id"],
+            "product_id": record["product_id"],
+            "batch_number": record["batch_number"] or "",
+            "expiry": record["expiry"],
+            "received": received,
+            "taxable_paise": taxable_paise,
+            "gst_rate_bp": gst_rate_bp,
+            "input_tax_paise": tax_on_exclusive(taxable_paise, gst_rate_bp),
+            "mrp_paise": paise_from_legacy_rupees(record["mrp"]) or 0,
+            "vendor_id": record["vendor_id"],
+            "occurred_on": record["occurred_on"],
+            "pharmacy_id": record["pharmacy_id"],
+        })
+    return rows
+
+
+def _replace_purchase_movements(tx, invoice_id: str) -> None:
+    """Records what this invoice put on the shelf, once it has been verified.
+
+    Verification is the trigger for the same reason it is for vendor items: an
+    unreviewed scan should not move stock or set a cost that every margin
+    figure will then be computed against.
+
+    **Why a generation rather than a plain insert.** `update_invoice` deletes
+    an invoice's line items and recreates them with fresh ids whenever they are
+    edited, so keying a movement to a line item id would leave the previous
+    movements orphaned and still counted - the stock and the cost basis would
+    both double on every correction. That is the duplicate-ingestion failure
+    the house rules call the highest-severity class of bug here.
+
+    So movements are written in generations. Correcting an invoice supersedes
+    the live generation and writes a new one; nothing is deleted, reads filter
+    on `superseded_by IS NULL`, and the history of what the ledger said before
+    the correction survives to explain why a figure moved.
+    """
+    rows = _purchase_rows(tx, invoice_id)
+    generation = _generation_key(rows)
+
+    live = tx.run(
+        """
+        MATCH (m:StockMovement {source_id: $id, reason: 'PURCHASE'})
+        WHERE m.superseded_by IS NULL
+        RETURN DISTINCT m.generation_key AS generation_key
+        """,
+        id=invoice_id,
+    ).single()
+
+    # Verified again with nothing changed: leave the ledger exactly as it is.
+    if live and live["generation_key"] == generation:
+        return
+
+    if live:
+        tx.run(
+            """
+            MATCH (m:StockMovement {source_id: $id, reason: 'PURCHASE'})
+            WHERE m.superseded_by IS NULL
+            SET m.superseded_by = $generation, m.superseded_at = $now
+            """,
+            id=invoice_id, generation=generation, now=_now_iso(),
+        )
+
+    if not rows:
+        return
+
+    tx.run(
+        """
+        MATCH (inv:Invoice {id: $id})
+        UNWIND $rows AS row
+        CREATE (m:StockMovement {
+            id: randomUUID(),
+            pharmacy_id: row.pharmacy_id,
+            product_id: row.product_id,
+            batch_number: row.batch_number,
+            expiry: row.expiry,
+            // Positive: a purchase puts stock on the shelf.
+            quantity_delta: row.received,
+            reason: 'PURCHASE',
+            // Cost is carried as a total and a quantity, never as a rounded
+            // per-unit figure, so the weighted average is exact.
+            taxable_paise: row.taxable_paise,
+            input_tax_paise: row.input_tax_paise,
+            gst_rate_bp: row.gst_rate_bp,
+            mrp_paise: row.mrp_paise,
+            vendor_id: row.vendor_id,
+            occurred_on: row.occurred_on,
+            recorded_at: $now,
+            source_type: 'Invoice',
+            source_id: $id,
+            source_line_id: row.line_item_id,
+            generation_key: $generation,
+            superseded_by: null
+        })
+        CREATE (m)-[:CAUSED_BY]->(inv)
+        """,
+        id=invoice_id, rows=rows, now=_now_iso(), generation=generation,
+    )
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def backfill_purchase_movements(pharmacy_id: Optional[str] = None) -> dict:
+    """Writes purchase movements for invoices verified before this existed.
+
+    Safe to run repeatedly: each invoice is compared against its live
+    generation and skipped when nothing has changed. That is what makes this
+    runnable from a prompt without anyone having to reason about whether it has
+    already been run today.
+    """
+    pharmacy_id = pharmacy_id or current_tenant()
+    driver = get_driver()
+    with driver.session() as session:
+        ids = session.execute_read(
+            lambda tx: [
+                r["id"] for r in tx.run(
+                    """
+                    MATCH (inv:Invoice {status: 'verified'})-[:BELONGS_TO]->(:Pharmacy {id: $pid})
+                    RETURN inv.id AS id ORDER BY inv.invoice_date
+                    """,
+                    pid=pharmacy_id,
+                )
+            ]
+        )
+        for invoice_id in ids:
+            session.execute_write(_replace_purchase_movements, invoice_id)
+    return {"invoices_considered": len(ids)}

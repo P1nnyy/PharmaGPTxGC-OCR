@@ -79,6 +79,12 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT itc_reversal_id IF NOT EXISTS FOR (n:ItcReversal) REQUIRE n.id IS UNIQUE",
     "CREATE INDEX itc_reversal_scope IF NOT EXISTS FOR (n:ItcReversal) ON (n.pharmacy_id)",
     "CREATE INDEX itc_reversal_period IF NOT EXISTS FOR (n:ItcReversal) ON (n.tax_period)",
+    # Stock movements are read three ways by the management reports: by
+    # product (margin, movers), by batch (the ledger and expiry risk), and by
+    # the invoice that caused them (superseding a generation on a correction).
+    "CREATE INDEX stock_movement_product IF NOT EXISTS FOR (n:StockMovement) ON (n.product_id)",
+    "CREATE INDEX stock_movement_batch IF NOT EXISTS FOR (n:StockMovement) ON (n.batch_number)",
+    "CREATE INDEX stock_movement_source IF NOT EXISTS FOR (n:StockMovement) ON (n.source_id)",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key
