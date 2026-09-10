@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from core.serials import SerialError, parse_serial
 from core.tenancy import current_tenant
 from core.tax_periods import period_label
 from db.graph_db import get_driver
@@ -55,17 +56,38 @@ def _period_key(pharmacy_id: str, period: str) -> str:
 # ---------------------------------------------------------------- the lock
 
 
-def is_period_filed(period: str, pharmacy_id: Optional[str] = None) -> bool:
-    """True once the return covering this period has been filed."""
+# A period is OPEN until its return is produced and accepted, then CLOSED.
+# Held as a status rather than inferred from a timestamp because "closed" is a
+# decision somebody made, and a return that was produced but rejected has to be
+# distinguishable from one that was never produced at all.
+PERIOD_OPEN = "OPEN"
+PERIOD_CLOSED = "CLOSED"
+
+
+def get_period(period: str, pharmacy_id: Optional[str] = None) -> dict:
+    """The filing state of one month. Always answers, even for a month that
+    has never been touched - an absent node means OPEN, not missing."""
     pharmacy_id = pharmacy_id or current_tenant()
     rows = _run_read(
         """
         MATCH (p:TaxPeriod {key: $key})
-        RETURN p.filed_at AS filed_at
+        RETURN p {.*} AS period
         """,
         key=_period_key(pharmacy_id, period),
     )
-    return bool(rows and rows[0].get("filed_at"))
+    if not rows or not rows[0].get("period"):
+        return {"period": period, "status": PERIOD_OPEN, "closed_at": None}
+    stored = dict(rows[0]["period"])
+    # `filed_at` predates the status field. A period closed by the older code
+    # is still closed, so it is read as such rather than silently reopening.
+    if not stored.get("status"):
+        stored["status"] = PERIOD_CLOSED if stored.get("filed_at") else PERIOD_OPEN
+    return stored
+
+
+def is_period_filed(period: str, pharmacy_id: Optional[str] = None) -> bool:
+    """True once the return covering this period has been filed."""
+    return get_period(period, pharmacy_id).get("status") == PERIOD_CLOSED
 
 
 def assert_period_open(period: str, pharmacy_id: Optional[str] = None) -> None:
@@ -75,6 +97,94 @@ def assert_period_open(period: str, pharmacy_id: Optional[str] = None) -> None:
             f"{period_label(period)} has been filed. A filed period cannot be "
             "edited — record a credit note or an amendment instead."
         )
+
+
+def close_period(
+    months: "list[str]",
+    payload: dict,
+    summary: dict,
+    closed_by: Optional[str] = None,
+    acknowledged: Optional["list[str]"] = None,
+    pharmacy_id: Optional[str] = None,
+) -> "list[dict]":
+    """Closes every month a return covers, and keeps what was filed.
+
+    Takes a list of months rather than one, because a QRMP shop files a single
+    GSTR-1 for a quarter: closing only the month somebody clicked would leave
+    the other two editable after their figures had gone to the portal, which is
+    precisely the drift the lock exists to prevent.
+
+    The payload is stored alongside the lock. A return that cannot be revised
+    has to be reproducible - when the portal disagrees six months later, the
+    question is what was actually sent, and recomputing it from records that
+    have moved on since answers a different question.
+
+    Idempotent on `closed_at`: closing twice keeps the first timestamp, because
+    the date a return was filed is a fact rather than a counter.
+    """
+    import json
+
+    pharmacy_id = pharmacy_id or current_tenant()
+    now = _now()
+    return [
+        _run_write(
+            """
+            MERGE (p:TaxPeriod {key: $key})
+            ON CREATE SET p.period = $period, p.pharmacy_id = $pharmacy_id
+            SET p.status = $status,
+                p.closed_at = coalesce(p.closed_at, $now),
+                p.closed_by = coalesce(p.closed_by, $closed_by),
+                p.filed_at = coalesce(p.filed_at, $now),
+                p.filed_by = coalesce(p.filed_by, $closed_by),
+                p.payload_json = coalesce(p.payload_json, $payload_json),
+                p.summary_json = coalesce(p.summary_json, $summary_json),
+                p.acknowledged = coalesce(p.acknowledged, $acknowledged),
+                p.covers_months = $covers_months
+            RETURN p {.*} AS period
+            """,
+            key=_period_key(pharmacy_id, month),
+            period=month,
+            pharmacy_id=pharmacy_id,
+            status=PERIOD_CLOSED,
+            now=now,
+            closed_by=closed_by,
+            payload_json=json.dumps(payload),
+            summary_json=json.dumps(summary),
+            acknowledged=list(acknowledged or []),
+            covers_months=list(months),
+        )[0]["period"]
+        for month in months
+    ]
+
+
+def cancel_sale(
+    sale_id: str, cancelled_by: Optional[str] = None, pharmacy_id: Optional[str] = None
+) -> dict:
+    """Cancels a bill without removing it.
+
+    The number stays in the series and the document stays in the graph. Table
+    13 reports it as issued-then-cancelled, which is what the portal
+    cross-checks against; deleting it would show a gap the shop cannot account
+    for. Refused once the period is filed - a cancellation after filing is an
+    amendment, not an edit.
+    """
+    pharmacy_id = pharmacy_id or current_tenant()
+    existing = get_sale(sale_id, pharmacy_id)
+    if existing is None:
+        raise ValueError("That sale no longer exists.")
+    assert_period_open(existing["tax_period"], pharmacy_id)
+    rows = _run_write(
+        """
+        MATCH (s:Sale {id: $sale_id, pharmacy_id: $pharmacy_id})
+        SET s.status = 'CANCELLED', s.cancelled_at = $now, s.cancelled_by = $cancelled_by
+        RETURN s {.*} AS sale
+        """,
+        sale_id=sale_id,
+        pharmacy_id=pharmacy_id,
+        now=_now(),
+        cancelled_by=cancelled_by,
+    )
+    return rows[0]["sale"] if rows else {}
 
 
 def mark_period_filed(
@@ -90,6 +200,7 @@ def mark_period_filed(
                       p.filed_at = $now, p.filed_by = $filed_by
         ON MATCH SET  p.filed_at = coalesce(p.filed_at, $now),
                       p.filed_by = coalesce(p.filed_by, $filed_by)
+        SET p.status = 'CLOSED'
         RETURN p.period AS period, p.filed_at AS filed_at, p.filed_by AS filed_by
         """,
         key=_period_key(pharmacy_id, period),
@@ -110,7 +221,11 @@ def reopen_period(period: str, pharmacy_id: Optional[str] = None) -> None:
     """
     pharmacy_id = pharmacy_id or current_tenant()
     _run_write(
-        "MATCH (p:TaxPeriod {key: $key}) SET p.filed_at = null, p.filed_by = null",
+        """
+        MATCH (p:TaxPeriod {key: $key})
+        SET p.status = 'OPEN', p.filed_at = null, p.filed_by = null,
+            p.closed_at = null, p.closed_by = null
+        """,
         key=_period_key(pharmacy_id, period),
     )
 
@@ -127,6 +242,13 @@ _SALE_FIELDS = """
     s.taxable_paise = $taxable_paise,
     s.cgst_paise = $cgst_paise,
     s.sgst_paise = $sgst_paise,
+    s.igst_paise = $igst_paise,
+    s.place_of_supply_state_code = $place_of_supply_state_code,
+    s.customer_gstin = $customer_gstin,
+    s.document_type = $document_type,
+    s.series_prefix = $series_prefix,
+    s.serial_sequence = $serial_sequence,
+    s.reverses_document_id = $reverses_document_id,
     s.exempt_paise = $exempt_paise,
     s.nil_rated_paise = $nil_rated_paise,
     s.non_gst_paise = $non_gst_paise,
@@ -142,6 +264,46 @@ _SALE_FIELDS = """
 """
 
 
+def _outward_params(computed: dict, bill_number: Optional[str], existing: Optional[dict] = None) -> dict:
+    """The fields an outward return needs, defaulted for A1's writers.
+
+    All optional. The day-total and import paths predate the return and set
+    none of them, and they have to keep working; a sale that says nothing about
+    its place of supply is reported as saying nothing, and the validation
+    report raises it. Defaulting to the shop's own state here would file an
+    inter-state supply as CGST plus SGST, which is the one failure this whole
+    engine exists to prevent.
+
+    The series is derived from the bill number rather than stored twice.
+    Table 13 needs to sort and find gaps in a series, which needs the sequence
+    as an integer, and re-parsing it on every read would be the same work done
+    repeatedly against data that cannot change.
+    """
+    existing = existing or {}
+    series_prefix, serial_sequence = None, None
+    if bill_number:
+        try:
+            series_prefix, serial_sequence = parse_serial(bill_number)
+        except SerialError:
+            # A bill number that does not end in a sequence - a photographed
+            # bill numbered "INV/A" - cannot be placed in a series. Table 13
+            # reports it as having none rather than guessing at one.
+            pass
+    return {
+        "igst_paise": computed.get("igst_paise", existing.get("igst_paise")) or 0,
+        "place_of_supply_state_code": computed.get(
+            "place_of_supply_state_code", existing.get("place_of_supply_state_code")
+        ),
+        "customer_gstin": computed.get("customer_gstin", existing.get("customer_gstin")),
+        "document_type": computed.get("document_type", existing.get("document_type")) or "INVOICE",
+        "series_prefix": series_prefix,
+        "serial_sequence": serial_sequence,
+        "reverses_document_id": computed.get(
+            "reverses_document_id", existing.get("reverses_document_id")
+        ),
+    }
+
+
 def upsert_sale(
     dedupe_key: str,
     computed: dict,
@@ -155,6 +317,7 @@ def upsert_sale(
     source_format: Optional[str] = None,
     notes: Optional[str] = None,
     pharmacy_id: Optional[str] = None,
+    allow_filed_period: bool = False,
 ) -> "tuple[dict, bool]":
     """Stores a sale, once. Returns `(sale, created)`.
 
@@ -169,7 +332,14 @@ def upsert_sale(
     reconciling to its own parts.
     """
     pharmacy_id = pharmacy_id or current_tenant()
-    assert_period_open(computed["tax_period"], pharmacy_id)
+    # `allow_filed_period` exists for exactly one caller: a bill that was
+    # issued offline and is only now syncing. It already exists in a
+    # customer's hand and nothing here can un-issue it, so it is recorded and
+    # flagged for amendment rather than refused - refusing it would lose it.
+    # Every other path is refused, which is what makes a filed period
+    # immutable in the repository rather than only in the UI.
+    if not allow_filed_period:
+        assert_period_open(computed["tax_period"], pharmacy_id)
 
     rows = _run_write(
         f"""
@@ -211,6 +381,7 @@ def upsert_sale(
         grand_total_paise=computed["grand_total_paise"],
         rate_source=computed.get("rate_source"),
         is_aggregate=bool(computed.get("is_aggregate", False)),
+        **_outward_params(computed, bill_number),
         bill_number=bill_number,
         source_file_hash=source_file_hash,
         source_image_ref=source_image_ref,
@@ -325,6 +496,7 @@ def update_sale(
         grand_total_paise=computed["grand_total_paise"],
         rate_source=computed.get("rate_source"),
         is_aggregate=bool(computed.get("is_aggregate", existing.get("is_aggregate", False))),
+        **_outward_params(computed, existing.get("bill_number"), existing),
         bill_number=existing.get("bill_number"),
         source_file_hash=existing.get("source_file_hash"),
         source_image_ref=existing.get("source_image_ref"),
@@ -635,6 +807,10 @@ def save_counter_sale(
         created_by=created_by,
         bill_number=serial,
         pharmacy_id=pharmacy_id,
+        # The bill was printed offline and handed over before this call. If
+        # the period has since been filed it is recorded and flagged above,
+        # never refused - the issue list already carries the amendment note.
+        allow_filed_period=True,
     )
 
     _write_sale_lines(sale["id"], lines, pharmacy_id)
@@ -688,6 +864,13 @@ def _write_sale_lines(sale_id: str, lines: "list[dict]", pharmacy_id: str) -> No
             taxable_paise: line.taxable_paise,
             cgst_paise: line.cgst_paise,
             sgst_paise: line.sgst_paise,
+            igst_paise: coalesce(line.igst_paise, 0),
+            // The unit as the portal names it, and what kind of supply the
+            // line is. Table 12 needs a UQC per HSN, and Table 8 needs nil
+            // rated kept apart from exempt - neither of which can be worked
+            // out later from a quantity and a rate.
+            uqc: line.uqc,
+            supply_class: coalesce(line.supply_class, 'TAXABLE'),
             rate_bp: line.rate_bp,
             line_total_paise: line.line_total_paise,
             // Kept whatever the parser made of it. An unrecognised code stored
