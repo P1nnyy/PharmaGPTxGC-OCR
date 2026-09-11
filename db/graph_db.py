@@ -41,6 +41,38 @@ CONSTRAINTS = [
     # The scan ledger. Append-only and never deleted, so that "how many scans
     # have I run" does not fall when an invoice is tidied away.
     "CREATE CONSTRAINT scan_event_id IF NOT EXISTS FOR (n:ScanEvent) REQUIRE n.id IS UNIQUE",
+    # Sales. The dedupe key is the one that matters: it is what makes ingesting
+    # the same day total, bill photo or imported row twice a no-op instead of a
+    # second declaration of the same output tax. Enforced by the database and
+    # not only by the MERGE, because two concurrent requests can both find no
+    # existing node and both create one.
+    "CREATE CONSTRAINT sale_id IF NOT EXISTS FOR (n:Sale) REQUIRE n.id IS UNIQUE",
+    "CREATE CONSTRAINT sale_dedupe_key IF NOT EXISTS FOR (n:Sale) REQUIRE n.dedupe_key IS UNIQUE",
+    # Sales are always read as "this workspace, this period", so both are
+    # indexed; without them every read scans every tenant's sales.
+    "CREATE INDEX sale_scope IF NOT EXISTS FOR (n:Sale) ON (n.pharmacy_id)",
+    "CREATE INDEX sale_period IF NOT EXISTS FOR (n:Sale) ON (n.tax_period)",
+    "CREATE CONSTRAINT sale_rate_block_id IF NOT EXISTS FOR (n:SaleRateBlock) REQUIRE n.id IS UNIQUE",
+    "CREATE CONSTRAINT sale_payment_id IF NOT EXISTS FOR (n:SalePayment) REQUIRE n.id IS UNIQUE",
+    # The filing lock. Keyed on a deterministic "<pharmacy>::<MMYYYY>" string
+    # rather than a composite constraint, matching how Batch does it, since
+    # composite keys need an Aura tier that may not be available.
+    "CREATE CONSTRAINT tax_period_key IF NOT EXISTS FOR (n:TaxPeriod) REQUIRE n.key IS UNIQUE",
+    # A remembered import column mapping, per workspace and format.
+    "CREATE CONSTRAINT import_mapping_key IF NOT EXISTS FOR (n:ImportMapping) REQUIRE n.key IS UNIQUE",
+    # A scanned barcode bound to a product. Keyed "<pharmacy>::<code>" so one
+    # workspace's binding cannot resolve on another's counter.
+    "CREATE CONSTRAINT product_code_key IF NOT EXISTS FOR (n:ProductCode) REQUIRE n.key IS UNIQUE",
+    # The serial counter a device's block is cut from. The uniqueness
+    # constraint is what makes MERGE take a write lock, and that lock is the
+    # only thing standing between two devices and the same invoice number.
+    "CREATE CONSTRAINT serial_series_key IF NOT EXISTS FOR (n:SerialSeries) REQUIRE n.key IS UNIQUE",
+    "CREATE CONSTRAINT serial_block_id IF NOT EXISTS FOR (n:SerialBlock) REQUIRE n.id IS UNIQUE",
+    # Stock movements are an append-only ledger; a sale writes rows here and
+    # never edits one.
+    "CREATE CONSTRAINT stock_movement_id IF NOT EXISTS FOR (n:StockMovement) REQUIRE n.id IS UNIQUE",
+    "CREATE INDEX stock_movement_scope IF NOT EXISTS FOR (n:StockMovement) ON (n.pharmacy_id)",
+    "CREATE CONSTRAINT sale_line_id IF NOT EXISTS FOR (n:SaleLine) REQUIRE n.id IS UNIQUE",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key

@@ -67,19 +67,26 @@ async def read_and_gate(file: UploadFile, page_label: str = "File") -> bytes:
 
 
 async def extract_from_bytes(
-    engine, file_bytes: bytes, filename: Optional[str], bypass_cache: bool
+    engine, file_bytes: bytes, filename: Optional[str], bypass_cache: bool, **engine_kwargs
 ):
     """Runs an extraction engine over one image's bytes via a temp file.
 
     Engines take a path rather than bytes, so the temp file is unavoidable; it
     is removed in a `finally` so a failed extraction does not leak it.
+
+    `engine_kwargs` are passed straight through to the engine. The sales path
+    uses it to ask for a SALE reading; without it that path would need its own
+    copy of the temp-file handling, and two copies of "delete the file even if
+    extraction raised" is one more than is safe.
     """
     suffix = Path(filename or "invoice.jpg").suffix or ".jpg"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         temp_path = tmp.name
     try:
-        return await run_in_threadpool(engine.extract, temp_path, bypass_cache=bypass_cache)
+        return await run_in_threadpool(
+            engine.extract, temp_path, bypass_cache=bypass_cache, **engine_kwargs
+        )
     finally:
         if os.path.exists(temp_path):
             try:

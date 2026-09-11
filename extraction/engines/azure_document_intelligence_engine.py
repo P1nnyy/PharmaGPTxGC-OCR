@@ -2,7 +2,7 @@ import os
 import datetime
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -10,7 +10,7 @@ from azure.core.credentials import AzureKeyCredential
 
 from core.logger import logger
 from extraction.base import DocumentExtractionEngine
-from extraction.normalizers.canonical_invoice import CanonicalInvoice
+from extraction.normalizers.canonical_invoice import CanonicalInvoice, DocumentRole
 from extraction.normalizers.azure_invoice_normalizer import normalize_azure_invoice
 from services import cache_service
 
@@ -36,7 +36,14 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
         save_raw_str = os.environ.get("AZURE_DI_SAVE_RAW", "false").lower().strip()
         self.save_raw = save_raw_str in ("true", "1", "yes")
 
-    def extract(self, document_path: str, bypass_cache: bool = False, **kwargs) -> CanonicalInvoice:
+    def extract(
+        self,
+        document_path: str,
+        bypass_cache: bool = False,
+        document_role: str = DocumentRole.PURCHASE,
+        own_gstin: Optional[str] = None,
+        **kwargs,
+    ) -> CanonicalInvoice:
         """
         Submits the target document to Azure Document Intelligence and normalizes the response.
 
@@ -91,7 +98,7 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
             cached = cache_service.get_cached_azure_response(cache_key)
             if cached is not None:
                 # Normalization intentionally re-runs on the cached response.
-                return normalize_azure_invoice(cached)
+                return normalize_azure_invoice(cached, document_role, own_gstin)
 
         # 5. Cache miss (or forced bypass): instantiate the client and make the
         # billable call.
@@ -129,6 +136,6 @@ class AzureDocumentIntelligenceEngine(DocumentExtractionEngine):
                 pass
                 
         # 8. Normalize raw response payload to the CanonicalInvoice schema
-        canonical_invoice = normalize_azure_invoice(result_dict)
+        canonical_invoice = normalize_azure_invoice(result_dict, document_role, own_gstin)
         return canonical_invoice
 

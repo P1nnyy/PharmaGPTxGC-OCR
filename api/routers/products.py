@@ -6,12 +6,14 @@ router per resource. The handlers are unchanged; only their home is.
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from api.deps import current_user
 from core.logger import logger
 from db import product_repository, product_review
+from db.repositories import audit_repository, product_code_repository
 from enrichment import reference_index, reference_service
 from enrichment import service as enrichment_service
 
@@ -43,6 +45,16 @@ class ProductUpdate(BaseModel):
     # Opt-in to folding into an existing product when the edit turns out to
     # describe one that already exists.
     allow_merge: bool = False
+
+
+class CodeBinding(BaseModel):
+    """A scanned code the user is claiming belongs to a product."""
+
+    value: str
+    # What the scanner said the symbology was, and what the parser made of the
+    # payload. Kept because a GS1 DataMatrix and a plain EAN bound to the same
+    # product are different facts about it.
+    type: Optional[str] = None
 
 
 class BulkConfirm(BaseModel):
@@ -337,6 +349,85 @@ def reference_autofill(payload: ReferenceSuggest):
             ),
         )
     return reference_service.autofill_products(payload.product_ids or None)
+
+
+@router.get("/products/delta")
+def products_delta(since: Optional[str] = Query(None, description="server_time from the last sync.")):
+    """The catalogue changes a device has not seen yet.
+
+    Declared before `/products/{product_id}`, which would otherwise match
+    "delta" as an id.
+    """
+    products, server_time = product_repository.products_changed_since(since)
+    return {
+        "products": products,
+        "server_time": server_time,
+        # A device that has never synced gets everything; saying so lets it
+        # replace its mirror rather than merging into a half-empty one.
+        "full": since is None,
+        "count": len(products),
+    }
+
+
+@router.get("/products/by-code")
+def resolve_product_code(value: str = Query(..., description="The scanned payload, exactly as read.")):
+    """The product a scanned code is bound to.
+
+    Declared before `/products/{product_id}` because FastAPI matches in
+    declaration order and would otherwise read "by-code" as a product id.
+
+    A 404 here is the normal, expected case for a code never seen before — it
+    is what makes the counter offer to bind it rather than an error.
+    """
+    match = product_code_repository.resolve(value)
+    if match is None:
+        raise HTTPException(status_code=404, detail="That code is not bound to a product yet.")
+    return match
+
+
+@router.post("/products/{product_id}/codes", status_code=201)
+def bind_product_code(product_id: str, payload: CodeBinding, user: dict = Depends(current_user)):
+    """Binds a scanned code to a product, so the next scan resolves instantly.
+
+    This is the learning loop the scanner is built around: unrecognised once,
+    known from then on.
+    """
+    if not payload.value or not payload.value.strip():
+        raise HTTPException(status_code=400, detail="A code cannot be empty.")
+    try:
+        result = product_code_repository.bind(
+            product_id, payload.value, payload.type, bound_by=user.get("id")
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    audit_repository.record(
+        action="product.code.bound",
+        actor=user,
+        target_type="Product",
+        target_id=product_id,
+        summary=f"Bound scanned code to {result['product'].get('canonical_name') or product_id}",
+    )
+    return result
+
+
+@router.get("/products/{product_id}/codes")
+def list_product_codes(product_id: str):
+    return {"codes": product_code_repository.codes_for_product(product_id)}
+
+
+@router.delete("/products/codes", status_code=204)
+def unbind_product_code(
+    value: str = Query(..., description="The code to unbind."),
+    user: dict = Depends(current_user),
+):
+    """Removes a binding. A mistyped one has to be undoable."""
+    if not product_code_repository.unbind(value):
+        raise HTTPException(status_code=404, detail="That code is not bound to anything.")
+    audit_repository.record(
+        action="product.code.unbound", actor=user, target_type="ProductCode",
+        target_id=value[:64], summary="Unbound a scanned code",
+    )
 
 
 @router.get("/products/{product_id}")

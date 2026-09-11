@@ -1,6 +1,26 @@
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 
+
+class DocumentRole:
+    """Which side of a supply this document records.
+
+    The same parser reads both, because a pharmacy's own counter bill and the
+    wholesaler's invoice to it are the same kind of object printed by
+    different software. What differs is who "we" are on the page — the buyer
+    on a purchase, the seller on a sale — and that decides whether the tax is
+    input tax or output tax.
+
+    PURCHASE is the default throughout: every caller that predates this read
+    purchase invoices, and a parameter that changed their behaviour by being
+    added would not be additive.
+    """
+
+    PURCHASE = "PURCHASE"
+    SALE = "SALE"
+
+    ALL = {PURCHASE, SALE}
+
 class CanonicalLineItem(BaseModel):
     """
     Standardized line item schema for pharma invoice rows.
@@ -41,6 +61,9 @@ class CanonicalInvoice(BaseModel):
     """
     Canonical invoice schema for mapping multi-engine outputs.
     """
+    # Which side of a supply this is. Parsing does not branch on it; mapping
+    # does, and so does the register the document ends up in.
+    document_role: str = DocumentRole.PURCHASE
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
     seller_name: Optional[str] = None

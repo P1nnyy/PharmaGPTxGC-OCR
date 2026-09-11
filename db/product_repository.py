@@ -845,6 +845,40 @@ def list_products(pharmacy_id: Optional[str] = None) -> list[dict]:
     return products
 
 
+def products_changed_since(
+    since: Optional[str], pharmacy_id: Optional[str] = None
+) -> "tuple[list[dict], str]":
+    """Products touched since a timestamp, plus the cursor for next time.
+
+    A mirrored catalogue on a device has to be refreshed when the network comes
+    back, and re-downloading the whole master every time is the difference
+    between a shop that reconnects in a second and one that reconnects in a
+    minute on a bad line. `since` is the `server_time` from the previous call,
+    so the device never has to reason about clock skew of its own.
+
+    A `since` of None means "send everything" — a first sync, or a device whose
+    local store was cleared.
+    """
+    pharmacy_id = pharmacy_id or current_tenant()
+    driver = get_driver()
+    with driver.session() as session:
+        server_time = session.execute_read(
+            lambda tx: tx.run("RETURN toString(datetime()) AS now").single()["now"]
+        )
+
+    products = list_products(pharmacy_id)
+    if since is None:
+        return products, server_time
+
+    def touched_at(product: dict) -> str:
+        return str(product.get("updated_at") or product.get("created_at") or "")
+
+    # String comparison is safe because both sides are ISO-8601 from the same
+    # database clock.
+    changed = [p for p in products if touched_at(p) > since]
+    return changed, server_time
+
+
 def get_product(product_id: str, pharmacy_id: Optional[str] = None) -> Optional[dict]:
     """Full detail including every line item that fed this product, so the
     reviewer can see the actual invoice rows behind a merge before trusting it."""

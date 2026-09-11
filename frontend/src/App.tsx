@@ -12,6 +12,7 @@ import { SaaSLayout } from './components/SaaSLayout';
 // New User-Facing Pages
 import { DashboardPage } from './pages/DashboardPage';
 import { UploadInvoicePage } from './pages/UploadInvoicePage';
+import { SellPage } from './features/sell';
 import { InvoiceReviewPage } from './pages/InvoiceReviewPage';
 import { InvoiceHistoryPage } from './pages/InvoiceHistoryPage';
 import { ProductsPage } from './pages/ProductsPage';
@@ -82,6 +83,14 @@ export const App: React.FC = () => {
               element={
                 <SaaSLayout>
                   <DashboardPage />
+                </SaaSLayout>
+              }
+            />
+            <Route
+              path="/sell"
+              element={
+                <SaaSLayout>
+                  <SellPage />
                 </SaaSLayout>
               }
             />

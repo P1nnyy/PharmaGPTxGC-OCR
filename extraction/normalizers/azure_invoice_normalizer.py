@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from core.dates import normalize_invoice_date
 from core.gstin import same_state as gstin_same_state
 from core.logger import logger
-from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem
+from extraction.normalizers.canonical_invoice import CanonicalInvoice, CanonicalLineItem, DocumentRole
 from extraction.normalizers.amount_inference import (
     count_best_formula_agreements,
     fill_missing_amounts,
@@ -268,6 +268,61 @@ def resolve_gstin_owners(
         )
         return buyer_gstin, seller_gstin
     return seller_gstin, buyer_gstin
+
+
+def _same_gstin(a: Optional[str], b: Optional[str]) -> bool:
+    """GSTIN equality ignoring how it was spaced or cased on the page."""
+    if not a or not b:
+        return False
+    return str(a).replace(" ", "").upper() == str(b).replace(" ", "").upper()
+
+
+def assign_parties_by_role(
+    document_role: str,
+    seller_gstin: Optional[str],
+    buyer_gstin: Optional[str],
+    own_gstin: Optional[str],
+) -> "tuple[Optional[str], Optional[str], bool]":
+    """Settles which party is the seller, using the shop's own GSTIN.
+
+    `resolve_gstin_owners` above decides this from where the numbers sit on the
+    page, which is the best available answer when nothing else is known. This
+    is the better answer when something else *is* known: we know our own
+    registration, and we know which side of the supply we are on — the buyer on
+    a purchase invoice, the seller on a bill we issued. Matching our number
+    against the two slots turns a layout heuristic into a fact.
+
+    It matters because the direction is not cosmetic. A sale filed as a
+    purchase claims input tax credit on our own output tax.
+
+    Returns `(seller, buyer, swapped)`. With no `own_gstin` to match, whatever
+    the layout heuristic decided stands: inventing a swap on no evidence would
+    trade a rare error for a common one.
+    """
+    if not own_gstin:
+        return seller_gstin, buyer_gstin, False
+
+    ours_is_seller = _same_gstin(seller_gstin, own_gstin)
+    ours_is_buyer = _same_gstin(buyer_gstin, own_gstin)
+    if not (ours_is_seller or ours_is_buyer):
+        # Neither number is ours. Nothing to correct — this may be a document
+        # for a different workspace, which is a problem for the caller to
+        # notice rather than for the parser to paper over.
+        return seller_gstin, buyer_gstin, False
+
+    wants_us_as_seller = document_role == DocumentRole.SALE
+    if wants_us_as_seller and ours_is_buyer:
+        # Our number was read into the customer slot on a bill we issued.
+        # The other slot's value is the counterparty, if there was one.
+        other = seller_gstin if not ours_is_seller else None
+        logger.info("[GSTIN] Sale document: our own registration was in the customer slot; swapping.")
+        return buyer_gstin, other, True
+    if not wants_us_as_seller and ours_is_seller:
+        other = buyer_gstin if not ours_is_buyer else None
+        logger.info("[GSTIN] Purchase document: our own registration was in the vendor slot; swapping.")
+        return other, seller_gstin, True
+
+    return seller_gstin, buyer_gstin, False
 
 
 def is_discount_label(label: str) -> bool:
@@ -1749,10 +1804,24 @@ def _build_line_item(
         bounding_box=row_bbox
     )
 
-def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
+def normalize_azure_invoice(
+    raw_result: dict,
+    document_role: str = DocumentRole.PURCHASE,
+    own_gstin: Optional[str] = None,
+) -> CanonicalInvoice:
     """
     Normalizes a raw Azure Document Intelligence analysis response into CanonicalInvoice format.
     Uses the table extraction grid to retrieve pharmaceutical line items instead of standard fields.
+
+    `document_role` says which side of the supply the document records. Parsing
+    does not branch on it — a bill is laid out the same way whoever issued it,
+    and forking this module per role would double the surface every future
+    reading fix has to be applied to. It changes exactly two things: which
+    party the shop is (with `own_gstin`, see `assign_parties_by_role`), and
+    which register the result is mapped into afterwards.
+
+    Both parameters default to the purchase behaviour that predates them, so
+    every existing caller is unaffected.
     """
     warnings = []
     tables = raw_result.get("tables", [])
@@ -1942,6 +2011,11 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
     seller_gstin = extract_field_value(fields, ["VendorTaxId", "VendorGSTIN"])
     buyer_gstin = extract_field_value(fields, ["CustomerTaxId", "CustomerGSTIN"])
     seller_gstin, buyer_gstin = resolve_gstin_owners(fields, seller_gstin, buyer_gstin)
+    # Refines the layout heuristic above into a fact when we know our own
+    # registration and which side of the supply we are on.
+    seller_gstin, buyer_gstin, _parties_swapped = assign_parties_by_role(
+        document_role, seller_gstin, buyer_gstin, own_gstin
+    )
     seller_address = extract_field_value(fields, ["VendorAddress"])
     buyer_address = extract_field_value(fields, ["CustomerAddress"])
     seller_phone = extract_field_value(fields, ["VendorPhone", "VendorTelephone"])
@@ -2441,6 +2515,7 @@ def normalize_azure_invoice(raw_result: dict) -> CanonicalInvoice:
         raw_engine_metadata["roundoff"] = footer_data["roundoff"]
         
     return CanonicalInvoice(
+        document_role=document_role,
         invoice_number=invoice_number,
         invoice_date=invoice_date,
         seller_name=seller_name,

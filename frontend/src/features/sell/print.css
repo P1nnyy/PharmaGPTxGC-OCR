@@ -1,0 +1,103 @@
+/*
+ * Thermal roll print stylesheet — 58mm and 80mm.
+ *
+ * Two widths because pharmacies own both, and a bill laid out for 80mm
+ * printed on a 58mm roll loses its right-hand column, which is where the
+ * amounts are. The width is a class on the roll, and the matching `@page`
+ * size is injected by the preview component, since `@page` cannot read a
+ * class.
+ *
+ * Printable width is narrower than the roll: 58mm rolls print ~48mm and 80mm
+ * rolls ~72mm, the rest being the feed margin the mechanism needs.
+ */
+
+.bill-roll {
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+  color: #000;
+  background: #fff;
+  margin: 0 auto;
+}
+
+.bill-roll.roll-58 { width: 48mm; font-size: 7.5pt; line-height: 1.32; }
+.bill-roll.roll-80 { width: 72mm; font-size: 8.5pt; line-height: 1.38; }
+
+.bill-roll .bill-centre { text-align: center; }
+.bill-roll .bill-right  { text-align: right; }
+.bill-roll .bill-bold   { font-weight: 700; }
+
+/* A dashed rule reads as a separator on a thermal head, where a hairline
+   solid rule often does not print at all. */
+.bill-roll .bill-rule {
+  border: 0;
+  border-top: 1px dashed #000;
+  margin: 1.2mm 0;
+}
+
+.bill-roll table { width: 100%; border-collapse: collapse; }
+.bill-roll th,
+.bill-roll td { padding: 0.3mm 0; vertical-align: top; }
+.bill-roll th { text-align: left; font-weight: 700; border-bottom: 1px dashed #000; }
+.bill-roll .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* Without this the amount column butts straight up against whatever is to
+     its left, which on a narrow roll reads as one run-together number. */
+  padding-left: 2mm;
+}
+
+/* The HSN/batch/expiry line: smaller, and allowed to wrap on its own row
+   rather than squeezing the columns beside it. */
+.bill-roll .bill-meta { font-size: 0.85em; }
+
+/* The product name is the only thing allowed to wrap; everything else
+   staying on one line is what keeps the columns aligned. */
+.bill-roll .bill-name { word-break: break-word; }
+
+@media print {
+  /*
+   * Only the roll prints.
+   *
+   * `visibility` rather than `display`, and deliberately so: the bill sits
+   * several levels inside the app shell (#root > layout > page > bill), so
+   * hiding body's own children by display would take the bill down with them
+   * and print a blank page. Visibility hides at any depth and is then undone
+   * on the roll and its descendants.
+   */
+  body * { visibility: hidden !important; }
+  .bill-print-root, .bill-print-root * { visibility: visible !important; }
+
+  /*
+   * Lifted out of the app's scroll containers. The shell is a fixed-height
+   * flex layout with overflow hidden, which would otherwise clip a long bill
+   * to one screen's worth and start it partway down the page.
+   */
+  .bill-print-root {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: #fff !important;
+  }
+
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  .bill-roll { margin: 0; }
+
+  /* Screen-only controls take no space as well as being invisible, so they
+     cannot push the roll onto a second sheet. */
+  .bill-no-print { display: none !important; }
+
+  /* Thermal paper is a continuous roll: a page break mid-bill tears the
+     document across two receipts. */
+  .bill-roll, .bill-roll * { page-break-inside: avoid; }
+}

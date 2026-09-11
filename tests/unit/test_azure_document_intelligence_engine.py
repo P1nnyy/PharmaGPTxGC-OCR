@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 from extraction.engines.azure_document_intelligence_engine import AzureDocumentIntelligenceEngine
-from extraction.normalizers.canonical_invoice import CanonicalInvoice
+from extraction.normalizers.canonical_invoice import CanonicalInvoice, DocumentRole
 
 @pytest.fixture
 def clean_env():
@@ -92,7 +92,10 @@ def test_successful_extract(mock_exists, mock_file, mock_normalize, mock_credent
             credential=mock_credential("some-key")
         )
         mock_client_instance.begin_analyze_document.assert_called_once()
-        mock_normalize.assert_called_once_with(mock_dict)
+        # The role is passed explicitly rather than left to the normalizer's
+        # own default, so that a future change to that default cannot silently
+        # start reading purchase invoices as sales.
+        mock_normalize.assert_called_once_with(mock_dict, DocumentRole.PURCHASE, None)
 
 @patch("extraction.engines.azure_document_intelligence_engine.load_dotenv")
 @patch("extraction.engines.azure_document_intelligence_engine.DocumentIntelligenceClient")

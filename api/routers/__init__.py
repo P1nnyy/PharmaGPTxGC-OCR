@@ -18,7 +18,7 @@ Two routers stay public, deliberately:
 from fastapi import APIRouter, Depends
 
 from api.deps import current_user
-from api.routers import auth, health, inventory, invoices, item_types, products, reports, uploads
+from api.routers import auth, health, inventory, invoices, item_types, products, reports, sales, uploads
 
 _authenticated = [Depends(current_user)]
 
@@ -35,5 +35,6 @@ api_router.include_router(products.router, dependencies=_authenticated)
 api_router.include_router(item_types.router, dependencies=_authenticated)
 api_router.include_router(reports.router, dependencies=_authenticated)
 api_router.include_router(inventory.router, dependencies=_authenticated)
+api_router.include_router(sales.router, dependencies=_authenticated)
 
 __all__ = ["api_router"]

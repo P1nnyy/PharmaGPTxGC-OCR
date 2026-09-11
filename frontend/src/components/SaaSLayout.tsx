@@ -16,6 +16,7 @@ import {
   Search,
   Settings,
   Tags,
+  ShoppingCart,
   Trash2, // Destructive database zap icon
   Upload
 } from 'lucide-react';
@@ -49,6 +50,7 @@ export const SaaSLayout: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const menuItems = [
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
+    { name: 'Sell', path: '/sell', icon: ShoppingCart },
     { name: 'Upload Invoice', path: '/upload', icon: Upload },
     { name: 'Invoice History', path: '/history', icon: History },
     { name: 'Products', path: '/catalogue', icon: Tags },
