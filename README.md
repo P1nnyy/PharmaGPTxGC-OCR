@@ -29,6 +29,12 @@ why the outward rows cannot be corrected in 3B at all.
 risk and the rest — including why expiry is really two numbers, and why the
 stock ledger needed a purchase side before any of it was possible.
 
+**Wondering what is due next?** See
+[docs/COMPLIANCE_CALENDAR.md](docs/COMPLIANCE_CALENDAR.md) for the compliance
+calendar — how the schedule branches on filing frequency, the eight-stage
+timeline per period, and the three-year rule that makes an unfiled return
+permanently unfileable. It prepares and tracks; it does not file.
+
 ## Quick Start (local)
 
 ```bash
