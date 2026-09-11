@@ -119,8 +119,16 @@ def close_period(
     question is what was actually sent, and recomputing it from records that
     have moved on since answers a different question.
 
+    **Closing is not filing.** It prepares the return and locks the records
+    behind it; nothing has gone to the portal. `filed_at` is deliberately not
+    set here - it belongs to `compliance_repository.record_filing`, which wants
+    an ARN, because the only evidence a return was actually filed is the
+    acknowledgement number the portal gave back. Setting it on close would make
+    every prepared period claim to have been filed, and the compliance timeline
+    could never tell the two apart.
+
     Idempotent on `closed_at`: closing twice keeps the first timestamp, because
-    the date a return was filed is a fact rather than a counter.
+    the date a period was closed is a fact rather than a counter.
     """
     import json
 
@@ -134,8 +142,6 @@ def close_period(
             SET p.status = $status,
                 p.closed_at = coalesce(p.closed_at, $now),
                 p.closed_by = coalesce(p.closed_by, $closed_by),
-                p.filed_at = coalesce(p.filed_at, $now),
-                p.filed_by = coalesce(p.filed_by, $closed_by),
                 p.payload_json = coalesce(p.payload_json, $payload_json),
                 p.summary_json = coalesce(p.summary_json, $summary_json),
                 p.acknowledged = coalesce(p.acknowledged, $acknowledged),

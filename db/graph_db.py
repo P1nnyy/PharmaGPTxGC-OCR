@@ -85,6 +85,14 @@ CONSTRAINTS = [
     "CREATE INDEX stock_movement_product IF NOT EXISTS FOR (n:StockMovement) ON (n.product_id)",
     "CREATE INDEX stock_movement_batch IF NOT EXISTS FOR (n:StockMovement) ON (n.batch_number)",
     "CREATE INDEX stock_movement_source IF NOT EXISTS FOR (n:StockMovement) ON (n.source_id)",
+    # Filing evidence. Append-only, and read per workspace and period by the
+    # compliance timeline, so both are indexed. The ARN is not unique across
+    # workspaces - two shops can hold acknowledgements from different filings -
+    # so the id carries uniqueness and the ARN is indexed for lookup only.
+    "CREATE CONSTRAINT return_filing_id IF NOT EXISTS FOR (n:ReturnFiling) REQUIRE n.id IS UNIQUE",
+    "CREATE INDEX return_filing_scope IF NOT EXISTS FOR (n:ReturnFiling) ON (n.pharmacy_id)",
+    "CREATE INDEX return_filing_period IF NOT EXISTS FOR (n:ReturnFiling) ON (n.period)",
+    "CREATE INDEX return_filing_arn IF NOT EXISTS FOR (n:ReturnFiling) ON (n.arn)",
 ]
 
 # Constraints from an earlier schema that are actively wrong now. product_key
