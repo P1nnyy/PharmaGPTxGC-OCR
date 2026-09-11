@@ -20,6 +20,7 @@ import { ReportsPage } from './features/reports';
 import { Gstr1Page } from './features/gstr1';
 import { StatutoryPage } from './features/statutory';
 import { ManagementPage } from './features/management';
+import { CompliancePage } from './features/compliance';
 import { SaaSSettingsPage } from './pages/SaaSSettingsPage';
 
 // Old Developer Pages (under debug route)
@@ -172,6 +173,10 @@ export const App: React.FC = () => {
             <Route
               path="/business-reports"
               element={<SaaSLayout><ManagementPage /></SaaSLayout>}
+            />
+            <Route
+              path="/compliance"
+              element={<SaaSLayout><CompliancePage /></SaaSLayout>}
             />
             <Route
               path="/settings"

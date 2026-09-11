@@ -190,12 +190,47 @@ class TestReminders:
         assert tones[1] == "URGENT"
         assert tones[0] == "URGENT"
 
-    def test_an_overdue_return_keeps_reminding_on_one_key(self):
-        due = reminders.due_reminders(items_for(), self.SETTINGS, TODAY)
-        overdue = [r for r in due if r.tone == "OVERDUE"]
+    def test_an_overdue_return_keeps_reminding(self):
+        # Three days after September's GSTR-1 was due, inside the daily week.
+        day = date(2026, 10, 11) + timedelta(days=3)
+        due = reminders.due_reminders(items_for(), self.SETTINGS, day)
+        overdue = [r for r in due if r.tone == "OVERDUE" and r.period == "092026"]
         assert overdue
-        assert len({r.key for r in overdue}) == len(overdue)
-        assert all(r.key.endswith(":OVERDUE") for r in overdue)
+        assert "3 days late" in overdue[0].message
+        # One key per obligation per day, so asking twice on the same day does
+        # not send twice, but a later day does.
+        assert all(":OVERDUE:" in r.key for r in due if r.tone == "OVERDUE")
+        assert len({r.key for r in due}) == len(due)
+
+    def test_overdue_reminders_back_off_after_the_first_week(self):
+        # The preview showed what daily-forever produced: a shop with eight
+        # late returns got eight notifications every single day, which is the
+        # fatigue the whole design exists to avoid.
+        completion = {
+            (p, k): {"is_done": True}
+            for p in ("042026", "052026", "062026", "072026", "082026")
+            for k in (GSTR1, GSTR3B)
+        }
+        items = items_for(completion=completion)
+        due_date = date(2026, 10, 11)  # September's GSTR-1
+
+        def fires(days_late: int) -> bool:
+            day = due_date + timedelta(days=days_late)
+            return any(
+                r.period == "092026" and r.kind == GSTR1
+                for r in reminders.due_reminders(items, self.SETTINGS, day)
+            )
+
+        assert all(fires(n) for n in range(1, 8)), "should fire daily for the first week"
+        assert fires(14) and fires(21), "then weekly"
+        assert not fires(9) and not fires(16), "and not on the days between"
+
+    def test_the_backoff_cuts_the_volume_it_was_added_for(self):
+        # A blunt guard on the rule above: whatever else changes, a month of
+        # overdue returns must not produce hundreds of notifications.
+        items = items_for()
+        volume = len(reminders.preview(items, {"days_before": [7, 3, 1, 0]}, TODAY, 45))
+        assert volume < 150, f"{volume} reminders in 45 days is fatigue, not a calendar"
 
     def test_an_approaching_bar_overrides_the_chosen_offsets(self):
         # A return weeks from being unfileable matters more than the schedule,

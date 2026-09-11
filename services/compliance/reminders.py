@@ -35,6 +35,11 @@ TONE_URGENT = "URGENT"
 TONE_OVERDUE = "OVERDUE"
 TONE_FINAL = "FINAL"
 
+# How an overdue reminder backs off: every day for the first week, then once a
+# week. Daily forever is how a useful warning becomes something people filter.
+OVERDUE_DAILY_DAYS = 7
+OVERDUE_WEEKLY_EVERY = 7
+
 
 def _tone(days_before: int, days_remaining: int) -> str:
     if days_remaining < 0:
@@ -146,11 +151,20 @@ def due_reminders(items: list, settings: dict, today: date) -> list:
             continue
 
         # An overdue return keeps reminding, because the late fee keeps
-        # accruing - but only once a day, on the same key.
+        # accruing - but it backs off. Daily for the first week, then weekly.
+        #
+        # This rule exists because the preview showed what the obvious one
+        # produced: a shop with eight late returns got eight notifications
+        # every single day, which is the fatigue the whole design is trying to
+        # avoid. The first week is when somebody is most likely to act; after
+        # that a daily repeat has stopped being information and become noise.
         if days_remaining < 0:
+            days_late = -days_remaining
+            if days_late > OVERDUE_DAILY_DAYS and days_late % OVERDUE_WEEKLY_EVERY:
+                continue
             due.append(
                 Reminder(
-                    key=f"{obligation.period}:{obligation.kind}:OVERDUE",
+                    key=f"{obligation.period}:{obligation.kind}:OVERDUE:{days_late}",
                     kind=obligation.kind, period=obligation.period,
                     label=obligation.label, due_date=obligation.due_date.isoformat(),
                     days_remaining=days_remaining, tone=TONE_OVERDUE,

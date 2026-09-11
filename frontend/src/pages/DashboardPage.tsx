@@ -6,7 +6,10 @@ import {
 } from 'lucide-react';
 
 import { managementApi } from '../features/management/api';
+import { complianceApi } from '../features/compliance/api';
+import { NextActionBanner } from '../features/compliance';
 import type { DashboardCard, DashboardReport } from '../features/management/types';
+import type { NextAction } from '../features/compliance/types';
 
 /**
  * Four cards, each one a number somebody can act on.
@@ -113,6 +116,7 @@ const Card: React.FC<{ card: DashboardCard }> = ({ card }) => {
 
 export const DashboardPage: React.FC = () => {
   const [report, setReport] = useState<DashboardReport | null>(null);
+  const [next, setNext] = useState<NextAction | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -121,6 +125,16 @@ export const DashboardPage: React.FC = () => {
     setError(null);
     try {
       setReport(await managementApi.dashboard());
+      // Deliberately one thing, not a list. The calendar lives on its own
+      // page; what belongs here is the single next action and how long is
+      // left, because that is the only part somebody acts on from the home
+      // screen. Fetched separately so a calendar failure cannot take the
+      // whole dashboard down with it.
+      try {
+        setNext(await complianceApi.nextAction());
+      } catch {
+        setNext(null);
+      }
     } catch (caught) {
       // Say the load failed rather than rendering zeroes, which would read as
       // "no sales, no stock, nothing expiring" - a very different claim.
@@ -165,6 +179,10 @@ export const DashboardPage: React.FC = () => {
           <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
           {error}
         </div>
+      )}
+
+      {next && !loading && (
+        <NextActionBanner action={next.next_action} note={next.note} />
       )}
 
       {report && !loading && (
