@@ -1378,6 +1378,7 @@ export const InvoiceReviewPage: React.FC = () => {
       isCriticalItemMissing(item, 'quantity') ||
       isCriticalItemMissing(item, 'amount')
     ).length,
+    hsnCodes: lineItems.map((item) => item.hsn ?? ''),
     derivedAmounts: lineItems.filter((item) => item.is_suggested_amount).length,
     receivedQuantity: quantityTally.received,
     statedQuantity: toNumberOrNull(header.total_quantity),

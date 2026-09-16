@@ -46,6 +46,12 @@ export interface CheckInputs {
   itemCount: number;
   /** Rows missing at least one field a pharmacist needs. */
   itemsWithGaps: number;
+  /**
+   * The HSN on each row, exactly as it sits in the box. Raw rather than
+   * cleaned: a stray character is the evidence, so stripping it here would
+   * throw away the thing worth showing.
+   */
+  hsnCodes: string[];
   /** Rows whose amount was worked out rather than read off the page. */
   derivedAmounts: number;
   /** Billed + free across every row, or null when a row has no quantity. */
@@ -277,6 +283,84 @@ export function buildInvoiceChecks(input: CheckInputs): InvoiceCheck[] {
           ? `${input.itemsWithGaps} of ${input.itemCount} rows are missing a name, batch, HSN, quantity or amount.`
           : `All ${input.itemCount} rows have a name, batch, HSN, quantity and amount.`,
   });
+
+  // ---- 3b. Are the HSN codes shaped like HSN codes? ----
+  //
+  // Its own chip rather than another way for "Item details" to go amber,
+  // because a present-but-wrong code and a missing one need different work:
+  // one is a cell to re-read against the scan, the other is a cell to fill.
+  //
+  // An HSN is 4, 6 or 8 digits and nothing else. Real damage off real scans
+  // looks like `3004901` (a digit dropped), `3004906@` and `CAPI69099` (the
+  // column bleeding into its neighbour) - each of which reads as a plausible
+  // code at a glance and none of which the portal will take.
+  //
+  // Whether a well-formed code is one GSTN actually lists is a separate
+  // question and not one to answer here: the master is 21,928 codes and does
+  // not belong in a browser. The return refuses an unlisted code at filing,
+  // where the whole list is.
+  {
+    const entered = input.hsnCodes.filter((code) => code && code.trim());
+    const malformed = entered.filter((code) => {
+      const digits = code.replace(/\D/g, '');
+      return digits.length !== 4 && digits.length !== 6 && digits.length !== 8;
+    });
+    const stray = entered.filter(
+      (code) => /\D/.test(code.trim()) && !malformed.includes(code),
+    );
+    const missing = input.itemCount - entered.length;
+
+    // Named, not just counted: "2 rows" sends the reviewer down the table
+    // looking, where the code itself is usually enough to spot the row.
+    const sample = (codes: string[]): string => {
+      const shown = codes.slice(0, 3).map((c) => `"${c.trim()}"`).join(', ');
+      return codes.length > 3 ? `${shown} and ${codes.length - 3} more` : shown;
+    };
+
+    if (input.itemCount === 0) {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'unknown',
+        detail: 'No line items on this invoice yet.',
+      });
+    } else if (malformed.length > 0) {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'fail',
+        detail: `${sample(malformed)} ${malformed.length === 1 ? 'is not' : 'are not'} 4, 6 or 8 digits, so the portal will not accept ${malformed.length === 1 ? 'it' : 'them'}. Check ${malformed.length === 1 ? 'that cell' : 'those cells'} against the scan.`,
+      });
+    } else if (stray.length > 0) {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'warn',
+        detail: `${sample(stray)} ${stray.length === 1 ? 'carries a character that is not a digit' : 'carry characters that are not digits'} — the right length, so probably readable, but worth confirming.`,
+      });
+    } else if (entered.length === 0) {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'warn',
+        detail: `No row on this invoice has an HSN. It is mandatory on a B2B supply whatever the turnover, and Table 12 cannot be built without it.`,
+      });
+    } else if (missing > 0) {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'warn',
+        detail: `${entered.length} of ${input.itemCount} rows have an HSN, and all of those are well formed. HSN is mandatory on a B2B supply whatever the turnover.`,
+      });
+    } else {
+      checks.push({
+        id: 'hsn',
+        label: 'HSN codes',
+        status: 'pass',
+        detail: `All ${input.itemCount} rows carry a 4, 6 or 8 digit HSN.`,
+      });
+    }
+  }
 
   // ---- 4. Can this purchase be attributed and filed? ----
   //
