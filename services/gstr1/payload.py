@@ -161,12 +161,38 @@ def _nil_section(rows: list) -> dict:
     }
 
 
+# The portal's HSN description field. Thirty characters is the schema's
+# limit, not a display choice.
+_HSN_DESC_MAX = 30
+
+
+def _hsn_description(code: str) -> str:
+    """The master's description, cut to what the schema will take.
+
+    GSTN publishes the tariff text, which is long and in capitals -
+    `3004` is 260 characters of "MEDICAMENTS (EXCLUDING GOODS OF HEADING
+    3002, 3005 OR 3006) CONSISTING OF...". Thirty characters of that is
+    always a fragment; the only choice is whether it is a fragment that ends
+    on a word. Cutting on the space reads as an abbreviation rather than as a
+    truncation bug, and the field is informational anyway - `hsn_sc` is what
+    the portal matches on.
+    """
+    text = describe(code) or ""
+    if len(text) <= _HSN_DESC_MAX:
+        return text
+    clipped = text[:_HSN_DESC_MAX]
+    spaced, _, _ = clipped.rpartition(" ")
+    # A single word longer than the field gets cut mid-word; there is nowhere
+    # else to cut it.
+    return (spaced or clipped).rstrip(" ,;:(-")
+
+
 def _hsn_rows(rows: list) -> list:
     return [
         {
             "num": index,
             "hsn_sc": row.hsn,
-            "desc": (describe(row.hsn) or "")[:30],
+            "desc": _hsn_description(row.hsn),
             "uqc": row.uqc,
             "qty": float(row.quantity),
             "rt": rate_percent(row.rate_bp),

@@ -472,6 +472,22 @@ class TestPayload:
         assert counter["cancel"] == 1
         assert counter["net_issue"] == 5
 
+    def test_hsn_descriptions_fit_the_portals_field(self, result):
+        # GSTN's own tariff text runs to hundreds of characters and the
+        # schema's desc field takes thirty. Every row has to fit, and none of
+        # them should end mid-word.
+        rows = result.payload["hsn"]["hsn_b2c"] + result.payload["hsn"]["hsn_b2b"]
+        assert rows
+        for row in rows:
+            assert len(row["desc"]) <= 30
+            assert not row["desc"].endswith(" ")
+
+    def test_a_long_tariff_description_is_cut_on_a_word(self, result):
+        row = next(r for r in result.payload["hsn"]["hsn_b2c"] if r["hsn_sc"] == "3004")
+        # The master's text for 3004 opens "MEDICAMENTS (EXCLUDING GOODS OF
+        # HEADING 3002, ...". Thirty characters lands inside "OF".
+        assert row["desc"] == "MEDICAMENTS (EXCLUDING GOODS"
+
     def test_is_serialisable_as_json(self, result):
         import json
         assert json.loads(json.dumps(result.payload))["fp"] == "092026"
