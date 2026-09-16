@@ -52,6 +52,16 @@ class ShopProfileRequest(BaseModel):
     pincode: Optional[str] = None
     phone: Optional[str] = None
     contact_email: Optional[str] = None
+    # Tax identity. The repository has always accepted these; nothing could
+    # send them, so every shop ran on the defaults - and the defaults are
+    # chosen to be safe rather than to be right. An unset filing frequency
+    # blocks a period from closing, and an unset HSN policy files six digits
+    # at a shop that owes four. Both are declarations only the shop can make.
+    filing_frequency: Optional[str] = None
+    hsn_digit_policy: Optional[str] = None
+    aato_paise: Optional[int] = None
+    aato_financial_year: Optional[int] = None
+    aato_source: Optional[str] = None
 
 
 class InviteRequest(BaseModel):
