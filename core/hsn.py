@@ -25,6 +25,7 @@ when there is no mapping — a wrong unit on a filed return is a wrong return.
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -40,9 +41,36 @@ AATO_SIX_DIGIT_THRESHOLD_PAISE = 5_00_00_000_00
 # has to be looked up.
 HSN_DIGIT_POLICIES = {"FOUR_DIGIT": 4, "SIX_DIGIT": 6}
 
+# The lengths Table 12 accepts. A chapter heading is two digits and is in
+# GSTN's master, but no return has ever been filed on one.
+FILABLE_LENGTHS = (4, 6, 8)
+
+# How a code was matched against the master.
+EXACT = "EXACT"                    # the code itself is listed
+PARENT_MATCHED = "PARENT_MATCHED"  # a longer code, reported under its parent
+
 
 class HsnError(ValueError):
     """Raised when an HSN or UQC cannot be accepted."""
+
+
+@dataclass(frozen=True)
+class HsnResolution:
+    """What was given, what will be filed, and how the two are related.
+
+    `code` is what the distributor printed and `reported` is what goes into
+    Table 12. They differ only on a roll-up, and keeping both is the point:
+    the return needs the parent, and anyone auditing the return needs to see
+    the code the line actually carried.
+    """
+
+    code: str
+    reported: str
+    match: str
+
+    @property
+    def rolled_up(self) -> bool:
+        return self.match == PARENT_MATCHED
 
 
 def _load(name: str) -> dict:
@@ -110,18 +138,30 @@ def policy_for_aato(aato_paise: Optional[int]) -> str:
     return "SIX_DIGIT" if aato_paise > AATO_SIX_DIGIT_THRESHOLD_PAISE else "FOUR_DIGIT"
 
 
-def validate_hsn(code: Optional[str], required_digits: int = 4) -> str:
-    """Returns the normalised code, or explains precisely what is wrong.
+def resolve_hsn(code: Optional[str], required_digits: int = 4) -> HsnResolution:
+    """Works out what a line's code will be filed as, or refuses it.
 
     Length is checked before membership so that a shop reporting `3004` when it
     owes six digits is told about the digits — which it can fix by picking a
     more specific code — rather than being told its code is unknown, which it
     is not.
+
+    A code longer than the shop files at is rolled up to its parent. A
+    distributor prints `30049079` because the customs tariff is eight digits
+    deep; a shop under ₹5 crore files `3004`. Those are the same
+    classification stated at two depths, and rejecting the line would be
+    rejecting a *correct* code for being too precise — which is what this
+    module did until the master was the full GSTN list and the problem became
+    visible on real invoices.
+
+    Roll-up only ever goes towards fewer digits, and only onto a parent GSTN
+    actually lists. Inventing `3099` to accommodate `30999999` would be the
+    guess this module exists to prevent.
     """
     normalized = normalize_hsn(code)
     if not normalized:
         raise HsnError("No HSN code.")
-    if len(normalized) not in (4, 6, 8):
+    if len(normalized) not in FILABLE_LENGTHS:
         raise HsnError(
             f"{normalized!r} is {len(normalized)} digits. An HSN is 4, 6 or 8 digits."
         )
@@ -130,12 +170,37 @@ def validate_hsn(code: Optional[str], required_digits: int = 4) -> str:
             f"{normalized!r} is {len(normalized)} digits, but this shop reports HSN at "
             f"{required_digits}. Choose a more specific code."
         )
-    if normalized not in _master():
-        raise HsnError(
-            f"{normalized!r} is not in the GSTN master list, so the portal will not "
-            "accept it. Check the product's classification."
+
+    parent = normalized[:required_digits]
+    if parent != normalized and parent in _master():
+        return HsnResolution(code=normalized, reported=parent, match=PARENT_MATCHED)
+
+    if normalized in _master():
+        # Listed, but its parent is not - which GSTN's own list does not do.
+        # Filing the longer code is legal, since more digits than owed are
+        # always accepted, so a code this specific is reported as it stands
+        # rather than refused over a gap in the hierarchy above it.
+        return HsnResolution(code=normalized, reported=normalized, match=EXACT)
+
+    raise HsnError(
+        f"{normalized!r} is not in the GSTN master list"
+        + (
+            f", and nor is {parent!r}, the {required_digits}-digit code it would be "
+            "reported under. "
+            if parent != normalized
+            else ", so the portal will not accept it. "
         )
-    return normalized
+        + "Check the product's classification."
+    )
+
+
+def validate_hsn(code: Optional[str], required_digits: int = 4) -> str:
+    """The code that will be filed, or an explanation of what is wrong.
+
+    Returns the *reported* code, so a rolled-up line hands back the parent
+    rather than the eight-digit code that was passed in.
+    """
+    return resolve_hsn(code, required_digits).reported
 
 
 # ------------------------------------------------------------------ UQC

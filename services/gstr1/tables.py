@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Iterable, Optional
 
-from core.hsn import normalize_hsn
+from core.hsn import HsnError, normalize_hsn, resolve_hsn
 from services.gstr1.model import (
     DocumentStatus,
     DocumentType,
@@ -423,6 +423,11 @@ class HsnRow:
     cess_paise: int = 0
     supply_class: str = SupplyClass.TAXABLE
     document_ids: list = field(default_factory=list)
+    # The longer codes summed into this row, when the shop files at fewer
+    # digits than its distributors print. Kept so the review screen can show
+    # what a row is made of - a reported `3004` that silently swallowed an
+    # `30049079` nobody recognised is exactly the kind of thing worth seeing.
+    rolled_up_from: list = field(default_factory=list)
 
     @property
     def total_value_paise(self) -> int:
@@ -445,7 +450,7 @@ class HsnSummary:
     documents_without_lines: list = field(default_factory=list)
 
 
-def aggregate_hsn(documents: Iterable[OutwardDocument]) -> HsnSummary:
+def aggregate_hsn(documents: Iterable[OutwardDocument], required_digits: int = 6) -> HsnSummary:
     """Table 12, recomputed from line items and split B2B from B2C.
 
     Never from a stored summary. A stored aggregate was correct when it was
@@ -455,6 +460,15 @@ def aggregate_hsn(documents: Iterable[OutwardDocument]) -> HsnSummary:
     Rows are keyed on HSN, UQC and rate together, because that is how the
     portal keys them: the same code sold at two rates, or in two units, is two
     rows and not one.
+
+    Rows are keyed on the code as *reported*, not as printed. A shop filing at
+    four digits sells seventy different eight-digit codes under `3004`, and
+    keying on what the distributor printed would turn one Table 12 row into
+    seventy - each a legal code, and collectively a summary nobody can check
+    against anything. A code that rolls up is summed into its parent's row;
+    one that cannot be resolved keeps the code it came with, because dropping
+    it would understate the table and the validation report is where an
+    unresolvable code gets raised.
 
     A document with no lines cannot contribute. Day totals are the usual case,
     and they are collected rather than ignored so the report can say the HSN
@@ -498,15 +512,26 @@ def aggregate_hsn(documents: Iterable[OutwardDocument]) -> HsnSummary:
                     }
                 )
 
-            key = (hsn, line.uqc, line.rate_bp)
+            # What the line will be filed as. An unresolvable code falls back
+            # to itself so the row still carries its money; validation is what
+            # stops the period closing on it.
+            try:
+                resolution = resolve_hsn(hsn, required_digits)
+                reported, rolled_up = resolution.reported, resolution.rolled_up
+            except HsnError:
+                reported, rolled_up = hsn, False
+
+            key = (reported, line.uqc, line.rate_bp)
             row = rows.get(key)
             if row is None:
                 row = rows[key] = HsnRow(
-                    hsn=hsn,
+                    hsn=reported,
                     uqc=line.uqc,
                     rate_bp=line.rate_bp,
                     supply_class=line.supply_class,
                 )
+            if rolled_up and hsn not in row.rolled_up_from:
+                row.rolled_up_from.append(hsn)
             row.quantity += sign * to_quantity(line.quantity)
             row.taxable_paise += sign * line.taxable_paise
             row.cgst_paise += sign * line.cgst_paise

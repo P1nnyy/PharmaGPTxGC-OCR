@@ -15,7 +15,7 @@ row whose unit is unknown is a row that will be rejected. Knowing which rows
 those are before the return goes is the whole point of the column.
 """
 
-from core.hsn import describe, is_known, normalize_hsn, normalize_uqc
+from core.hsn import FILABLE_LENGTHS, describe, is_known, normalize_hsn, normalize_uqc
 from services.statutory.model import Drill, DrillKind, Figure, ReportRow
 
 # What is known about a row's unit.
@@ -31,6 +31,12 @@ HSN_MISSING = "MISSING"
 def _hsn_status(code: str) -> str:
     if not code:
         return HSN_MISSING
+    # Being in the master is necessary and not sufficient. GSTN's list carries
+    # the 98 two-digit chapter headings, and Table 12 has never accepted one,
+    # so length is checked as well - otherwise a line filed under "30" would
+    # report as ready to file.
+    if len(code) not in FILABLE_LENGTHS:
+        return HSN_NOT_IN_MASTER
     return HSN_VALID if is_known(code) else HSN_NOT_IN_MASTER
 
 

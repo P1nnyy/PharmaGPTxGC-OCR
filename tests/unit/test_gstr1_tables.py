@@ -363,6 +363,47 @@ class TestHsnTable12:
     def test_normalises_a_punctuated_code(self):
         assert aggregate_hsn([bill("A", taxable_line(100_00, hsn="3004.90"))]).b2c[0].hsn == "300490"
 
+    def test_rolls_distributor_codes_up_into_one_row_for_a_four_digit_filer(self):
+        # Three eight-digit codes off three suppliers' invoices, all of them
+        # real chapter-30 codes, all of them 3004. A shop under ₹5 crore files
+        # one row, not three - and the money has to survive the merge.
+        summary = aggregate_hsn(
+            [
+                bill("A", taxable_line(100_00, hsn="30049079", uqc="TBS")),
+                bill("B", taxable_line(200_00, hsn="30049069", uqc="TBS")),
+                bill("C", taxable_line(300_00, hsn="30049039", uqc="TBS")),
+            ],
+            required_digits=4,
+        )
+        assert len(summary.b2c) == 1
+        row = summary.b2c[0]
+        assert row.hsn == "3004"
+        assert row.taxable_paise == 600_00
+        assert sorted(row.rolled_up_from) == ["30049039", "30049069", "30049079"]
+
+    def test_the_reported_length_follows_the_shop_not_the_invoice(self):
+        # The same three codes, filed by a shop that owes six digits. They all
+        # sit under 300490, so it is still one row - but reported six deep,
+        # because that is this shop's obligation and the roll-up stops there.
+        lines = [
+            bill("A", taxable_line(100_00, hsn="30049079", uqc="TBS")),
+            bill("B", taxable_line(200_00, hsn="30049069", uqc="TBS")),
+            bill("C", taxable_line(300_00, hsn="30049039", uqc="TBS")),
+        ]
+        assert [r.hsn for r in aggregate_hsn(lines, required_digits=6).b2c] == ["300490"]
+        assert [r.hsn for r in aggregate_hsn(lines, required_digits=4).b2c] == ["3004"]
+
+    def test_an_unresolvable_code_keeps_its_money_in_the_table(self):
+        # 3099 is not a heading, so 30999999 cannot roll up. The row still
+        # carries its taxable value - dropping it would understate Table 12
+        # and the validation report is what stops the period closing.
+        summary = aggregate_hsn(
+            [bill("A", taxable_line(100_00, hsn="30999999"))], required_digits=4
+        )
+        assert [r.hsn for r in summary.b2c] == ["30999999"]
+        assert summary.b2c[0].taxable_paise == 100_00
+        assert summary.b2c[0].rolled_up_from == []
+
 
 class TestDocumentsIssuedTable13:
     def series(self, *documents):

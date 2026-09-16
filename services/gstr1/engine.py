@@ -56,12 +56,15 @@ class Gstr1Return:
         return self.totals.get("supplies_paise", 0) == 0 and not self.tables["b2b"]
 
 
-def build_tables(documents: Iterable[OutwardDocument]) -> dict:
+def build_tables(documents: Iterable[OutwardDocument], hsn_digits: int = 6) -> dict:
     """Every table, in dependency order.
 
     B2CL is computed before B2CS because a bill reported invoice-wise in
     Table 5 must not also be summed into the Table 7 aggregate - that would
     report the same supply twice.
+
+    `hsn_digits` is the shop's own reporting obligation, and only Table 12
+    cares: it decides the digit length a longer code is rolled up to.
     """
     documents = list(documents)
     b2cl = aggregate_b2cl(documents)
@@ -72,7 +75,7 @@ def build_tables(documents: Iterable[OutwardDocument]) -> dict:
         "b2cl": b2cl,
         "b2cs": aggregate_b2cs(documents, b2cl_document_ids=b2cl_ids),
         "nil_exempt": aggregate_nil_exempt(documents),
-        "hsn": aggregate_hsn(documents),
+        "hsn": aggregate_hsn(documents, required_digits=hsn_digits),
         "documents": aggregate_documents_issued(documents),
     }
 
@@ -127,7 +130,7 @@ def compute(
 ) -> Gstr1Return:
     """Aggregate, validate and shape a period's return. Changes nothing."""
     documents = list(documents)
-    tables = build_tables(documents)
+    tables = build_tables(documents, hsn_digits=identity.get("hsn_digits", 6))
     report = build_report(
         documents,
         tables,
