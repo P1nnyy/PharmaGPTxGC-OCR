@@ -63,9 +63,25 @@ www.{$DOMAIN} {
 	# ahead of reverse_proxy - so /health was rewritten to /index.html and
 	# the API returned the SPA's HTML instead of JSON.
 	#
-	# Every path here mirrors the frontend's dev proxy
-	# (frontend/vite.config.ts), so "works in dev" and "works in prod" mean
-	# the same routing.
+	# /api* is the namespace the backend is moving to: a single prefix for the
+	# whole API, so the SPA's client-side routes can never collide with an
+	# endpoint. That collision is not hypothetical - /reports and /compliance
+	# are each both a page and an API prefix, and whichever one the edge
+	# routes, the other breaks.
+	#
+	# It is listed first and matches nothing on this branch, whose backend
+	# still answers on the bare paths below. That is deliberate: it makes the
+	# edge correct before the /api backend merges, in either order. Once that
+	# backend is in, delete the bare-path handles - they are the coupling /api
+	# exists to remove, since each one is a path the SPA may never use as a
+	# page route.
+	handle /api* {
+		reverse_proxy backend:8000
+	}
+
+	# Legacy bare paths, superseded by /api* above. Each mirrors an entry in
+	# the frontend's dev proxy (frontend/vite.config.ts), so "works in dev"
+	# and "works in prod" mean the same routing.
 	handle /health* {
 		reverse_proxy backend:8000
 	}
@@ -103,6 +119,30 @@ www.{$DOMAIN} {
 	# Sign-in and account management. Slash form so /auth stays free as a
 	# client-side route, same as /reports.
 	handle /auth/* {
+		reverse_proxy backend:8000
+	}
+
+	# The outward-return surface: GSTR-1 periods, the compliance calendar, the
+	# statutory report pack and the management reports.
+	#
+	# Every one of these is the slash form, and for /statutory that is not
+	# caution but a requirement: the SPA's page route is /statutory-reports,
+	# which `handle /statutory*` would match and hand to the backend, taking
+	# the page down to serve JSON. /compliance is a page route in its own
+	# right for the same reason. The API is only ever called on a subpath.
+	handle /tax-periods/* {
+		reverse_proxy backend:8000
+	}
+
+	handle /compliance/* {
+		reverse_proxy backend:8000
+	}
+
+	handle /statutory/* {
+		reverse_proxy backend:8000
+	}
+
+	handle /management/* {
 		reverse_proxy backend:8000
 	}
 
